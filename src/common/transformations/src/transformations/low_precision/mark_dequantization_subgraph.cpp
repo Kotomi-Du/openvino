@@ -9,6 +9,7 @@
 #include "openvino/op/reshape.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/unsqueeze.hpp"
+#include "openvino/op/util/precision_sensitive_attribute.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/pattern/op/optional.hpp"
 #include "openvino/pass/pattern/op/pattern.hpp"
@@ -307,5 +308,64 @@ ov::pass::KeepConstPrecision::KeepConstPrecision(const element::TypeVector& prec
     };
 
     auto m = std::make_shared<Matcher>(multiply_pattern, "KeepConstPrecision");
+    this->register_matcher(m, callback);
+}
+
+ov::pass::KeepDequantizationPrecision::KeepDequantizationPrecision(const element::TypeVector& precisions) {
+    MATCHER_SCOPE(KeepDequantizationPrecision);
+
+    auto input_pattern = any_input(pattern::type_matches_any(precisions));
+    auto convert_pattern = pattern::wrap_type<v0::Convert>({input_pattern}, pattern::consumers_count(1));
+
+    // zero points:
+    auto zp_pattern = any_input();
+    auto zp_convert_pattern = pattern::optional<v0::Convert>(zp_pattern);
+    auto zp_reshape_pattern = pattern::optional<v1::Reshape, v0::Unsqueeze>({zp_convert_pattern, any_input()});
+    auto subtract_pattern = pattern::optional<v1::Subtract>({convert_pattern, zp_reshape_pattern});
+
+    // scale:
+    auto scale_pattern = any_input();
+    auto scale_convert_pattern = pattern::optional<v0::Convert>(scale_pattern);
+    auto scale_reshape_pattern = pattern::optional<v1::Reshape, v0::Unsqueeze>({scale_convert_pattern, any_input()});
+    auto multiply_pattern = pattern::wrap_type<v1::Multiply>({subtract_pattern, scale_reshape_pattern});
+
+    matcher_pass_callback callback = [=](Matcher& m) {
+        const auto& pt_map = m.get_pattern_value_map();
+        auto multiply = m.get_match_root();
+
+        if (transformation_callback(multiply)) {
+            return false;
+        }
+
+        auto nodes_to_mark = {convert_pattern,
+                              multiply_pattern,
+                              subtract_pattern,
+                              zp_convert_pattern,
+                              zp_reshape_pattern,
+                              scale_convert_pattern,
+                              scale_reshape_pattern};
+
+        for (const auto& node_to_mark : nodes_to_mark) {
+            if (pt_map.count(node_to_mark)) {
+                auto node_ptr = pt_map.at(node_to_mark).get_node_shared_ptr();
+                disable_fp16_compression(node_ptr);
+            }
+        }
+        
+        auto multiply_users = multiply->get_users();
+        for (const auto& user : multiply_users) {
+            for (size_t idx = 0; idx < user->inputs().size(); ++idx) {
+                if (user->get_input_node_shared_ptr(idx) == multiply) {
+                    auto new_convert = std::make_shared<v0::Convert>(multiply, multiply->get_output_element_type(0));
+                    ov::mark_as_precision_sensitive(new_convert->input(0));
+                    user->input(idx).replace_source_output(new_convert->output(0));
+                }
+            }
+        }
+
+        return true;
+    };
+
+    auto m = std::make_shared<Matcher>(multiply_pattern, "KeepDequantizationPrecision");
     this->register_matcher(m, callback);
 }
