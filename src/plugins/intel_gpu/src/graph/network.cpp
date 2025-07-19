@@ -56,6 +56,9 @@
 #include <thread>
 #endif
 
+#include <windows.h>
+#include <psapi.h>
+
 namespace cldnn {
 namespace {
 
@@ -539,8 +542,21 @@ layout network::get_output_layout(const primitive_id& output_id) const {
 void network::allocate_primitives() {
     GPU_DEBUG_DEFINE_MEM_LOGGER("allocate_primitives");
     const auto& ao = _program->get_allocating_order();
+    PROCESS_MEMORY_COUNTERS memInfo1;
+    PROCESS_MEMORY_COUNTERS memInfo2;
     for (auto& node_id : ao) {
+
+        if (node_id.find("dynamicquantize:DynamicQuantize_233945") !=std::string::npos)
+        {
+            std::cout << "debug";
+            GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+        }
         allocate_primitive_instance(_program->get_node(node_id));
+        if (node_id.find("dynamicquantize:DynamicQuantize_233945") != std::string::npos) {
+            GetProcessMemoryInfo(GetCurrentProcess(), &memInfo2, sizeof(memInfo2));
+        std::cout << node_id << " outside:" << (memInfo2.WorkingSetSize - memInfo1.WorkingSetSize) / 1024 << " KB" << std::endl;
+        }
+        
     }
 
     auto& po = _program->get_processing_order();
@@ -924,7 +940,20 @@ void network::allocate_primitive_instance(program_node const& node) {
 
     GPU_DEBUG_TRACE_DETAIL << node.id() << ": allocate primitive instance" << std::endl;
 
+     PROCESS_MEMORY_COUNTERS memInfo1;
+     PROCESS_MEMORY_COUNTERS memInfo2;
+    
+         if (node.id().find("dynamicquantize:DynamicQuantize_233945") != std::string::npos) {
+         GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+     }
     auto inst = node.type()->create_instance(*this, node);
+ 
+     if (node.id().find("dynamicquantize:DynamicQuantize_233945") != std::string::npos) {
+         GetProcessMemoryInfo(GetCurrentProcess(), &memInfo2, sizeof(memInfo2));
+         std::cout << node.id() << " :" << (memInfo2.WorkingSetSize - memInfo1.WorkingSetSize) / 1024 << " KB" << std::endl;
+     }
+    
+
 
     std::function<bool(const program_node&)> is_mutable_input = [&is_mutable_input](const program_node& node) {
         for (auto& dep : node.get_dependencies()) {
@@ -1005,6 +1034,7 @@ void network::allocate_primitive_instance(program_node const& node) {
     if (node.is_constant()) {
         transfer_memory_to_device(inst, node);
     }
+  
 }
 
 void network::transfer_memory_to_device(std::shared_ptr<primitive_inst> instance, program_node const& node) {
