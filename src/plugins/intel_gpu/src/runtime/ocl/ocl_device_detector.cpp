@@ -9,6 +9,8 @@
 
 #include <string>
 #include <vector>
+#include <windows.h>
+#include <psapi.h>
 
 // NOTE: Due to buggy scope transition of warnings we need to disable warning in place of use/instantation
 //       of some types (even though we already disabled them in scope of definition of these types).
@@ -203,6 +205,8 @@ std::vector<device::ptr> ocl_device_detector::create_device_list() const {
         return {};
     }
 
+    
+
     OPENVINO_ASSERT(error_code == CL_SUCCESS, create_device_error_msg, "[GPU] clGetPlatformIDs error code: ", std::to_string(error_code));
     // Get platform list
     std::vector<cl_platform_id> platform_ids(num_platforms);
@@ -227,6 +231,35 @@ std::vector<device::ptr> ocl_device_detector::create_device_list() const {
             continue;
         }
     }
+
+    /* yaru debug */
+
+    std::vector<const wchar_t*> dllPaths = {
+        // L"C:\\Windows\\System32\\DriverStore\\FileRepository\\iigd_dch.inf_amd64_fc2bb2a57ad8725c\\igc64.dll",
+        L"C:\\Windows\\System32\\DriverStore\\FileRepository\\iigd_dch.inf_amd64_fc2bb2a57ad8725c\\igdrcl64.dll",
+        // L"C:\\Windows\\System32\\DriverStore\\FileRepository\\iigd_dch.inf_amd64_fc2bb2a57ad8725c\\igdgmm64.dll"
+        // Add more as needed
+    };
+    PROCESS_MEMORY_COUNTERS memInfo1;
+    GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+    std::cout << " yaru debug:" << memInfo1.WorkingSetSize << std::endl;
+    // Get handle to loaded DLL
+    for (const auto& dllPath : dllPaths) {
+        HMODULE hModule = NULL;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, dllPath, &hModule)) {
+            if (FreeLibrary(hModule)) {
+                std::wcout << L"Unloaded DLL: " << dllPath << std::endl;
+            } else {
+                std::wcerr << L"Failed to unload DLL. Error: " << GetLastError() << std::endl;
+            }
+        } else {
+            std::wcerr << L"Could not find loaded DLL at path. Error: " << GetLastError() << std::endl;
+        }
+    }
+    GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+    std::cout << " yaru debug:" << memInfo1.WorkingSetSize << std::endl;
+    // none of dlls is offloaded 
+    /* yaru debug end */
     return supported_devices;
 }
 
