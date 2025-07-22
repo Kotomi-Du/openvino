@@ -2186,6 +2186,13 @@ primitive_inst::primitive_inst(network & network, program_node const& node, bool
     , _is_constant(node.is_constant())
     , _needs_completion_event(is_any_user_cpu(node.get_users()) || node.is_output()) {
     // When dynamic shape node has huge upper boundary which causes bigger mem size than system max allocable mem size, do not allocate in build time.
+
+    PROCESS_MEMORY_COUNTERS memInfo1;
+    PROCESS_MEMORY_COUNTERS memInfo2;
+    if (node.id().find("dynamicquantize:DynamicQuantize_233945") != std::string::npos) {
+        GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+        std::cout << " current2 : " << (memInfo1.WorkingSetSize) / 1024 << " KB " << std::endl;
+    }
     auto output_layout = node.get_output_layout();
     auto& engine = network.get_engine();
     if (allocate_memory && node.is_dynamic() && (!engine.check_allocatable(output_layout, engine.get_lockable_preferred_memory_allocation_type(false)))) {

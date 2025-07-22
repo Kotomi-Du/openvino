@@ -181,7 +181,13 @@ public:
     bool is_internal() const { return _internal; }
     bool is_primary_stream() const { return _is_primary_stream; }
     bool is_dynamic() const { return _is_dynamic; }
-    size_t get_weights_cache_capacity() const { return _weights_cache_capacity; }
+    size_t get_weights_cache_capacity() const {
+        PROCESS_MEMORY_COUNTERS memInfo1;
+        GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+        std::cout << " current1.1 : " << (memInfo1.WorkingSetSize) / 1024 << " KB " << std::endl;
+        
+        return _weights_cache_capacity;
+    }
     bool contains_state(const std::string& variable_id);
     memory& get_output_remote_memory(const primitive_id& id) const;
     bool has_output_remote_memory_ptr(const primitive_id& id) const;

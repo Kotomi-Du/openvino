@@ -92,6 +92,11 @@ std::vector<layout> const program_node::get_input_layouts() const {
         auto input_layout = get_input_layout(i);
         layouts.push_back(input_layout);
     }
+    PROCESS_MEMORY_COUNTERS memInfo1;
+    if (id().find("dynamicquantize:DynamicQuantize_233945") != std::string::npos) {
+        GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+        std::cout << " current1.4 : " << (memInfo1.WorkingSetSize) / 1024 << " KB " << std::endl;
+    }
     return layouts;
 }
 
@@ -412,6 +417,12 @@ const layout& program_node::get_output_layout(size_t idx) const {
     if (!valid_output_layouts[idx])
         throw std::runtime_error("Output layout not calculated for " + id() + " node");
 
+    PROCESS_MEMORY_COUNTERS memInfo1;
+     if (id().find("dynamicquantize:DynamicQuantize_233945") != std::string::npos) {
+
+        GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+         std::cout << " current1.2 : " << (memInfo1.WorkingSetSize) / 1024 << " KB " << std::endl;
+    }
     return output_layouts[idx];
 }
 
@@ -475,6 +486,11 @@ bool program_node::recalc_output_layouts(bool invalidate_users_if_changed) {
 }
 
 bool program_node::is_dynamic() const {
+
+    PROCESS_MEMORY_COUNTERS memInfo1;
+    GetProcessMemoryInfo(GetCurrentProcess(), &memInfo1, sizeof(memInfo1));
+    std::cout << " current1.2 : " << (memInfo1.WorkingSetSize) / 1024 << " KB " << std::endl;
+
     for (const auto& input : get_dependencies()) {
         if (input.first->is_dynamic_output_layout(input.second))
             return true;
@@ -484,6 +500,7 @@ bool program_node::is_dynamic() const {
         if (output_layouts[i].is_dynamic())
             return true;
     }
+   
     return false;
 }
 
