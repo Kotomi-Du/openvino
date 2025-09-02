@@ -34,6 +34,11 @@ std::shared_ptr<ov::Node> get_zero_point(const ov::OutputVector& inputs) {
         const auto& scale = inputs[1];
         const auto& zero_point = inputs[2];
 
+        if (zero_point.get_element_type() == ov::element::u4 || zero_point.get_element_type() == ov::element::i4) {
+            const auto convert_zp = std::make_shared<v0::Convert>(zero_point, ov::element::i8);
+            return std::make_shared<v0::Convert>(convert_zp, scale.get_element_type());
+        }
+
         if (zero_point.get_element_type() != scale.get_element_type()) {
             return std::make_shared<v0::Convert>(zero_point, scale.get_element_type());
         }
@@ -58,7 +63,11 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node, int64_t
 
     common::validate_scalar_input("Dequantization scale", scale.get_node_shared_ptr(), valid_types);
 
-    const auto converted_x = std::make_shared<v0::Convert>(x, scale.get_element_type());
+    auto converted_x = std::make_shared<v0::Convert>(x, scale.get_element_type());
+    if (x.get_element_type() == ov::element::u4 || x.get_element_type() == ov::element::i4) {
+        converted_x = std::make_shared<v0::Convert>(x, ov::element::i8);
+        converted_x = std::make_shared<v0::Convert>(converted_x, scale.get_element_type());
+    }
 
     if (zero_point) {
         common::validate_scalar_input("Zero point", zero_point);
@@ -165,16 +174,21 @@ ov::OutputVector dequantize_linear(const ov::Output<ov::Node>& x,
 
     validate_scale(scale, x, axis);
     const auto scale_reshaped = reshape_input(scale, axis, x_shape);
-    const auto converted_x = std::make_shared<v0::Convert>(x, scale.get_element_type());
+    auto converted_x = std::make_shared<v0::Convert>(x, scale.get_element_type());
+
+    if (x.get_element_type() == ov::element::u4 || x.get_element_type() == ov::element::i4) {
+        converted_x = std::make_shared<v0::Convert>(x, ov::element::i8);
+        converted_x = std::make_shared<v0::Convert>(converted_x, scale.get_element_type());
+    }
 
     if (zero_point) {
-        validate_zero_point(zero_point, x, axis);
-        return {std::make_shared<v1::Multiply>(
-            std::make_shared<v1::Subtract>(converted_x, reshape_input(zero_point, axis, x_shape)),
-            scale_reshaped)};
+    validate_zero_point(zero_point, x, axis);
+    return {std::make_shared<v1::Multiply>(
+        std::make_shared<v1::Subtract>(converted_x, reshape_input(zero_point, axis, x_shape)),
+        scale_reshaped)};
     } else {
         return {std::make_shared<v1::Multiply>(converted_x, scale_reshaped)};
-    }
+    } 
 }
 }  // namespace detail
 
@@ -246,8 +260,15 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
         (axis == 0 && src_x.get_shape()[0] == block_size) || (axis == 1 && src_x.get_shape()[1] == block_size);
     if (is_cw_quantize) {
         ov::Output<ov::Node> converted_x = std::make_shared<v0::Convert>(src_x, scale.get_element_type());
+        if (src_x.get_element_type() == ov::element::u4 || src_x.get_element_type() == ov::element::i4) {
+            converted_x = std::make_shared<v0::Convert>(src_x, ov::element::i8);
+            converted_x = std::make_shared<v0::Convert>(converted_x, scale.get_element_type());
+        }
         if (inputs.size() > 2) {
             zp = inputs[2];
+            if (zp.get_element_type() == ov::element::u4 || zp.get_element_type() == ov::element::i4) {
+                zp = std::make_shared<v0::Convert>(zp, ov::element::i8);
+            }
             zp = std::make_shared<v0::Convert>(zp, scale.get_element_type());
             converted_x = std::make_shared<v1::Subtract>(converted_x, zp);
         }
@@ -274,13 +295,21 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
     if (inputs.size() > 2) {
         zp = inputs[2];
         zp = std::make_shared<v0::Unsqueeze>(zp, unsqueezed_axes);
+        if (zp.get_element_type() == ov::element::u4 || zp.get_element_type() == ov::element::i4) {
+            zp = std::make_shared<v0::Convert>(zp, ov::element::i8);
+        }
         if (zp.get_element_type() != scale.get_element_type()) {
             zp = std::make_shared<v0::Convert>(zp, scale_type);
         }
     }
 
-    const auto& x = src_x.get_element_type() == scale_type ? broadcastable_x
+
+     auto& x = src_x.get_element_type() == scale_type ? broadcastable_x
                                                            : std::make_shared<v0::Convert>(broadcastable_x, scale_type);
+    if (src_x.get_element_type() == ov::element::u4 || src_x.get_element_type() == ov::element::i4) {
+        x = std::make_shared<v0::Convert>(broadcastable_x, ov::element::i8);
+        x = std::make_shared<v0::Convert>(x, scale_type);
+    }
 
     // Adding additional dimension for broadcasting
     scale = std::make_shared<v0::Unsqueeze>(scale, unsqueezed_axes);
