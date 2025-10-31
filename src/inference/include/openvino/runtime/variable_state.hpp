@@ -74,6 +74,13 @@ public:
      * @param state The current state to set.
      */
     void set_state(const Tensor& state);
+
+    /**
+     * @brief Updates the state by copying portions of it.
+     * @param src_indices The indices to copy from.
+     * @param dst_indices The indices to copy to.
+     */
+    void gather_by_axis(const std::vector<size_t>& src_indices, const std::vector<size_t>& dst_indices);
 };
 
 }  // namespace ov

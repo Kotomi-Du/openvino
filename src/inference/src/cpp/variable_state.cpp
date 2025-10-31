@@ -49,4 +49,8 @@ void VariableState::set_state(const Tensor& state) {
     OV_VARIABLE_CALL_STATEMENT(_impl->set_state(get_tensor_impl(state)));
 }
 
+void VariableState::gather_by_axis(const std::vector<size_t>& src_indices, const std::vector<size_t>& dst_indices) {
+    OV_VARIABLE_CALL_STATEMENT(_impl->gather_by_axis(src_indices, dst_indices));
+}
+
 }  // namespace ov

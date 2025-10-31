@@ -145,6 +145,11 @@ size_t VariableStateIndirectKVCache::get_actual_mem_size() const {
     return m_hidden_states[0]->get_actual_mem_size();
 }
 
+void VariableStateIndirectKVCache::gather_by_axis(const std::vector<size_t>& src_indices, const std::vector<size_t>& dst_indices) {
+    m_hidden_states[0]->gather_by_axis(src_indices, dst_indices);
+    m_hidden_states[1]->gather_by_axis(src_indices, dst_indices);
+}
+
 ov::PartialShape VariableStateIndirectKVCache::get_beam_table_shape(const ov::PartialShape& kv_cache_shape) {
     auto rank = kv_cache_shape.size();
     ov::PartialShape beam_table_shape(std::vector<size_t>(rank, 1));

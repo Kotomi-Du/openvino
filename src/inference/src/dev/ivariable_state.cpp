@@ -25,3 +25,8 @@ void ov::IVariableState::set_state(const ov::SoPtr<ov::ITensor>& state) {
 ov::SoPtr<ov::ITensor> ov::IVariableState::get_state() const {
     return m_state;
 }
+
+void ov::IVariableState::gather_by_axis(const std::vector<size_t>& src_indices,
+                                        const std::vector<size_t>& dst_indices) {
+    OPENVINO_NOT_IMPLEMENTED;
+}
