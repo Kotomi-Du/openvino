@@ -25,11 +25,13 @@
 #include "openvino/op/shape_of.hpp"
 #include "openvino/op/slice.hpp"
 #include "openvino/op/split.hpp"
+#include "openvino/op/variadic_split.hpp"
 #include "openvino/op/squeeze.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/transpose.hpp"
 #include "openvino/op/unsqueeze.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
+#include <cstdlib>
 
 ov::pass::GroupQueryAttentionDecomposition::GroupQueryAttentionDecomposition() {
     MATCHER_SCOPE(GroupQeuryAttentionDecomposition);
@@ -93,9 +95,6 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     const auto seqlens_1d = register_new_node<v1::Reshape>(real_seqlens, one, false);
     const auto past_seqlen = register_new_node<v1::Subtract>(seqlens_1d, current_seqlen);
     const auto curr_seqlen_scalar = register_new_node<v0::Squeeze>(current_seqlen);
-    
-    past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
-    past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two); 
 
     if (do_rotary) {
         ov::Output<ov::Node> position_ids =
@@ -130,6 +129,18 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
             v0::Constant::create(ov::element::i64, ov::Shape{1}, {past_key.get_partial_shape()[2].get_length()}));
         past_key = register_new_node<v8::Slice>(past_key, current_kv_len_const, past_kv_len_const, one, two);
         past_value = register_new_node<v8::Slice>(past_value, current_kv_len_const, past_kv_len_const, one, two);
+    } else {
+        const char* enable_crop_kv = std::getenv("crop_kv");
+        if(enable_crop_kv != nullptr && std::string(enable_crop_kv) == "1")
+        {
+            auto total_seq_len = get_dimensions(past_key.get_node_shared_ptr(), {2});
+            auto remaining_len = register_new_node<v1::Subtract>(total_seq_len, past_seqlen);
+            auto split_lengths = register_new_node<v0::Concat>(ov::OutputVector{past_seqlen, remaining_len}, 0);
+            auto split_key = register_new_node<v1::VariadicSplit>(past_key, two, split_lengths);
+            auto split_value = register_new_node<v1::VariadicSplit>(past_value, two, split_lengths); 
+            past_key = register_new_node<v0::Convert>(split_key->output(0), past_key.get_element_type());
+            past_value = register_new_node<v0::Convert>(split_value->output(0), past_value.get_element_type());
+        }
     }
 
     K = construct_kv_cache(past_key, K);
