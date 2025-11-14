@@ -55,6 +55,27 @@ void VariableState::set_layout(const cldnn::layout& new_layout) {
     update_device_buffer();
 }
 
+void VariableState::slice_axis(const size_t axis, const size_t offset, const size_t length) {
+    //  In-place crop
+    //  crop input buffer
+    //  |___________data____________| 
+    //  crop output buffer
+    //  |_low_pad_|__data_size__|_upper_pad_|
+    ov::PartialShape shape = m_layout.get_partial_shape();
+
+    if(shape[axis].get_length() < static_cast<ov::Dimension::value_type>(offset + length)) {
+        OPENVINO_THROW("VariableState::slice_axis error: slice range exceeds tensor dimension");
+    }
+
+    m_layout.data_padding._lower_size[axis] += static_cast<ov::Dimension::value_type>(offset);
+    m_layout.data_padding._upper_size[axis] += shape[axis].get_length() - static_cast<ov::Dimension::value_type>(offset + length);
+
+    shape[axis] = ov::Dimension(static_cast<ov::Dimension::value_type>(length));
+    m_layout.set_partial_shape(shape);
+     
+    update_device_buffer();
+}
+
 void VariableState::set_state(const ov::SoPtr<ov::ITensor>& state) {
     auto src_shape = state->get_shape();
     size_t src_rank = src_shape.size();

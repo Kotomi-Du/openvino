@@ -30,6 +30,7 @@ public:
     void reset() override;
     void set_state(const ov::SoPtr<ov::ITensor>& state) override;
     ov::SoPtr<ov::ITensor> get_state() const override;
+    void slice_axis(const size_t axis, const size_t offset, const size_t length) override;
 
     cldnn::memory::ptr get_memory() const override;
     const cldnn::layout& get_layout() const override;

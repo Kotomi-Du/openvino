@@ -53,4 +53,8 @@ void VariableState::gather_by_axis(const std::vector<size_t>& src_indices, const
     OV_VARIABLE_CALL_STATEMENT(_impl->gather_by_axis(src_indices, dst_indices));
 }
 
+void VariableState::slice_axis(const size_t axis, const size_t offset, const size_t length) {
+    OV_VARIABLE_CALL_STATEMENT(_impl->slice_axis(axis, offset, length));
+}
+
 }  // namespace ov

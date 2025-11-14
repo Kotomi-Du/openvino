@@ -58,6 +58,8 @@ public:
      */
     virtual void gather_by_axis(const std::vector<size_t>& src_indices, const std::vector<size_t>& dst_indices);
 
+    virtual void slice_axis(const size_t axis, const size_t offset, const size_t length);
+
 protected:
     /**
      * @brief A default dtor

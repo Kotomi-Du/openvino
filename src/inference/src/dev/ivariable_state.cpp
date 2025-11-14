@@ -30,3 +30,7 @@ void ov::IVariableState::gather_by_axis(const std::vector<size_t>& src_indices,
                                         const std::vector<size_t>& dst_indices) {
     OPENVINO_NOT_IMPLEMENTED;
 }
+
+void ov::IVariableState::slice_axis(const size_t axis, const size_t offset, const size_t length) {
+    OPENVINO_NOT_IMPLEMENTED;
+}

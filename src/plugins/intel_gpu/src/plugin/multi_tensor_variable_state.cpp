@@ -133,6 +133,15 @@ ov::SoPtr<ov::ITensor> VariableStateIndirectKVCache::get_state() const {
     }
 }
 
+void VariableStateIndirectKVCache::slice_axis(const size_t axis, const size_t offset, const size_t length) {
+    m_hidden_states[0]->slice_axis(axis, offset, length);
+
+       // Beam table is reset to cleanup rearranges history
+    cldnn::layout bt_layout(get_beam_table_shape(m_hidden_states[0]->get_layout().get_partial_shape()), ov::element::i32, cldnn::format::bfyx);
+    m_hidden_states[1]->reset();
+    m_hidden_states[1]->set_layout(bt_layout);
+}
+
 void VariableStateIndirectKVCache::set_memory(const cldnn::memory::ptr& new_mem, const cldnn::layout& actual_layout) {
     m_hidden_states[0]->set_memory(new_mem, actual_layout);
 }

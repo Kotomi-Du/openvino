@@ -81,6 +81,15 @@ public:
      * @param dst_indices The indices to copy to.
      */
     void gather_by_axis(const std::vector<size_t>& src_indices, const std::vector<size_t>& dst_indices);
+
+    /**
+     * @brief Slice state tensor along specified axis
+     * @param axis Dimension to slice
+     * @param offset Starting index in the original tensor along the specified axis
+     * @param length Number of elements to include in the slice
+     **/
+    void slice_axis(const size_t axis, const size_t offset, const size_t length);
+    
 };
 
 }  // namespace ov
