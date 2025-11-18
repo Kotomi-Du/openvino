@@ -89,6 +89,7 @@ public:
      * @param length Number of elements to include in the slice
      **/
     void slice_axis(const size_t axis, const size_t offset, const size_t length);
+    ov::Shape get_shape() const;
     
 };
 

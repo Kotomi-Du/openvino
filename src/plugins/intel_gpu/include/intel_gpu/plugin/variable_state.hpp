@@ -61,6 +61,7 @@ public:
     const cldnn::layout& get_layout() const override;
     void gather_by_axis(const std::vector<size_t>& src_indices, const std::vector<size_t>& dst_indices) override;
     void slice_axis(const size_t axis, const size_t offset, const size_t length) override;
+    ov::Shape VariableState::get_shape() const override;
     void set_layout(const cldnn::layout& new_layout) override;
     void set_memory(const cldnn::memory::ptr& new_mem, const cldnn::layout& actual_layout) override;
     size_t get_actual_mem_size() const override {

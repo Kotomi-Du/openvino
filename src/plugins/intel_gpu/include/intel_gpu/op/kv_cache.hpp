@@ -33,6 +33,22 @@ public:
             int64_t gather_axis,
             const ov::element::Type output_type = ov::element::dynamic);
 
+    KVCache(const Output<Node>& past,
+            const Output<Node>& new_token_data,
+            const Output<Node>& split_seq,
+            const std::shared_ptr<ov::op::util::Variable>& past_values,
+            int64_t concat_axis,
+            const ov::element::Type output_type = ov::element::dynamic);
+
+    KVCache(const Output<Node>& past,
+            const Output<Node>& new_token_data,
+            const Output<Node>& beam_idx,
+            const Output<Node>& split_seq,
+            const std::shared_ptr<ov::op::util::Variable>& past_values,
+            int64_t concat_axis,
+            int64_t gather_axis,
+            const ov::element::Type output_type = ov::element::dynamic);
+
     bool visit_attributes(ov::AttributeVisitor& visitor) override;
 
     void validate_and_infer_types() override;
@@ -68,5 +84,7 @@ protected:
 };
 
 std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<ov::PartialShape>& input_shapes);
-
+std::vector<ov::PartialShape> shape_infer(const KVCache* op,
+                                          const std::vector<ov::PartialShape>& input_shapes,
+                                          const int64_t trim_length);
 }   // namespace ov::intel_gpu::op

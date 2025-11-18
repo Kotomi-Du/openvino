@@ -58,6 +58,10 @@ const cldnn::layout& VariableStateIndirectKVCache::get_layout() const {
     return m_hidden_states[0]->get_layout();
 }
 
+ov::Shape VariableStateIndirectKVCache::get_shape() const {
+    return m_hidden_states[0]->get_layout().get_shape();
+}
+
 void VariableStateIndirectKVCache::set_state(const ov::SoPtr<ov::ITensor>& state) {
     OPENVINO_ASSERT(m_hidden_states.size() == 2, "[GPU] Corrupted VariableStateIndirectKVCache. Expected 2 internal states. Got: ", m_hidden_states.size());
     m_hidden_states[0]->set_state(state); // user can set only KV cache

@@ -768,7 +768,9 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
 
     for (auto& inst : _exec_order) {
         NODE_DEBUG(*inst);
-
+        /*if (inst->get_node().id() == "kvcache:Concat_53895" || inst->get_node().id() == "variadicsplit:VariadicSplit_53642.out0") {
+            std::cout << "Debug" << std::endl;
+        }*/
         inst->reset_events();
 
         if (inst->is_input()) {

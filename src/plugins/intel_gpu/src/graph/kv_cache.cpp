@@ -10,6 +10,7 @@
 #include "primitive_type_base.h"
 #include <sstream>
 #include <json_object.h>
+#include "utils.hpp"
 
 namespace cldnn {
 GPU_DEFINE_PRIMITIVE_TYPE_ID(kv_cache)
@@ -31,6 +32,21 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
 
     std::vector<ShapeType> input_shapes = {impl_param.get_input_layout(0).get<ShapeType>(),
                                            impl_param.get_input_layout(1).get<ShapeType>()};
+    
+                                           
+    bool trim = 1; // TO-DO : get trim info from Node; update the input layout index for rest of scenarios.
+    std::unordered_map<size_t, ov::Tensor> const_data;
+    if(trim){
+        size_t indirect_offset = desc->indirect ? 1 : 0;
+        input_shapes.push_back(impl_param.get_input_layout(2 + indirect_offset).get<ShapeType>());
+        if(impl_param.memory_deps.count(2) > 0)
+        {
+            auto split_length_mem = impl_param.memory_deps.at(2);
+            cldnn::mem_lock<uint8_t, mem_lock_type::read> split_length_mem_lock(split_length_mem, impl_param.get_stream());
+            const_data.emplace(1, make_tensor(split_length_mem->get_layout(), split_length_mem_lock.data()));   
+        }
+    }
+    
     if (desc->indirect) {
         input_shapes.push_back(impl_param.get_input_layout(2).get<ShapeType>());
     }
@@ -43,6 +59,10 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         }
     }
 
+    // Extract trim_length from split_lengths input and store in kernel_impl_params
+    // This is a workaround since we can't modify the const impl_param directly
+    // The trim_length will be available via impl_param.kv_cache_trim_length
+    int64_t trim_length = 0;
     std::vector<ShapeType> output_shapes;
     if (desc->compressed) {
         ov::intel_gpu::op::KVCacheCompressed op;
@@ -50,16 +70,27 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         op.set_concat_axis(desc->concat_axis);
         op.set_gather_axis(desc->gather_axis);
         op.set_quantization_attrs(desc->quantization_attributes);
+        if (auto split_lengths = ov::op::get_input_const_data_as<ov::PartialShape, int64_t>(&op, 1, ov::make_tensor_accessor(const_data))) {
+            trim_length = (*split_lengths)[1];
+        }
 
-        output_shapes = shape_infer(&op, input_shapes);
+        output_shapes = shape_infer(&op, input_shapes, trim_length);
     } else {
         ov::intel_gpu::op::KVCache op;
         op.set_output_size(desc->num_outputs);
         op.set_concat_axis(desc->concat_axis);
         op.set_gather_axis(desc->gather_axis);
+        if (auto split_lengths = ov::op::get_input_const_data_as<ov::PartialShape, int64_t>(&op, 1, ov::make_tensor_accessor(const_data))) {
+            trim_length = (*split_lengths)[1];
+        }
 
-        output_shapes = shape_infer(&op, input_shapes);
+        output_shapes = shape_infer(&op, input_shapes, trim_length);
     }
+    
+    // Store trim_length in kernel_impl_params for later use
+    // kv_cache_trim_length is marked as mutable, so it can be modified even though impl_param is const
+    impl_param.kv_cache_trim_length = trim_length;
+    std::cout << "kv_cache_trim_length:" << impl_param.kv_cache_trim_length << std::endl;
 
     static const std::map<size_t, size_t> ports_map = {{0, 0}, {1, 2}, {2, 3}, {3, 4}};
 
@@ -119,6 +150,19 @@ void kv_cache_inst::update_shape_info_tensor(const kernel_impl_params& params) {
     for (i = 0; i < get_node().get_dependencies().size(); i++) {
         const auto& node_in_lay = get_node().get_input_layout(i);
         const auto& runtime_in_lay = params.input_layouts[i];
+        
+        //// Apply trim to past cache (input 0) if trim_length > 0
+        //if (i == 0 && params.kv_cache_trim_length > 0) { 
+        //    // Create a mutable copy of runtime_in_lay to apply trim
+        //    auto trimmed_runtime_shape = runtime_in_lay.get_shape();
+        //    trimmed_runtime_shape[params.typed_desc<kv_cache>()->concat_axis] -= params.kv_cache_trim_length;
+        //    auto trimmed_runtime_layout = runtime_in_lay;
+        //    trimmed_runtime_layout.set_partial_shape(trimmed_runtime_shape);
+        //    GPU_DEBUG_TRACE_DETAIL << id() << " : update shape_info for input[" << i << "] with trim_length=" 
+        //                           << params.kv_cache_trim_length << std::endl;
+        //    fill_shape_info_data(trimmed_runtime_layout, node_in_lay, shape_info_ptr, offset);
+        //    continue;
+        //}
 
         GPU_DEBUG_TRACE_DETAIL << id() << " : update shape_info for input[" << i << "]" << std::endl;
         fill_shape_info_data(runtime_in_lay, node_in_lay, shape_info_ptr, offset);

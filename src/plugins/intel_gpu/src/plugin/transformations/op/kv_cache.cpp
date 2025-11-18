@@ -49,6 +49,31 @@ KVCache::KVCache(const Output<Node>& past,
     validate_and_infer_types();
 }
 
+KVCache::KVCache(const Output<Node>& past,
+                 const Output<Node>& new_token_data,
+                 const Output<Node>& beam_idx,
+                 const Output<Node>& split_seq,
+                 const std::shared_ptr<ov::op::util::Variable>& past_variable,
+                 int64_t concat_axis,
+                 int64_t gather_axis,
+                 const ov::element::Type output_type)
+    : KVCache({past, new_token_data, beam_idx, split_seq}, past_variable, true, concat_axis, gather_axis, output_type) {
+    if (m_indirect)
+        set_output_size(2);
+    validate_and_infer_types();
+}
+
+KVCache::KVCache(const Output<Node>& past,
+                 const Output<Node>& new_token_data,
+                 const Output<Node>& split_seq,
+                 const std::shared_ptr<ov::op::util::Variable>& past_variable,
+                 int64_t concat_axis,
+                 const ov::element::Type output_type)
+    : KVCache({past, new_token_data, split_seq}, past_variable, false, concat_axis, 0, output_type) {
+    m_variable = past_variable;
+    validate_and_infer_types();
+}
+
 bool KVCache::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("concat_axis", m_concat_axis);
     visitor.on_attribute("gather_axis", m_gather_axis);
@@ -119,6 +144,33 @@ std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<o
     } else {
         out_shapes[0] = input_shapes[1];
         out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
+    }
+
+    return out_shapes;
+}
+
+std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<ov::PartialShape>& input_shapes, const int64_t trim_length) {
+    std::vector<ov::PartialShape> out_shapes;
+    out_shapes.resize(op->get_output_size());
+
+    const auto& gather_axis = op->get_gather_axis();
+    const auto& concat_axis = ov::util::normalize(op->get_concat_axis(), input_shapes[0].size());
+    
+    // We update output shape with input1 shape by default, as input1 is always new, and in some situations, input0 shape
+    // has zeros in some dimensions. For example to concat input0 [-1, 0, 0, 0] + input1 [-1, 4, -1, 128] along axis 2,
+    // we could (and should) infer dim value of axis 1 and 3 in this case.
+    if (op->get_output_size() >= 2) {
+        out_shapes[0] = input_shapes[1];
+        out_shapes[0][gather_axis] = input_shapes[2][0];
+        out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
+
+        std::vector<ov::Dimension> dims(out_shapes[0].size(), 1);
+        dims[gather_axis] = out_shapes[0][gather_axis];
+        dims[concat_axis] = out_shapes[0][concat_axis] - trim_length;
+        out_shapes[1] = dims;
+    } else {
+        out_shapes[0] = input_shapes[1];
+        out_shapes[0][concat_axis] += input_shapes[0][concat_axis] - trim_length;
     }
 
     return out_shapes;
@@ -204,5 +256,30 @@ std::vector<ov::PartialShape> shape_infer(const KVCacheCompressed* op,
 
     return out_shapes;
 }
+std::vector<ov::PartialShape> shape_infer(const KVCacheCompressed* op, const std::vector<ov::PartialShape>& input_shapes, const int64_t trim_length) {
+    std::vector<ov::PartialShape> out_shapes;
+    out_shapes.resize(op->get_output_size());
 
+    const auto& gather_axis = op->get_gather_axis();
+    const auto& concat_axis = ov::util::normalize(op->get_concat_axis(), input_shapes[0].size());
+
+    // We update output shape with input1 shape by default, as input1 is always new, and in some situations, input0 shape
+    // has zeros in some dimensions. For example to concat input0 [-1, 0, 0, 0] + input1 [-1, 4, -1, 128] along axis 2,
+    // we could (and should) infer dim value of axis 1 and 3 in this case.
+    if (op->get_output_size() >= 2) {
+        out_shapes[0] = input_shapes[1];
+        out_shapes[0][gather_axis] = input_shapes[2][0];
+        out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
+
+        std::vector<ov::Dimension> dims(out_shapes[0].size(), 1);
+        dims[gather_axis] = out_shapes[0][gather_axis];
+        dims[concat_axis] = out_shapes[0][concat_axis] - trim_length;
+        out_shapes[1] = dims;
+    } else {
+        out_shapes[0] = input_shapes[1];
+        out_shapes[0][concat_axis] += input_shapes[0][concat_axis] - trim_length;
+    }
+
+    return out_shapes;
+}
 }  // namespace ov::intel_gpu::op

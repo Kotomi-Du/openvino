@@ -47,6 +47,10 @@ void VariableState::set_memory(const cldnn::memory::ptr& new_mem, const cldnn::l
     update_device_buffer();
 }
 
+ov::Shape VariableState::get_shape() const {
+    return m_layout.get_shape();
+}
+
 void VariableState::set_layout(const cldnn::layout& new_layout) {
     if (m_layout == new_layout)
         return;

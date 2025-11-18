@@ -34,3 +34,7 @@ void ov::IVariableState::gather_by_axis(const std::vector<size_t>& src_indices,
 void ov::IVariableState::slice_axis(const size_t axis, const size_t offset, const size_t length) {
     OPENVINO_NOT_IMPLEMENTED;
 }
+
+ov::Shape ov::IVariableState::get_shape() const {
+    return m_shape;
+}

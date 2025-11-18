@@ -48,5 +48,6 @@ private:
 
 std::vector<ov::PartialShape> shape_infer(const KVCacheCompressed* op,
                                           const std::vector<ov::PartialShape>& input_shapes);
+std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<ov::PartialShape>& input_shapes, const int64_t trim_length);
 
 }   // namespace ov::intel_gpu::op

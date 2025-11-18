@@ -60,6 +60,8 @@ public:
 
     virtual void slice_axis(const size_t axis, const size_t offset, const size_t length);
 
+    virtual ov::Shape get_shape() const;
+
 protected:
     /**
      * @brief A default dtor
@@ -68,6 +70,7 @@ protected:
 
     std::string m_name;
     ov::SoPtr<ov::ITensor> m_state;
+    ov::Shape m_shape;
 };
 
 }  // namespace ov

@@ -389,6 +389,9 @@ layout program_node::calc_output_layout() const {
 }
 
 std::vector<layout> program_node::calc_output_layouts() const {
+    /*if (id() == "variadicsplit:VariadicSplit_53642.out0") {
+        std::cout << "debug crop" << std::endl;
+    }*/
     bool allow_new_shape_infer = get_program().is_new_shape_infer();
     if (allow_new_shape_infer) {
         auto out_layouts = type()->calc_output_layouts(*this, *get_kernel_impl_params());

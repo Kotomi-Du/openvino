@@ -57,4 +57,7 @@ void VariableState::slice_axis(const size_t axis, const size_t offset, const siz
     OV_VARIABLE_CALL_STATEMENT(_impl->slice_axis(axis, offset, length));
 }
 
+ov::Shape VariableState::get_shape() const {
+    OV_VARIABLE_CALL_STATEMENT(return _impl->get_shape());
+}
 }  // namespace ov
