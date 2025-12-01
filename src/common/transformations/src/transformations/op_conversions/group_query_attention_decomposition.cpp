@@ -130,17 +130,8 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         past_key = register_new_node<v8::Slice>(past_key, current_kv_len_const, past_kv_len_const, one, two);
         past_value = register_new_node<v8::Slice>(past_value, current_kv_len_const, past_kv_len_const, one, two);
     } else {
-        const char* enable_crop_kv = std::getenv("crop_kv");
-        if(enable_crop_kv != nullptr && std::string(enable_crop_kv) == "1")
-        {
-            auto total_seq_len = get_dimensions(past_key.get_node_shared_ptr(), {2});
-            auto remaining_len = register_new_node<v1::Subtract>(total_seq_len, past_seqlen);
-            auto split_lengths = register_new_node<v0::Concat>(ov::OutputVector{past_seqlen, remaining_len}, 0);
-            auto split_key = register_new_node<v1::VariadicSplit>(past_key, two, split_lengths);
-            auto split_value = register_new_node<v1::VariadicSplit>(past_value, two, split_lengths); 
-            past_key = register_new_node<v0::Convert>(split_key->output(0), past_key.get_element_type());
-            past_value = register_new_node<v0::Convert>(split_value->output(0), past_value.get_element_type());
-        }
+        past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
+        past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two); 
     }
 
     K = construct_kv_cache(past_key, K);
