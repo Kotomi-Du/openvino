@@ -135,7 +135,7 @@ std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<o
     if (op->get_output_size() >= 2) {
         out_shapes[0] = input_shapes[1];
         out_shapes[0][gather_axis] = input_shapes[2][0];
-        out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
+        out_shapes[0][concat_axis] += input_shapes[0][concat_axis] - op->get_trim_length();
 
         std::vector<ov::Dimension> dims(out_shapes[0].size(), 1);
         dims[gather_axis] = out_shapes[0][gather_axis];
@@ -143,34 +143,7 @@ std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<o
         out_shapes[1] = dims;
     } else {
         out_shapes[0] = input_shapes[1];
-        out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
-    }
-
-    return out_shapes;
-}
-
-std::vector<ov::PartialShape> shape_infer(const KVCache* op, const std::vector<ov::PartialShape>& input_shapes, const int64_t trim_length) {
-    std::vector<ov::PartialShape> out_shapes;
-    out_shapes.resize(op->get_output_size());
-
-    const auto& gather_axis = op->get_gather_axis();
-    const auto& concat_axis = ov::util::normalize(op->get_concat_axis(), input_shapes[0].size());
-    
-    // We update output shape with input1 shape by default, as input1 is always new, and in some situations, input0 shape
-    // has zeros in some dimensions. For example to concat input0 [-1, 0, 0, 0] + input1 [-1, 4, -1, 128] along axis 2,
-    // we could (and should) infer dim value of axis 1 and 3 in this case.
-    if (op->get_output_size() >= 2) {
-        out_shapes[0] = input_shapes[1];
-        out_shapes[0][gather_axis] = input_shapes[2][0];
-        out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
-
-        std::vector<ov::Dimension> dims(out_shapes[0].size(), 1);
-        dims[gather_axis] = out_shapes[0][gather_axis];
-        dims[concat_axis] = out_shapes[0][concat_axis] - trim_length;
-        out_shapes[1] = dims;
-    } else {
-        out_shapes[0] = input_shapes[1];
-        out_shapes[0][concat_axis] += input_shapes[0][concat_axis] - trim_length;
+        out_shapes[0][concat_axis] += input_shapes[0][concat_axis] - op->get_trim_length();
     }
 
     return out_shapes;
@@ -252,32 +225,6 @@ std::vector<ov::PartialShape> shape_infer(const KVCacheCompressed* op,
             compression_zp_shape[scales_concat_axis] += quantized_data_shapes[2][scales_concat_axis];
             out_shapes[3] = compression_zp_shape;
         }
-    }
-
-    return out_shapes;
-}
-std::vector<ov::PartialShape> shape_infer(const KVCacheCompressed* op, const std::vector<ov::PartialShape>& input_shapes, const int64_t trim_length) {
-    std::vector<ov::PartialShape> out_shapes;
-    out_shapes.resize(op->get_output_size());
-
-    const auto& gather_axis = op->get_gather_axis();
-    const auto& concat_axis = ov::util::normalize(op->get_concat_axis(), input_shapes[0].size());
-
-    // We update output shape with input1 shape by default, as input1 is always new, and in some situations, input0 shape
-    // has zeros in some dimensions. For example to concat input0 [-1, 0, 0, 0] + input1 [-1, 4, -1, 128] along axis 2,
-    // we could (and should) infer dim value of axis 1 and 3 in this case.
-    if (op->get_output_size() >= 2) {
-        out_shapes[0] = input_shapes[1];
-        out_shapes[0][gather_axis] = input_shapes[2][0];
-        out_shapes[0][concat_axis] += input_shapes[0][concat_axis];
-
-        std::vector<ov::Dimension> dims(out_shapes[0].size(), 1);
-        dims[gather_axis] = out_shapes[0][gather_axis];
-        dims[concat_axis] = out_shapes[0][concat_axis] - trim_length;
-        out_shapes[1] = dims;
-    } else {
-        out_shapes[0] = input_shapes[1];
-        out_shapes[0][concat_axis] += input_shapes[0][concat_axis] - trim_length;
     }
 
     return out_shapes;

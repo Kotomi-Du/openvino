@@ -96,12 +96,8 @@ public:
     typed_primitive_inst(network& network, const kv_cache_node& desc);
     typed_primitive_inst(network& network) : parent(network), memory_state::variable("") {}
 
-    int64_t get_trim_length() const { return _trim_length; }
-    void set_trim_length(int64_t trim_length) { _trim_length = trim_length; }
-
 private:
     size_t kv_cache_id = 0;
-    int64_t _trim_length = 0;
 };
 
 using kv_cache_inst = typed_primitive_inst<kv_cache>;

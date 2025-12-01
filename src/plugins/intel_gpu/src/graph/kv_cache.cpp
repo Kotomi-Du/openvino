@@ -57,10 +57,6 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         }
     }
 
-    // Extract trim_length from split_lengths input and store in kernel_impl_params
-    // This is a workaround since we can't modify the const impl_param directly
-    // The trim_length will be available via impl_param.kv_cache_trim_length
-    int64_t trim_length = 0;
     std::vector<ShapeType> output_shapes;
     if (desc->compressed) {
         ov::intel_gpu::op::KVCacheCompressed op;
@@ -70,11 +66,12 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         op.set_quantization_attrs(desc->quantization_attributes);
         if (enable_trim != nullptr && std::string(enable_trim) == "1" ){
             if (auto split_lengths = ov::op::get_input_const_data_as<ov::PartialShape, int64_t>(&op, 1, ov::make_tensor_accessor(const_data))) {
-                trim_length = (*split_lengths)[1];
+                op.set_trim_length((*split_lengths)[1]);
+                impl_param.kv_cache_trim_length = (*split_lengths)[1];
             }
         }
 
-        output_shapes = shape_infer(&op, input_shapes, trim_length);
+        output_shapes = shape_infer(&op, input_shapes);
     } else {
         ov::intel_gpu::op::KVCache op;
         op.set_output_size(desc->num_outputs);
@@ -82,21 +79,13 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         op.set_gather_axis(desc->gather_axis);
         if (enable_trim != nullptr && std::string(enable_trim) == "1"){
             if (auto split_lengths = ov::op::get_input_const_data_as<ov::PartialShape, int64_t>(&op, 1, ov::make_tensor_accessor(const_data))) {
-                trim_length = (*split_lengths)[1];
+                op.set_trim_length((*split_lengths)[1]);
+                impl_param.kv_cache_trim_length = (*split_lengths)[1];
             }
         }
-
-        output_shapes = shape_infer(&op, input_shapes, trim_length);
+        output_shapes = shape_infer(&op, input_shapes);
     }
     
-    // Store trim_length in kernel_impl_params for later use
-    // kv_cache_trim_length is marked as mutable, so it can be modified even though impl_param is const
-    impl_param.kv_cache_trim_length = trim_length;
-    const char* enable_debug_ov = std::getenv("debug_ov");
-    if (enable_debug_ov != nullptr && std::string(enable_debug_ov) == "1") {
-        std::cout << "kv_cache_trim_length:" << impl_param.kv_cache_trim_length << std::endl;
-    }
-
     static const std::map<size_t, size_t> ports_map = {{0, 0}, {1, 2}, {2, 3}, {3, 4}};
 
     std::vector<layout> out_layouts;
