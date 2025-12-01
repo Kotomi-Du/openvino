@@ -493,15 +493,6 @@ struct kv_cache_impl : multi_stage_primitive<kv_cache> {
         auto& params = static_cast<kernel_params_t&>(*_kernels_data[concat_stage].params);
         const auto inputs_count = 2;
         for (size_t i = 0; i < inputs_count; ++i) {
-            if(impl_param.kv_cache_trim_length > 0 && i == 0)
-            {
-                auto trimmed_runtime_shape = impl_param.input_layouts[i].get_shape();
-                trimmed_runtime_shape[impl_param.typed_desc<kv_cache>()->concat_axis] -=  impl_param.kv_cache_trim_length;
-                auto trimmed_runtime_layout = impl_param.input_layouts[i];
-                trimmed_runtime_layout.set_partial_shape(trimmed_runtime_shape);
-                params.inputs[i] = convert_data_tensor(trimmed_runtime_layout);
-                continue;
-            }
             params.inputs[i] = convert_data_tensor(impl_param.input_layouts[i]);
         }
         params.outputs[0] = convert_data_tensor(impl_param.output_layouts[0]);

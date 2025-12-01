@@ -1405,6 +1405,8 @@ void primitive_inst::do_runtime_in_place_kv_cache() {
         auto trimmed_past_shape = past_layout.get_shape();
         trimmed_past_shape[sequence_axis] -= _impl_params->kv_cache_trim_length;
         past_layout.set_partial_shape(trimmed_past_shape);
+        auto past_layout_pad = past_layout.data_padding._upper_size[sequence_axis] + _impl_params->kv_cache_trim_length;
+        kv_cache_inst::update_pad(past_layout, past_layout_pad, sequence_axis);
     }
     auto max_pad = kv_cache_inst::get_max_pad(past_layout, _deps[0].first->_max_output_layout_count[0], sequence_axis, "past_layout");
     const auto new_seq_len = static_cast<int64_t>(new_layout.get_shape()[sequence_axis]);
