@@ -32,11 +32,9 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
 
     std::vector<ShapeType> input_shapes = {impl_param.get_input_layout(0).get<ShapeType>(),
                                            impl_param.get_input_layout(1).get<ShapeType>()};
-    
-                                           
-    const char* enable_trim = std::getenv("trim_kvcache");  // TO-DO : get trim info from Node; update the input layout index for rest of scenarios.
+                                     
     std::unordered_map<size_t, ov::Tensor> const_data;
-    if (enable_trim != nullptr && std::string(enable_trim) == "1") {
+    if (desc->trim) {
         if(impl_param.memory_deps.count(2) > 0)
         {
             auto split_length_mem = impl_param.memory_deps.at(2);
@@ -64,7 +62,7 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         op.set_concat_axis(desc->concat_axis);
         op.set_gather_axis(desc->gather_axis);
         op.set_quantization_attrs(desc->quantization_attributes);
-        if (enable_trim != nullptr && std::string(enable_trim) == "1" ){
+        if (desc->trim) {
             if (auto split_lengths = ov::op::get_input_const_data_as<ov::PartialShape, int64_t>(&op, 1, ov::make_tensor_accessor(const_data))) {
                 op.set_trim_length((*split_lengths)[1]);
                 impl_param.kv_cache_trim_length = (*split_lengths)[1];
@@ -77,7 +75,7 @@ std::vector<layout> kv_cache_inst::calc_output_layouts(kv_cache_node const& /*no
         op.set_output_size(desc->num_outputs);
         op.set_concat_axis(desc->concat_axis);
         op.set_gather_axis(desc->gather_axis);
-        if (enable_trim != nullptr && std::string(enable_trim) == "1"){
+        if (desc->trim) {
             if (auto split_lengths = ov::op::get_input_const_data_as<ov::PartialShape, int64_t>(&op, 1, ov::make_tensor_accessor(const_data))) {
                 op.set_trim_length((*split_lengths)[1]);
                 impl_param.kv_cache_trim_length = (*split_lengths)[1];
