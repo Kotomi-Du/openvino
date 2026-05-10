@@ -43,6 +43,22 @@ ConvolutionTransformation::ConvolutionTransformation(const Params& params) : Wei
         if (transformation_callback(op)) {
             return false;
         }
+
+        // Skip 1x1 convolutions
+        const auto& weights_pshape = op->get_input_partial_shape(1);
+        if (weights_pshape.rank().is_static() && weights_pshape.rank().get_length() >= 3) {
+            bool is_1x1 = true;
+            for (size_t i = 2; i < static_cast<size_t>(weights_pshape.rank().get_length()); ++i) {
+                if (!weights_pshape[i].is_static() || weights_pshape[i].get_length() != 1) {
+                    is_1x1 = false;
+                    break;
+                }
+            }
+            if (is_1x1) {
+                return false;
+            }
+        }
+
         return transform(m);
     };
 
