@@ -143,7 +143,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         // two method to handle it:
         //   1. Use ScatterUpdate to scatter insert Current into Past, but failed due to NPU device hang.
         //   2. Use present = select(mask, current, past), in which current will expand to max_seq_len.
-#if 0
+#if 1
         // Method 1: ScatterUpdate
         // Insert current K/V at the correct position [past_seqlen, past_seqlen+curr_seqlen).
         std::shared_ptr<ov::Node> scatter_idx =
