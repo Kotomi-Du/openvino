@@ -321,7 +321,7 @@ bool ov::PartialShape::broadcast_merge_into(PartialShape& dst,
                 success &= Dimension::broadcast_merge(dims[i], dsti, srci);
             }
             dst = PartialShape(std::move(dims));
-            return success;
+            return true;
         }
     }
     case op::AutoBroadcastType::PDPD: {
