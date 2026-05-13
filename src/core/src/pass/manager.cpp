@@ -318,15 +318,14 @@ public:
 
     void serialize(const std::shared_ptr<ov::Model>& model, const std::string& pass_name) const {
         static size_t serialize_index = 0;
+        std::string target_pass_name = pass_name;
+        if (pass_name.find_last_of(':') != std::string::npos) {
+            target_pass_name = pass_name.substr(pass_name.find_last_of(':') + 1);
+        }
         if (m_serialize.is_enabled()) {
-            const auto& _serialize = [&](bool dumpbin) {
+            const auto& _serialize = [&]() {
                 auto file_name = gen_file_name(model->get_name(), pass_name, serialize_index++);
-                std::filesystem::path bin_name;
-                if (dumpbin) {
-                    bin_name = file_name;
-                    bin_name.concat(".bin");
-                }
-                ov::pass::Serialize serialize(file_name.concat(".xml"), bin_name);
+                ov::pass::Serialize serialize(file_name.concat(".xml"), {});
                 serialize.run_on_model(model);
             };
 
@@ -336,7 +335,7 @@ public:
                 const auto& filter_tokens = ov::util::split_by_delimiter(m_serialize.get_str(), ',');
                 for (const auto& token : filter_tokens) {
                     if (pass_name.find(token) != std::string::npos) {
-                        _serialize(true);
+                        _serialize();
                         return;
                     }
                 }
