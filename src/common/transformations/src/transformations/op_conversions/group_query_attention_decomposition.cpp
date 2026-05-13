@@ -190,8 +190,13 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         auto construct_kv_cache = [&](const ov::Output<ov::Node>& past, const ov::Output<ov::Node>& current) {
             return register_new_node<v0::Concat>(ov::OutputVector{past, current}, 2);
         };
-        past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
-        past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
+        // past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
+        // past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
+        std::shared_ptr<ov::Node> concat_kv_len;
+         //static const auto noreorder = std::getenv("noreorder");
+        const auto key_shape = register_new_node<v3::ShapeOf>(past_key);
+        const auto past_len = get_dimensions(key_shape, {2});
+        concat_kv_len = register_new_node<v1::Add>(past_len, one);
         K = construct_kv_cache(past_key, K);
         V = construct_kv_cache(past_value, V);
     }
