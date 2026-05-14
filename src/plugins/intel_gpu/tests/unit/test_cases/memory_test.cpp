@@ -170,7 +170,6 @@ public:
         auto relu_inst  = network->get_primitive("relu");
         auto relu2_inst = network->get_primitive("relu2");
 
-        // Both direct consumers of the lazy-allocated input must see the same external buffer.
         ASSERT_TRUE(engine->is_the_same_buffer(*input_inst->output_memory_ptr(), *input));
         ASSERT_TRUE(engine->is_the_same_buffer(*relu_inst->dep_memory_ptr(0),  *input));
         ASSERT_TRUE(engine->is_the_same_buffer(*relu2_inst->dep_memory_ptr(0), *input));
@@ -180,12 +179,7 @@ public:
         // 256 bytes host for the input, 256 bytes host for relu4 output, 256 bytes host for relu7 output,
         // and 256 bytes device for two outputs from the first relu on a branch
         ASSERT_EQ(engine->get_max_used_device_memory(), 1280ull);
-    }
 
-    void test_oooq(bool is_caching_test) {
-        /*          -- relu1 - concat1- relu4 --
-            input<  -- relu2 /                   >-- concat2 -- relu6
-                    -- relu3 --  relu5 ---------
         neither of relu5, relu6 nor relu7 can share resource with relu4. */
 
         // We need a new engine here to get correct get_max_used_device_memory() result

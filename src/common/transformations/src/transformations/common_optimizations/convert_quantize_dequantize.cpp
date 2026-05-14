@@ -35,6 +35,8 @@ namespace ov::pass {
 // be (-128, 127) or (0, 255) or (-32768, 32767) or (0, 65535) (depends on type and depends
 // on sign of the quantized data type). Another limitation is that 'zero_point' and 'scale' have to be broadcastable to
 // the output of FakeQuantize.
+// Mixed precision is supported: the quantizer (FakeQuantize input) and dequantizer (scale/zero_point)
+// can use different floating-point precisions (e.g., FakeQuantize on fp32, dequantizer scale in fp16).
 //
 //
 //                                   |  |  |  |  |
@@ -72,7 +74,10 @@ namespace ov::pass {
 ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVector& supported_low_precisions,
                                                      const ov::element::TypeVector& supported_original_precisions) {
     MATCHER_SCOPE(ConvertQuantizeDequantize);
-    auto data_pattern = pattern::any_input(pattern::type_matches_any(supported_original_precisions));
+    // Allow floating-point input types (fp32, fp16, bf16) for mixed precision support
+    auto data_pattern = pattern::any_input([](const Output<Node>& output) {
+        return output.get_element_type().is_real();
+    });
     auto input_low_pattern = pattern::any_input();
     auto input_high_pattern = pattern::any_input();
     auto output_low_pattern = pattern::wrap_type<v0::Constant>();
@@ -82,9 +87,10 @@ ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVect
     auto convert1_pattern = pattern::wrap_type<v0::Convert>(
         {fq_pattern},
         pattern::type_matches_any(supported_low_precisions) && pattern::consumers_count(1));
+    // Allow mixed precision: dequantizer can use fp16 even if quantizer uses fp32
     auto convert2_pattern = pattern::wrap_type<v0::Convert>(
         {convert1_pattern},
-        pattern::type_matches_any(supported_original_precisions) && pattern::consumers_count(1));
+        pattern::consumers_count(1));
 
     auto zero_point_pattern = pattern::any_input();
     auto sub_pattern =

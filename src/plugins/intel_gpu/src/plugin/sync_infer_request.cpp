@@ -215,6 +215,16 @@ ov::SoPtr<ov::ITensor> SyncInferRequest::get_tensor(const ov::Output<const ov::N
     size_t port_index = port_info.idx;
     if (is_input) {
         OPENVINO_ASSERT(m_user_inputs.count(port_index) == 1, "[GPU] Input tensor with index ", port_index, " is not found");
+        // Lazy allocation: if the input tensor slot exists but hasn't been allocated yet,
+        // allocate it now on first access.
+        if (!m_user_inputs.at(port_index).ptr) {
+            auto& self = const_cast<SyncInferRequest&>(*this);
+            self.allocate_input(port, port_index);
+            GPU_DEBUG_TRACE_DETAIL << "[lazy alloc] input " << port_index
+                           << " shape: " << port.get_partial_shape() 
+                           << " allocated at get_tensor" << std::endl;
+
+        }
         return { m_user_inputs.at(port_index).ptr, nullptr };
     } else {
         OPENVINO_ASSERT(m_user_outputs.count(port_index) == 1, "[GPU] Output tensor with index ", port_index, " is not found");
@@ -225,8 +235,14 @@ ov::SoPtr<ov::ITensor> SyncInferRequest::get_tensor(const ov::Output<const ov::N
 void SyncInferRequest::check_tensors() const {
     const auto& inputs = get_compiled_model()->inputs();
     for (size_t i = 0; i < inputs.size(); i++) {
-        if (!is_batched_input(inputs[i]))
+        if (!is_batched_input(inputs[i])) {
+            // Skip validation for lazy (not yet allocated) input tensors.
+            // They will be allocated on first get_tensor() or replaced by set_tensor().
+            auto it = m_user_inputs.find(i);
+            if (it != m_user_inputs.end() && !it->second.ptr)
+                continue;
             check_tensor(inputs[i], get_tensor_ptr(inputs[i]));
+        }
     }
     const auto& outputs = get_compiled_model()->outputs();
     for (size_t i = 0; i < outputs.size(); i++) {
@@ -271,11 +287,22 @@ void SyncInferRequest::enqueue() {
         size_t port_idx = it.first;
         const auto& port = it.second;
 
+        // Lazy allocation: if the user hasn't called set_tensor() for this input,
+        // allocate the default host tensor now before inference.
+        if (m_user_inputs.count(port_idx) && !m_user_inputs.at(port_idx).ptr) {
+            GPU_DEBUG_TRACE_DETAIL << "[lazy alloc] input " << port_idx << " shape: " << port.get_partial_shape() << " allocated at enqueue time" << std::endl;
+            allocate_input(port, port_idx);
+        }
+
         if (m_batched_tensors.count(port.get_tensor_ptr()) > 0) {
             auto events = prepare_batched_input(port_idx, port, m_batched_tensors.at(port.get_tensor_ptr()));
             std::move(events.begin(), events.end(), std::back_inserter(dependencies));
         } else {
             cldnn::primitive_id internal_name = m_graph->input_port_index_to_internal(port_idx)[0];
+            //  check if "past" is in internal name
+            if(internal_name.find("past") != std::string::npos) {
+                GPU_DEBUG_TRACE_DETAIL << "Input port with index " << port_idx << " is detected as a KV cache input" << std::endl;
+            }
             auto events = prepare_input(internal_name, port_idx, port, m_user_inputs.at(port_idx));
             std::move(events.begin(), events.end(), std::back_inserter(dependencies));
         }
@@ -712,7 +739,10 @@ void SyncInferRequest::allocate_inputs() {
         }
 
         if (!is_nv12_input) {
-            allocate_input(port, input_idx);
+            // Defer actual allocation: just reserve the slot with a nullptr tensor.
+            // The tensor will be allocated lazily on first get_tensor() call,
+            // or replaced by the user via set_tensor() before inference.
+            m_user_inputs[input_idx] = { nullptr, TensorOwner::PLUGIN };
         }
     }
 }
