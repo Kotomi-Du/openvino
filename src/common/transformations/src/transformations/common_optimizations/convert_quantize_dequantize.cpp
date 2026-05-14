@@ -116,6 +116,14 @@ ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVect
         auto convert2 = pattern_map.at(convert2_pattern);
         auto mul = pattern_map.at(mul_pattern).get_node_shared_ptr();
 
+        const auto& fq_type = fq->get_output_element_type(0);
+        const auto& dq_type = scale.get_element_type();
+        const auto& mul_type = mul->get_output_element_type(0);
+        OPENVINO_ASSERT(dq_type == mul_type);
+        OPENVINO_ASSERT(!fq_type.is_integral() && !dq_type.is_integral());
+        const auto mid_type =
+            (fq_type == ov::element::f16 && dq_type == ov::element::f16) ? ov::element::f16 : ov::element::f32;
+
         static const std::unordered_set<size_t> supported_levels{256, 65536};
         const auto levels = fq->get_levels();
         if (!supported_levels.count(levels))
@@ -150,13 +158,24 @@ ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVect
             interval_it->second != std::make_pair(out_low_val, out_high_val)) {
             return false;
         }
-
+        
         const bool has_zero_point = pattern_map.count(zero_point_pattern);
         std::shared_ptr<Node> new_out_low = output_low, new_out_high = output_high;
+        if (output_low->get_output_element_type(0) != mid_type) {
+            new_out_low = std::make_shared<v0::Convert>(new_out_low, mid_type);
+            new_out_high = std::make_shared<v0::Convert>(new_out_high, mid_type);
+        }
         if (has_zero_point) {
-            const auto& zero_point = pattern_map.at(zero_point_pattern);
+            auto zero_point = pattern_map.at(zero_point_pattern);
+            OPENVINO_ASSERT(zero_point.get_element_type() == dq_type);
+            if (dq_type != mid_type) {
+                zero_point = std::make_shared<v0::Convert>(zero_point, mid_type);
+            }
             new_out_low = std::make_shared<v1::Subtract>(new_out_low, zero_point);
             new_out_high = std::make_shared<v1::Subtract>(new_out_high, zero_point);
+        }
+        if (dq_type != mid_type) {
+            scale = std::make_shared<v0::Convert>(scale, mid_type);
         }
         new_out_low = std::make_shared<v1::Multiply>(new_out_low, scale);
         new_out_high = std::make_shared<v1::Multiply>(new_out_high, scale);
@@ -172,19 +191,46 @@ ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVect
         if (out_high_shape.rank().is_dynamic() || out_high_shape.rank().get_length() > data_shape.rank().get_length())
             return false;
 
-        std::shared_ptr<Node> const_out_low = ov::util::get_constant_from_source(new_out_low);
+        std::shared_ptr<v0::Constant> const_out_low = ov::util::get_constant_from_source(new_out_low);
         if (const_out_low)
             new_out_low = const_out_low;
-        std::shared_ptr<Node> const_out_high = ov::util::get_constant_from_source(new_out_high);
+        std::shared_ptr<v0::Constant> const_out_high = ov::util::get_constant_from_source(new_out_high);
         if (const_out_high)
             new_out_high = const_out_high;
 
+        if (const_out_low && const_out_high) {
+            const auto new_out_low_val = const_out_low->cast_vector<float>()[0];
+            const auto new_out_high_val = const_out_high->cast_vector<float>()[0];
+            float in_low_val = 0;
+            op_util::get_single_value(ov::as_type_ptr<v0::Constant>(input_low.get_node_shared_ptr()), in_low_val);
+            float in_high_val = 0;
+            op_util::get_single_value(ov::as_type_ptr<v0::Constant>(input_high.get_node_shared_ptr()), in_high_val);
+            const auto diff =
+                std::max(std::abs(new_out_low_val - in_low_val), std::abs(new_out_high_val - in_high_val));
+            printf("[%s]: dq[%s] fq[%s] -> [%s], new out[%f ~ %f], in[%f ~ %f], eps[%e]\n",
+                   fq->get_friendly_name().c_str(),
+                   dq_type.c_type_string().c_str(),
+                   fq_type.c_type_string().c_str(),
+                   mid_type.c_type_string().c_str(),
+                   const_out_low->cast_vector<float>()[0],
+                   const_out_high->cast_vector<float>()[0],
+                   in_low_val,
+                   in_high_val,
+                   diff);
+        }
+
         auto new_fq =
             std::make_shared<v0::FakeQuantize>(data, input_low, input_high, new_out_low, new_out_high, levels);
-        new_fq->set_friendly_name(mul->get_friendly_name());
+        
+        std::shared_ptr<Node> final_output = new_fq;
+        if (new_fq->get_output_element_type(0) != dq_type) {
+            new_fq->set_friendly_name(mul->get_friendly_name() + "_mid");
+            final_output = std::make_shared<v0::Convert>(new_fq, dq_type);
+        }
 
-        copy_runtime_info({fq, convert1.get_node_shared_ptr(), convert2.get_node_shared_ptr()}, new_fq);
-        replace_node(mul, new_fq);
+        final_output->set_friendly_name(mul->get_friendly_name());
+        copy_runtime_info({fq, convert1.get_node_shared_ptr(), convert2.get_node_shared_ptr()}, final_output);
+        replace_node(mul, final_output);
 
         return true;
     };

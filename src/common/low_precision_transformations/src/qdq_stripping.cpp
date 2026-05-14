@@ -204,19 +204,40 @@ bool FQStrippingTransformation::run_on_model(const std::shared_ptr<ov::Model>& f
     }
 
     auto fq_ranges_are_the_same = [](const std::shared_ptr<ov::op::v0::FakeQuantize>& fq) {
-        auto equal_with_threshold = [](const ov::Output<ov::Node>& val1, const ov::Output<ov::Node>& val2) {
+        auto equal_with_threshold = [&](const ov::Output<ov::Node>& val1, const ov::Output<ov::Node>& val2) {
             auto diff = std::make_shared<ov::op::v1::Subtract>(val1, val2);
             auto abs_diff = std::make_shared<ov::op::v0::Abs>(diff);
-            auto eps = ov::op::v0::Constant::create(val1.get_element_type(), {}, {1e-6f});
+            auto eps = ov::op::v0::Constant::create(val1.get_element_type(), {}, {2e-2f});
             auto is_less = ov::util::get_constant_from_source(std::make_shared<ov::op::v1::Less>(abs_diff, eps));
 
             auto all_true = [](const std::shared_ptr<ov::op::v0::Constant>& c) {
-                auto v = c->get_vector<bool>();
+                auto v = c->cast_vector<bool>();
                 return std::all_of(v.begin(), v.end(), [](bool b) {
                     return b;
                 });
             };
-            return is_less && all_true(is_less);
+            if (is_less) {
+                if (all_true(is_less))
+                    return true;
+                auto lo_fp = std::make_shared<ov::op::v0::Convert>(val1, ov::element::f32);
+                auto hi_fp = std::make_shared<ov::op::v0::Convert>(val2, ov::element::f32);
+                auto lfp = ov::util::get_constant_from_source(lo_fp);
+                auto hfp = ov::util::get_constant_from_source(hi_fp);
+                auto lv = lfp->cast_vector<float>();
+                auto hv = hfp->cast_vector<float>();
+                printf("!![%s] not within range [%s]: ", fq->get_friendly_name().c_str(), val1.get_element_type().c_type_string().c_str());
+                for (const auto v : lv) {
+                    printf("%f, ", v);
+                }
+                printf(" <-> ");
+                for (const auto v : hv) {
+                    printf("%f, ", v);
+                }
+                printf("\n");
+            } else {
+                printf("!![%s] don't get const range\n", fq->get_friendly_name().c_str());
+            }
+            return false;
         };
 
         return equal_with_threshold(fq->input_value(1), fq->input_value(3)) &&
