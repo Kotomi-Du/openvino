@@ -229,14 +229,23 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         auto fillrange =
             std::make_shared<ov::op::v4::Range>(range_start, range_end, one_without_shape, ov::element::i64);
 
-        std::vector<int64_t> unsqueeze_shape{1, 1, -1, 1};
-        auto reshape_const = ov::op::v0::Constant::create(ov::element::i64, {4}, unsqueeze_shape);
-        auto dstidx = std::make_shared<ov::op::v1::Reshape>(fillrange, reshape_const, true);
-        auto dstidx_broadcast =
-            std::make_shared<ov::op::v3::Broadcast>(dstidx, q_shape, ov::op::BroadcastType::BIDIRECTIONAL);
+        //const auto k_shape = register_new_node<v3::ShapeOf>(K);
+        
+        //std::vector<int64_t> unsqueeze_shape{1, 1, -1, 1};
+        //auto reshape_const = ov::op::v0::Constant::create(ov::element::i64, {4}, unsqueeze_shape);
+        //auto dstidx = std::make_shared<ov::op::v1::Reshape>(fillrange, reshape_const, true);
+        //auto dstidx_broadcast =
+        //    std::make_shared<ov::op::v3::Broadcast>(dstidx, k_shape, ov::op::BroadcastType::BIDIRECTIONAL);
 
-        auto updateK = std::make_shared<ov::op::v12::ScatterElementsUpdate>(past_key, dstidx_broadcast, K, two);
-        auto updateV = std::make_shared<ov::op::v12::ScatterElementsUpdate>(past_value, dstidx_broadcast, V, two);
+        //auto updateK = std::make_shared<ov::op::v12::ScatterElementsUpdate>(past_key, dstidx_broadcast, K, two);
+        //auto updateV = std::make_shared<ov::op::v12::ScatterElementsUpdate>(past_value, dstidx_broadcast, V, two);
+
+        std::shared_ptr<ov::Node> scatter_idx =
+            register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
+        scatter_idx = register_new_node<v1::Add>(scatter_idx, past_seqlen);
+        const auto scatter_axis = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {2}));
+        auto updateK = register_new_node<v3::ScatterUpdate>(past_key, scatter_idx, K, two);
+        auto updateV = register_new_node<v3::ScatterUpdate>(past_value, scatter_idx, V, two);
 
         //const auto past_k_shape = register_new_node<v3::ShapeOf>(past_key);
         //const auto full_len = get_dimensions(past_k_shape, {2});
@@ -273,7 +282,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         if (noreorder && std::string("true") == noreorder) {
             const auto key_shape = register_new_node<v3::ShapeOf>(past_key);
             const auto past_len = get_dimensions(key_shape, {2});
-            concat_kv_len = register_new_node<v1::Add>(past_len, one);
+            concat_kv_len = register_new_node<v1::Add>(past_len, current_seqlen);
         } else {
             if (hack > 0) {
                 past_key = register_new_node<v8::Slice>(past_key, zero, fixed_past, one, two);
@@ -295,25 +304,37 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     ov::Output<ov::Node> present_k = K;
     ov::Output<ov::Node> present_v = V;
 
-    // const auto concat_kv_len = get_dimensions(K.get_node_shared_ptr(), {2});
+    if (!concat_kv_len)
+        concat_kv_len = get_dimensions(K.get_node_shared_ptr(), {2});
     const auto concat_kv_len_scalar = register_new_node<v0::Squeeze>(concat_kv_len);
 
+    static const auto qknobcast = []() {
+        const auto txt = std::getenv("qknobcast");
+        return txt && txt == std::string_view("true");
+    }();
     // Broadcast KV if grouped query attention
     const size_t kv_num_heads_factor = num_heads / kv_num_heads;
     if (kv_num_heads_factor > 1) {
-        const auto kv_shape = register_new_node<v3::ShapeOf>(K);
-        const auto kv_shape_prev_2 = get_dimensions(kv_shape, {0, 1});
-        const auto kv_shape_last_2 = get_dimensions(kv_shape, {2, 3});
-        auto new_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{kv_shape_prev_2, one, kv_shape_last_2}, 0);
-        K = register_new_node<v1::Reshape>(K, new_kv_shape, false);
-        V = register_new_node<v1::Reshape>(V, new_kv_shape, false);
-        K = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, K), 2);
-        V = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, V), 2);
-        const auto q_shape = register_new_node<v3::ShapeOf>(Q);
-        const auto q_shape_prev_2 = get_dimensions(q_shape, {0, 1});
-        auto extended_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{q_shape_prev_2, kv_shape_last_2}, 0);
-        K = register_new_node<v1::Reshape>(K, extended_kv_shape, false);
-        V = register_new_node<v1::Reshape>(V, extended_kv_shape, false);
+        if (qknobcast) {
+            printf("skip QK broadcast![%s] with [%zu]/[%zu]\n",
+                   node->get_friendly_name().c_str(),
+                   size_t(num_heads),
+                   size_t(kv_num_heads));
+        } else {
+            const auto kv_shape = register_new_node<v3::ShapeOf>(K);
+            const auto kv_shape_prev_2 = get_dimensions(kv_shape, {0, 1});
+            const auto kv_shape_last_2 = get_dimensions(kv_shape, {2, 3});
+            auto new_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{kv_shape_prev_2, one, kv_shape_last_2}, 0);
+            K = register_new_node<v1::Reshape>(K, new_kv_shape, false);
+            V = register_new_node<v1::Reshape>(V, new_kv_shape, false);
+            K = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, K), 2);
+            V = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, V), 2);
+            const auto q_shape = register_new_node<v3::ShapeOf>(Q);
+            const auto q_shape_prev_2 = get_dimensions(q_shape, {0, 1});
+            auto extended_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{q_shape_prev_2, kv_shape_last_2}, 0);
+            K = register_new_node<v1::Reshape>(K, extended_kv_shape, false);
+            V = register_new_node<v1::Reshape>(V, extended_kv_shape, false);
+        }
     }
 
     // Make attention mask
@@ -357,8 +378,16 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         mask = register_new_node<v1::Select>(triu, minus_inf, typed_zero);
     }
 
+    static const auto skipmask = []() {
+        const auto txt = std::getenv("skipmask");
+        return txt && txt == std::string_view("true");
+    }();
+
     std::shared_ptr<ov::Node> qga_output;
-    if (scale != 0.0f) {
+    if (skipmask) {
+        printf("casual without mask for [%s]!\n", node->get_friendly_name().c_str());
+        qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, true);
+    } else if (scale != 0.0f) {
         auto scale_node = register_new_node(v0::Constant::create(T, Shape{}, {scale}));
         qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, mask, scale_node, false);
     } else {

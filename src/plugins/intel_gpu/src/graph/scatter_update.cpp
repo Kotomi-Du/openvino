@@ -50,10 +50,23 @@ scatter_update_inst::typed_primitive_inst(network& network, scatter_update_node 
 
 void scatter_update_inst::on_execute() {
     update_output_memory();
+    if (_outputs.size() > 0) {
+        is_inplace = static_cast<bool>(_outputs[0]) && _network.get_engine().is_the_same_buffer(output_memory(), input_memory());
+        GPU_DEBUG_TRACE_DETAIL << id() << " check inplace[" << is_inplace << "]: out[" << output_memory_ptr(0)->buffer_ptr() << "] in["
+                               << input_memory_ptr(0)->buffer_ptr() << "] " << std::endl;
+    }
 }
 
 void scatter_update_inst::update_output_memory() {
-    if (!can_be_optimized() || _impl_params->is_dynamic())
+     static const auto inplacekv = []() {
+        const auto txt = std::getenv("inplacekv");
+        return txt && txt == std::string_view("true");
+    }();
+
+    if ((!inplacekv && !can_be_optimized()) || _impl_params->is_dynamic())
+        return;
+
+    if (_deps.empty())
         return;
 
     if (_outputs.size() > 0 && static_cast<bool>(_outputs[0])
@@ -66,6 +79,7 @@ void scatter_update_inst::update_output_memory() {
     if (input_memory_ptr() == nullptr)
         return;
 
+    GPU_DEBUG_TRACE_DETAIL << id() << ": scatter_update release output " << _outputs[0].get() << "and reuse input " << &input_memory() << std::endl;
     // Can_be_optimized nodes are allocating from memory_pool too. In this case,
     // we need release the legacy output memory from memory pool explicitly.
     if (static_cast<bool>(_outputs[0]) &&
@@ -73,6 +87,7 @@ void scatter_update_inst::update_output_memory() {
         _network.get_memory_pool().release_memory(_outputs[0].get(), get_node().get_unique_id(), get_node().id(), _network.get_id());
     }
     _outputs = {_network.get_engine().reinterpret_buffer(input_memory(), _impl_params->get_output_layout())};
+    is_inplace = true;
     _mem_allocated = false;
 }
 }  // namespace cldnn

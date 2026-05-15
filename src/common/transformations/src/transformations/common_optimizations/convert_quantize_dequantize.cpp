@@ -213,16 +213,18 @@ ConvertQuantizeDequantize::ConvertQuantizeDequantize(const ov::element::TypeVect
             op_util::get_single_value(ov::as_type_ptr<v0::Constant>(input_high.get_node_shared_ptr()), in_high_val);
             const auto diff =
                 std::max(std::abs(new_out_low_val - in_low_val), std::abs(new_out_high_val - in_high_val));
-            printf("[%s]: dq[%s] fq[%s] -> [%s], new out[%f ~ %f], in[%f ~ %f], eps[%e]\n",
-                   fq->get_friendly_name().c_str(),
-                   dq_type.c_type_string().c_str(),
-                   fq_type.c_type_string().c_str(),
-                   mid_type.c_type_string().c_str(),
-                   const_out_low->cast_vector<float>()[0],
-                   const_out_high->cast_vector<float>()[0],
-                   in_low_val,
-                   in_high_val,
-                   diff);
+            if (dq_type != ov::element::f32 || fq_type != ov::element::f32) {
+                printf("[%s]: dq[%s] fq[%s] -> [%s], new out[%f ~ %f], in[%f ~ %f], eps[%e]\n",
+                       fq->get_friendly_name().c_str(),
+                       dq_type.c_type_string().c_str(),
+                       fq_type.c_type_string().c_str(),
+                       mid_type.c_type_string().c_str(),
+                       const_out_low->cast_vector<float>()[0],
+                       const_out_high->cast_vector<float>()[0],
+                       in_low_val,
+                       in_high_val,
+                       diff);
+            }
         }
 
         auto new_fq =

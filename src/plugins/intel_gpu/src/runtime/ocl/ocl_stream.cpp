@@ -414,17 +414,26 @@ void ocl_stream::wait_for_events(const std::vector<event::ptr>& events) {
 
     bool needs_barrier = false;
     std::vector<cl_event> clevents;
+    size_t skip_count = 0;
     for (auto& ev : events) {
         if (!ev)
             continue;
 
         if (auto ocl_base_ev = downcast<ocl_base_event>(ev.get())) {
+            if (ocl_base_ev->is_set()) {
+                skip_count++;
+                continue;
+            }
             if (ocl_base_ev->get().get() != nullptr) {
                 clevents.push_back(ocl_base_ev->get().get());
             } else {
                 needs_barrier = true;
             }
         }
+    }
+
+    if (skip_count > 0) {
+        GPU_DEBUG_TRACE_DETAIL << "stream waits: skip " << skip_count << " complete cl_event, wait for " << clevents.size() << " cl_event\n";
     }
 
     cl::Event barrier_ev;

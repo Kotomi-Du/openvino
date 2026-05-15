@@ -564,7 +564,8 @@ bool crop_in_place_optimization::match(const program_node& node,
     // And non_constant input1/input2 makes risky execution of runtime buffer fusing.
     auto& crop_node = node.as<crop>();
     if ((crop_node.get_primitive()->op_mode == cldnn::crop_ngraph_op_mode::variadic_split) &&
-        (!crop_node.get_dependency(1).is_constant() || !crop_node.get_dependency(2).is_constant()))
+        !crop_node.get_dependency(1).is_constant())
+        //(!crop_node.get_dependency(1).is_constant() || !crop_node.get_dependency(2).is_constant()))
         return false;
 
     if (node.get_users().size() > 0) {

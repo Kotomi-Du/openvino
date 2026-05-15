@@ -421,6 +421,7 @@ void primitive_inst::update_shape() {
     if (!get_node().is_type<kv_cache>() && !get_node().is_type<strided_slice>() && !input_shape_changed && _impl_params->get_output_layout().is_static())
         return;
 
+    std::vector<primitive_inst*> in_order_waits;
     std::vector<event::ptr> dependencies_events;
     auto queue_type = get_network().get_stream().get_queue_type();
     bool has_runtime_deps = false;
@@ -445,13 +446,34 @@ void primitive_inst::update_shape() {
             continue;
         }
 
+        if (get_node().is_constant()) {
+            continue;
+        }
+
+        in_order_waits.push_back(dep);
+
         if (!get_node().is_type<shape_of>() &&
         !(dep->get_node().get_selected_impl() ? dep->get_node().get_selected_impl()->is_cpu() : dep->get_node().get_preferred_impl_type() == impl_types::cpu)) {
+            auto event = dep->get_impl_params()->out_event;
+            
+            if (event && event->is_set()) {
+                GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already set, skip\n";
+                continue;
+            }
+
+            if (queue_type == QueueTypes::in_order) {
+                if (dep->get_flag(ExecutionFlags::ALREADY_WAITED)) {
+                    GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer dependency " << i << " already waited, skip\n";
+                    continue;
+                }
+            }
+            
+
             has_runtime_deps = true;
 
             // Events may be not created for in-order queue, so take them for OOO queue only
-            if (queue_type == QueueTypes::out_of_order && dep->get_impl_params()->out_event) {
-                dependencies_events.push_back(dep->get_impl_params()->out_event);
+            if (queue_type == QueueTypes::out_of_order && event) {
+                dependencies_events.push_back(event);
 
                 GPU_DEBUG_TRACE_DETAIL << id() << ": shape infer waits for " << i << " dependency\n";
             }
@@ -460,11 +482,16 @@ void primitive_inst::update_shape() {
 
     if (has_runtime_deps) {
         OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, openvino::itt::handle("update_shape_sync: " + id()));
-        GPU_DEBUG_TRACE_DETAIL << "runtime synchronization for " << id() << " shape inference\n";
+        GPU_DEBUG_TRACE_DETAIL << "runtime synchronization [" << (queue_type == QueueTypes::out_of_order ? "OoO Queue" : "Inorder Queue") << "] for " << id()
+                               << " shape inference: " << dependencies_events.size() << " events\n";
+
         if (!dependencies_events.empty() && queue_type == QueueTypes::out_of_order) {
             get_network().get_stream().wait_for_events(dependencies_events);
         } else if (queue_type == QueueTypes::in_order) {
             get_network().get_stream().finish();
+            for (auto& dep : in_order_waits) {
+                dep->set_flag(ExecutionFlags::ALREADY_WAITED);
+            }
         }
     }
 
@@ -1021,18 +1048,22 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         return txt && txt == std::string_view("true");
     }();
 
-    if (inplacekv && get_node().is_type<scatter_elements_update>() && actual_layouts[0] == _impl_params->get_input_layout(0)) {
-        GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_elements_update inplace" << std::endl;
-        //getchar();
-        if (!_outputs[0]) {
-            GPU_DEBUG_TRACE_DETAIL << id() << ": make output[" << _impl_params->get_output_layout(0).to_short_string() << "] be input["
-                                   << _impl_params->get_input_layout(0).to_short_string() << "]" << std::endl;
-            _outputs[0] = input_memory_ptr(0);
-            _max_output_layout_count[0] = _outputs[0]->count();
+    if (get_node().is_type<scatter_elements_update>() || get_node().is_type<scatter_update>()) {
+        if (actual_layouts[0] != _impl_params->get_input_layout(0)) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": scatter_*_update has different layout so skip inplace" << std::endl;
+        } else if (inplacekv) {
+            GPU_DEBUG_TRACE_DETAIL << id() << ": try make scatter_*_update inplace" << std::endl;
+            //getchar();
+            if (!_outputs[0]) {
+                GPU_DEBUG_TRACE_DETAIL << id() << ": make output[" << _impl_params->get_output_layout(0).to_short_string() << "] be input["
+                                       << _impl_params->get_input_layout(0).to_short_string() << "]" << std::endl;
+                _outputs[0] = input_memory_ptr(0);
+                _max_output_layout_count[0] = _outputs[0]->count();
 
-        } else {
-            GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr() << "]"
-                                   << std::endl;
+            } else {
+                GPU_DEBUG_TRACE_DETAIL << id() << ": has output[" << _outputs[0]->buffer_ptr() << "] and input[" << input_memory_ptr(0)->buffer_ptr() << "]"
+                                       << std::endl;
+            }
         }
     }
 

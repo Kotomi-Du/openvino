@@ -279,7 +279,7 @@ void FrontEnd::normalize(const std::shared_ptr<ov::Model>& model) const {
     }();
 
     if (inplacekv) {
-
+        
         std::vector<std::shared_ptr<ov::op::v0::Result>> removes;
         for (const auto& out : model->get_results()) {
             if (out->get_friendly_name().find("present") == 0) {
@@ -291,7 +291,7 @@ void FrontEnd::normalize(const std::shared_ptr<ov::Model>& model) const {
             printf("InplaceKV remove output [%s]\n", out->get_friendly_name().c_str());
             model->remove_result(out);
         }
-
+        
     }
 }
 
