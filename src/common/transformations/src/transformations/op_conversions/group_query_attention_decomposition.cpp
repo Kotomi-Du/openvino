@@ -73,7 +73,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     std::shared_ptr<ov::op::internal::GroupQueryAttention> node) {
     static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
-        return txt && txt == std::string_view("true");
+        return !txt || txt == std::string_view("true");
     }();
 
     const auto num_heads = node->get_num_heads();
@@ -310,8 +310,9 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     static const auto qknobcast = []() {
         const auto txt = std::getenv("qknobcast");
-        return txt && txt == std::string_view("true");
+        return !txt || txt == std::string_view("true");
     }();
+
     // Broadcast KV if grouped query attention
     const size_t kv_num_heads_factor = num_heads / kv_num_heads;
     if (kv_num_heads_factor > 1) {

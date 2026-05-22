@@ -1045,7 +1045,7 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
 
     static const auto inplacekv = []() {
         const auto txt = std::getenv("inplacekv");
-        return txt && txt == std::string_view("true");
+        return !txt || txt == std::string_view("true");
     }();
 
     if (get_node().is_type<scatter_elements_update>() || get_node().is_type<scatter_update>()) {
