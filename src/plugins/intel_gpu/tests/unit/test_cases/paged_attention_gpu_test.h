@@ -1822,7 +1822,6 @@ public:
     struct gpu_outputs {
         std::map<cldnn::primitive_id, cldnn::network_output> outputs;
         cldnn::memory::ptr key_cache_mem;
-        cldnn::network::ptr network;
     };
 
     gpu_outputs run_gpu_inference(PagedAttentionManager& pam, T& p) {
@@ -2171,7 +2170,6 @@ public:
         last_block_indices_begins = pam.block_indices_begins;
 
         result.outputs = network->execute();
-        result.network = network;
 
         last_output_data_mem = result.outputs.at("output_data").get_memory();
 
