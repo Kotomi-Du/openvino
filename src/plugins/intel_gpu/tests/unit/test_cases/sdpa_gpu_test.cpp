@@ -495,14 +495,19 @@ static std::vector<T> load_bin_as(const std::string& path) {
 }
 
 // When seq_major is true the source is laid out [batch, seq, heads, head_size]; when false it is
-// [batch, heads, seq, head_size]. The interleaved scale/zp buffer is always [batch, heads, seq, 2].
-// If provided_scale is non-null it supplies the per-(batch, head, token) scale ([batch, heads, seq]);
-// otherwise the scale is derived from each group's range. When symmetric is true the quantization is
-// symmetric (deq = q * scale, no zero-point) and scales_zp is left unused.
+// [batch, heads, seq, head_size].
+//
+// Two quantization strategies are supported:
+//   * Asymmetric (symmetric=false): per-(batch, head, token) over the whole head_size dim.
+//     Produces an interleaved [scale, zp] buffer ([batch, heads, seq, 2]) in scales_zp.
+//   * Symmetric  (symmetric=true):  one scale per (batch, head, channel) shared across the
+//     sequence dimension (deq = q * scale, no zero-point). provided_scale, when non-null,
+//     supplies these per-channel scales laid out [batch, heads, head_size]; otherwise the
+//     per-channel scale is derived from the max-abs over all sequence positions.
 static kv_quant_result quantize_kv_per_token(const std::vector<ov::float16>& src,
                                              int batch, int seq, int heads, int head_size,
                                              int bit_width, bool seq_major = true,
-                                             const std::vector<float>* provided_scale = nullptr,
+                                             const std::vector<ov::float16>* provided_scale = nullptr,
                                              bool symmetric = false) {
     // Symmetric uses a signed range centered on zero (no zero-point); asymmetric int4 uses
     // unsigned nibbles [0, 15] with a zero-point.
@@ -515,73 +520,73 @@ static kv_quant_result quantize_kv_per_token(const std::vector<ov::float16>& src
     r.dequantized.assign(static_cast<size_t>(batch) * seq * heads * head_size, ov::float16(0.0f));
     r.scales_zp.assign(static_cast<size_t>(batch) * heads * seq * 2, ov::float16(0.0f));
 
-    for (int b = 0; b < batch; ++b) {
-        for (int s = 0; s < seq; ++s) {
-            for (int h = 0; h < heads; ++h) {
-                const size_t base = seq_major
-                                        ? ((static_cast<size_t>(b) * seq + s) * heads + h) * head_size
-                                        : ((static_cast<size_t>(b) * heads + h) * seq + s) * head_size;
-                float min_v = std::numeric_limits<float>::max();
-                float max_v = std::numeric_limits<float>::lowest();
-                for (int d = 0; d < head_size; ++d) {
-                    const float v = static_cast<float>(src[base + d]);
-                    min_v = std::min(min_v, v);
-                    max_v = std::max(max_v, v);
-                }
-                const size_t token_idx = (static_cast<size_t>(b) * heads + h) * seq + s;
-                const float max_abs = std::max(std::abs(min_v), std::abs(max_v));
+    const auto elem_base = [&](int b, int s, int h) -> size_t {
+        return seq_major ? ((static_cast<size_t>(b) * seq + s) * heads + h) * head_size
+                         : ((static_cast<size_t>(b) * heads + h) * seq + s) * head_size;
+    };
+    const auto packed_base_of = [&](int b, int s, int h) -> size_t {
+        return seq_major ? ((static_cast<size_t>(b) * seq + s) * heads + h) * packed_hs
+                         : ((static_cast<size_t>(b) * heads + h) * seq + s) * packed_hs;
+    };
+    const auto pack_value = [&](size_t packed_base, int d, int q) {
+        if (bit_width == 4) {
+            // low nibble = even head dim, high nibble = odd head dim
+            auto& byte = r.packed[packed_base + d / 2];
+            if (d % 2 == 0)
+                byte = static_cast<int8_t>((byte & 0xF0) | (q & 0x0F));
+            else
+                byte = static_cast<int8_t>((byte & 0x0F) | ((q & 0x0F) << 4));
+        } else {
+            r.packed[packed_base + d] = static_cast<int8_t>(q);
+        }
+    };
 
-                // Use the externally provided per-token scale when available; otherwise derive it
-                // from the group's range.
-                float scale;
-                float zp;
-                if (symmetric) {
-                    // deq = q * scale, no zero-point.
-                    scale = provided_scale != nullptr ? (*provided_scale)[token_idx]
-                                                      : max_abs / static_cast<float>(q_max);
-                    if (scale == 0.0f)
-                        scale = 1.0f;  // degenerate (constant) group: avoid div-by-zero
-                    zp = 0.0f;
-                } else {
-                    // deq = (q - zp) * scale, with q(min)=q_min => zp = q_min - min/scale.
-                    float scale_f = provided_scale != nullptr
-                                        ? (*provided_scale)[token_idx]
-                                        : (max_v - min_v) / static_cast<float>(q_max - q_min);
-                    if (scale_f == 0.0f)
-                        scale_f = 1.0f;  // degenerate (constant) group: avoid div-by-zero
-                    const float zp_f = static_cast<float>(q_min) - min_v / scale_f;
-                    // Round to fp16 to match the kernel, which reads asymmetric scale/zp as fp16.
-                    const ov::float16 scale_h(scale_f);
-                    const ov::float16 zp_h(zp_f);
-                    scale = static_cast<float>(scale_h);
-                    zp = static_cast<float>(zp_h);
-                    const size_t comp_base = token_idx * 2;
-                    r.scales_zp[comp_base + 0] = scale_h;
-                    r.scales_zp[comp_base + 1] = zp_h;
-                }
+    if (symmetric) {
+        // Per-channel symmetric quantization: one scale per (batch, head, channel), shared
+        // across the whole sequence dimension (deq = q * scale, no zero-point).
+        std::vector<float> channel_scale(static_cast<size_t>(batch) * heads * head_size, 0.0f);
+        if (provided_scale != nullptr) {
+            for (size_t i = 0; i < channel_scale.size(); ++i)
+                channel_scale[i] = static_cast<float>((*provided_scale)[i]);
+        } else {
+            for (int b = 0; b < batch; ++b)
+                for (int h = 0; h < heads; ++h)
+                    for (int d = 0; d < head_size; ++d) {
+                        float max_abs = 0.0f;
+                        for (int s = 0; s < seq; ++s)
+                            max_abs = std::max(max_abs, std::abs(static_cast<float>(src[elem_base(b, s, h) + d])));
+                        channel_scale[(static_cast<size_t>(b) * heads + h) * head_size + d] =
+                            max_abs / static_cast<float>(q_max);
+                    }
+        }
+        for (auto& sc : channel_scale)
+            if (sc == 0.0f)
+                sc = 1.0f;  // degenerate (constant) channel: avoid div-by-zero
 
-                const size_t packed_base = seq_major
-                                               ? ((static_cast<size_t>(b) * seq + s) * heads + h) * packed_hs
-                                               : ((static_cast<size_t>(b) * heads + h) * seq + s) * packed_hs;
-                for (int d = 0; d < head_size; ++d) {
-                    const float v = static_cast<float>(src[base + d]);
-                    int q = static_cast<int>(std::lround(v / scale + zp));
-                    q = std::max(q_min, std::min(q_max, q));
-                    r.dequantized[base + d] = ov::float16((static_cast<float>(q) - zp) * scale);
-                    if (bit_width == 4) {
-                        // low nibble = even head dim, high nibble = odd head dim
-                        auto& byte = r.packed[packed_base + d / 2];
-                        if (d % 2 == 0)
-                            byte = static_cast<int8_t>((byte & 0xF0) | (q & 0x0F));
-                        else
-                            byte = static_cast<int8_t>((byte & 0x0F) | ((q & 0x0F) << 4));
-                    } else {
-                        r.packed[packed_base + d] = static_cast<int8_t>(q);
+        for (int b = 0; b < batch; ++b) {
+            for (int s = 0; s < seq; ++s) {
+                for (int h = 0; h < heads; ++h) {
+                    const size_t base = elem_base(b, s, h);
+                    const size_t packed_base = packed_base_of(b, s, h);
+                    const size_t scale_base = (static_cast<size_t>(b) * heads + h) * head_size;
+                    for (int d = 0; d < head_size; ++d) {
+                        const float scale = channel_scale[scale_base + d];
+                        const float v = static_cast<float>(src[base + d]);
+                        int q = static_cast<int>(std::lround(v / scale));
+                        q = std::max(q_min, std::min(q_max, q));
+                        r.dequantized[base + d] = ov::float16(static_cast<float>(q) * scale);
+                        pack_value(packed_base, d, q);
                     }
                 }
             }
         }
+        return r;
     }
+
+    if (!symmetric){
+        assert(false && "Asymmetric quantization not implemented yet");
+    }
+    
     return r;
 }
 
@@ -727,9 +732,18 @@ static void run_compressed_kv_sdpa_gqa_test(int bit_width) {
     auto k_orig = load_bin_as<ov::float16>(data_dir + "k_f16__1_10_512_128__bfyx.bin");
     auto v_orig = load_bin_as<ov::float16>(data_dir + "v_f16__1_10_512_128__bfyx.bin");
 
-    // Externally provided per-(batch, head, token) symmetric quantization scales ([batch, heads, seq], f32).
-    auto k_scale = load_bin_as<float>(data_dir + "k_scale_0.bin");
-    auto v_scale = load_bin_as<float>(data_dir + "v_scale_0.bin");
+    // Externally provided per-(batch, head, channel) symmetric quantization scales
+    // ([batch, heads, head_size]); the sequence dimension shares the same scale. The dumps are
+    // stored as fp32 on disk but consumed as fp16 scales, so load fp32 and round to fp16.
+    const auto load_scale_fp16 = [](const std::string& path) {
+        const auto raw = load_bin_as<float>(path);
+        std::vector<ov::float16> out(raw.size());
+        for (size_t i = 0; i < raw.size(); ++i)
+            out[i] = ov::float16(raw[i]);
+        return out;
+    };
+    auto k_scale = load_scale_fp16(data_dir + "k_scale_0.bin");
+    auto v_scale = load_scale_fp16(data_dir + "v_scale_0.bin");
 
     // Opt-in debug dumps: set env var `sdpa_kv_debug` to any value other than "false" to enable.
     static const bool sdpa_kv_debug = []() {
@@ -749,7 +763,7 @@ static void run_compressed_kv_sdpa_gqa_test(int bit_width) {
             std::cout << " " << static_cast<float>(k_orig[i]);
         std::cout << "\n[gqa] k_scale[0..7]:";
         for (size_t i = 0; i < std::min<size_t>(8, k_scale.size()); ++i)
-            std::cout << " " << k_scale[i];
+            std::cout << " " << static_cast<float>(k_scale[i]);
         std::cout << std::endl;
     }
 
@@ -760,7 +774,8 @@ static void run_compressed_kv_sdpa_gqa_test(int bit_width) {
     ASSERT_EQ(v_scale.size(), static_cast<size_t>(batch) * kv_num_heads * head_size);
 
     // Compute packed KV and dequantized values on host from the unpacked K/V using the externally
-    // provided symmetric scales (no zero-point). seq_major=false because the dumps are laid out
+    // provided per-channel symmetric scales (no zero-point), one scale per (batch, head, channel)
+    // shared across the sequence. seq_major=false because the dumps are laid out
     // [batch, heads, seq, head_size].
     auto k_q = quantize_kv_per_token(k_orig, batch, seq_kv, kv_num_heads, head_size, bit_width, /*seq_major=*/false, &k_scale, /*symmetric=*/true);
     auto v_q = quantize_kv_per_token(v_orig, batch, seq_kv, kv_num_heads, head_size, bit_width, /*seq_major=*/false, &v_scale, /*symmetric=*/true);
@@ -774,6 +789,22 @@ static void run_compressed_kv_sdpa_gqa_test(int bit_width) {
         for (size_t i = 0; i < std::min<size_t>(8, k_q.dequantized.size()); ++i)
             std::cout << " " << static_cast<float>(k_q.dequantized[i]);
         std::cout << std::endl;
+
+        // Dump the host-quantized K/V to txt: packed integer codes and dequantized values,
+        // one value per line, written to <prefix>_packed.txt and <prefix>_dequant.txt.
+        auto dump_quant_txt = [](const std::string& prefix, const kv_quant_result& q) {
+            std::ofstream packed_fs(prefix + "_packed.txt");
+            for (size_t i = 0; i < q.packed.size(); ++i)
+                packed_fs << static_cast<int>(q.packed[i]) << std::endl;
+            std::ofstream dequant_fs(prefix + "_dequant.txt");
+            for (size_t i = 0; i < q.dequantized.size(); ++i)
+                dequant_fs << static_cast<float>(q.dequantized[i]) << std::endl;
+            std::cout << "[gqa] wrote " << q.packed.size() << " packed / " << q.dequantized.size()
+                      << " dequantized values to " << prefix << "_{packed,dequant}.txt" << std::endl;
+        };
+        dump_quant_txt("k_q_" + std::to_string(bit_width), k_q);
+        dump_quant_txt("v_q_" + std::to_string(bit_width), v_q);
+        std::cout << std::endl;
     }
 
     // Physical layouts follow the on-disk order [batch, heads, seq, head_size], so the SDPA
@@ -781,7 +812,8 @@ static void run_compressed_kv_sdpa_gqa_test(int bit_width) {
     const layout q_layout({batch, q_num_heads, seq_q, head_size}, data_types::f16, format::bfyx);
     const layout kv_deq_layout({batch, kv_num_heads, seq_kv, head_size}, data_types::f16, format::bfyx);
     const layout kv_packed_layout({batch, kv_num_heads, seq_kv, packed_hs}, data_types::i8, format::bfyx);
-    const layout comp_layout({batch, kv_num_heads, seq_kv, 1}, data_types::f32, format::bfyx);
+    // Per-channel scales: one value per (batch, head, channel), shared across the sequence.
+    const layout comp_layout({batch, kv_num_heads, 1, head_size}, data_types::f16, format::bfyx);
 
     auto q_mem = engine.allocate_memory(q_layout);
     set_values(q_mem, q_data);
@@ -828,9 +860,8 @@ static void run_compressed_kv_sdpa_gqa_test(int bit_width) {
         scaled_dot_product_attention::QuantizationAttributes qa;
         qa.quantization_type = ov::op::internal::DynamicQuantize::QuantizationType::Symmetric;
         qa.quantization_dt = ov::element::i8;
-        qa.scale_dt = ov::element::f32;
-        qa.zp_dt = ov::element::dynamic;
-        qa.group_sizes = {1, 1, 1, UINT64_MAX};
+        qa.scale_dt = ov::element::f16;
+        qa.group_sizes = {1, 1, 512, 1};
         qa.scales_zp_output_order = {0, 1, 2, 3};
         qa.output_storage_type = ov::op::internal::DynamicQuantize::OutputStorageType::Planar;
 
