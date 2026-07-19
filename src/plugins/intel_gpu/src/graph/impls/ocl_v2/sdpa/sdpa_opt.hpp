@@ -29,6 +29,10 @@ struct SDPAOpt : public ImplementationManager {
     [[nodiscard]] std::unique_ptr<primitive_impl> create_impl(const program_node& node, const RuntimeParams& params) const override;
     [[nodiscard]] static bool supports_micro_sdpa(const kernel_impl_params& params);
     [[nodiscard]] bool validate_impl(const program_node& node) const override {
+        if (!node.get_config().get_use_onednn()) {
+            return false;
+        }
+
         const auto desc = node.as<scaled_dot_product_attention>().get_primitive();
         static constexpr std::array supported_q_types = {
             ov::element::f32,
