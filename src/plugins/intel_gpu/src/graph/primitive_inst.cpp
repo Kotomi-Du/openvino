@@ -803,35 +803,41 @@ void primitive_inst::realloc_outputs(bool prev_execution_skipped) {
         OPENVINO_ASSERT(output_it != users.end(), "[GPU] stateless_kv should directly connect to an output");
 
         auto& result = **output_it;
-        //result.set_can_be_optimized(false);
         if (result.is_dynamic()) {
             if (!result._update_shape_done_by_other) {
                 result.update_shape();
                 result._update_shape_done_by_other = true;
             }
-            result.realloc_if_needed();
-        } else if (!result.output_memory_ptr()) {
-            result.realloc_if_needed();
         }
+        if (!result.output_memory_ptr()) {
+            result.set_can_be_optimized(false);
+        }
+        result.realloc_if_needed();
 
+        const auto past_tensor = input_memory_ptr(0);
+        OPENVINO_ASSERT(past_tensor, "[GPU] Input memory is not prepared for stateless_kv node ", id());
         const auto present_tensor = result.output_memory_ptr();
         OPENVINO_ASSERT(present_tensor, "[GPU] Output memory of ", result.id(), " is not prepared for stateless_kv node ", id());
-        const auto& present_layout = present_tensor->get_layout();
+        const auto is_same = _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor);
+        const auto& past_layout = _impl_params->get_input_layout();
+        const auto& mid_layout = _impl_params->get_output_layout(0);
         const auto& target_layout = _impl_params->get_output_layout(1);
-        OPENVINO_ASSERT(present_layout.is_static() && target_layout.is_static());
-        const auto past_tensor = input_memory_ptr(0);
-        const auto is_same = (past_tensor && present_tensor) ? _network.get_engine().is_the_same_buffer(*present_tensor, *past_tensor) : false;
-        GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_tensor->buffer_ptr() << "] and output[" << present_tensor->buffer_ptr() << "](" << result.id()
+        const auto& present_layout = result._impl_params->get_output_layout();
+        if (mid_layout == present_layout) {
+            result.set_can_be_optimized(true);
+        }
+        GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_tensor->buffer_ptr() << "](" << past_tensor->get_layout().to_short_string() << ") and output["
+                               << present_tensor->buffer_ptr() << "](" << present_tensor->get_layout().to_short_string() << ")(" << result.id()
                                << ") same:" << is_same << std::endl;
-        GPU_DEBUG_TRACE_DETAIL << id() << ": input layout[" << past_tensor->get_layout().to_short_string() << "] and output layout["
-                               << present_layout.to_short_string() << "](" << result.id() << ") [" << target_layout.to_short_string() << "]" << std::endl;
+        GPU_DEBUG_TRACE_DETAIL << id() << ": input[" << past_layout.to_short_string() << "] -> mid[" << mid_layout.to_short_string() << "]["
+                               << target_layout.to_short_string() << "] -> output[" << present_layout.to_short_string() << "](" << result.id()
+                               << ") opt:" << result.can_be_optimized() << std::endl;
         // const auto target_axis = get_typed_desc<stateless_kv>()->concat_axis;
         // OPENVINO_ASSERT(present_layout.get_dim(target_axis) >= target_layout.get_dim(target_axis));
 
         _outputs[0] = present_tensor;
         _outputs[1] = get_network().get_engine().reinterpret_buffer(*present_tensor, target_layout);
         this->_mem_allocated = false;
-        result.set_flag(ExecutionFlags::SKIP);
         return;
     }
 
@@ -1590,6 +1596,10 @@ void primitive_inst::do_runtime_skip_reorder() {
         if (u->get_node().is_type<reorder>()) {
             if (u->get_node().can_be_optimized() && u->get_node().is_runtime_skippable()) {
                 auto out_port_idx = u->get_node().get_dependency_with_port(0).second;
+                if (out_port_idx == 0 && get_node().is_type<stateless_kv>()) {
+                    GPU_DEBUG_TRACE_DETAIL << "[do runtime skip reorder] user " << u->id() << " ignored since it's stateless_kv's target output" << std::endl;
+                    continue;
+                }
                 // If current node's output_node is not dynamic, the memory is already allocated at build time
                 auto alloc_type = allocation_type::unknown;
                 if (!get_node().is_dynamic_output_layout(out_port_idx) && static_cast<int64_t>(_outputs.size()) > out_port_idx) {
