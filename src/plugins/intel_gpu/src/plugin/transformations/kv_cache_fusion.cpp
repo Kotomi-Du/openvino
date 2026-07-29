@@ -396,7 +396,7 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                 }
 
                 auto split_tail_node =
-                    ov::as_type_ptr<ov::op::v0::Constant>(split_lengths_node->get_input_node_shared_ptr(2));
+                    ov::as_type_ptr<ov::op::v0::Constant>(split_lengths_node->get_input_node_shared_ptr(1));
                 if (!split_tail_node) {
                     return false;
                 }
