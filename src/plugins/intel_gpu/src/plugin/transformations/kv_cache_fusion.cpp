@@ -10,6 +10,7 @@
 #include "intel_gpu/op/read_value.hpp"
 #include "intel_gpu/op/sdpa.hpp"
 #include "intel_gpu/plugin/common_utils.hpp"
+#include "intel_gpu/runtime/debug_configuration.hpp"
 #include "openvino/core/node_vector.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/add.hpp"
@@ -497,14 +498,11 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         if (transformation_callback(kv_sdpa_node)) {
             return false;
         }
-        printf("@@##statelesskv(%s): [%s][%s](%zu) %s[%s] len[%s]\n",
-             is_slice_concat ? "SC" : (is_update_split ? "US" : "U"),
-               past_output.get_any_name().c_str(),
-               result_node->get_friendly_name().c_str(),
-               result_node->get_instance_id(),
-               sdpa_node ? "sdpa" : "next",
-               kv_sdpa_node->get_friendly_name().c_str(),
-               seqlen_output.get_node()->get_friendly_name().c_str());
+        GPU_DEBUG_TRACE_DETAIL << "@@##statelesskv(" << (is_slice_concat ? "SC" : (is_update_split ? "US" : "U")) << "): ["
+                               << past_output.get_any_name() << "][" << result_node->get_friendly_name() << "]("
+                               << result_node->get_instance_id() << ") " << (sdpa_node ? "sdpa" : "next") << "["
+                               << kv_sdpa_node->get_friendly_name() << "] len["
+                               << seqlen_output.get_node()->get_friendly_name() << "]" << std::endl;
         auto stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, pos_idx_output, target_axis, is_presnet_len);
         stateless_kv->set_friendly_name(past_output.get_any_name() + "_stateless");
         ov::copy_runtime_info(node_infos, stateless_kv);
