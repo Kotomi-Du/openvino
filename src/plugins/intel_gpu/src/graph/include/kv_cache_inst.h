@@ -63,6 +63,16 @@ public:
     std::vector<size_t> get_shape_infer_dependencies() const override {
         return {2};
     }
+
+    std::vector<layout> get_shape_info_input_layouts() const override {
+        auto res = parent::get_shape_info_input_layouts();
+        if (get_inputs_count() == 3) {
+            const auto& current_shape = get_input_layout(1).get_partial_shape();
+            const auto concat_axis = get_primitive()->concat_axis;
+            res.emplace_back(ov::PartialShape{current_shape[concat_axis]}, data_types::i32, format::bfyx);
+        }
+        return res;
+    }
 };
 
 using stateless_kv_node = typed_program_node<stateless_kv>;
@@ -145,7 +155,10 @@ public:
 
     bool get_is_inplace() const { return m_is_inplace; }
 
+    static bool is_posid_generation_enabled(const kernel_impl_params& impl_param);
+    static layout get_posid_layout(const kernel_impl_params& impl_param);
     static std::optional<int64_t> compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc);
+    void update_shape_info_tensor(const kernel_impl_params& params) override;
 
     typed_primitive_inst(network& network, const stateless_kv_node& desc);
     typed_primitive_inst(network& network) : parent(network) {}

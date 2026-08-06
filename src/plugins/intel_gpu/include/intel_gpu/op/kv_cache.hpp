@@ -115,13 +115,14 @@ public:
     OPENVINO_OP("StatelessKV", "gpu_opset");
 
     StatelessKV() = default;
-
+    StatelessKV(const Output<Node>& past, const Output<Node>& new_token_data, const Output<Node>& seq_len, int64_t concat_axis, bool is_present_len);
     StatelessKV(const Output<Node>& past,
                 const Output<Node>& new_token_data,
                 const Output<Node>& seq_len,
                 const Output<Node>& pos_idx,
                 int64_t concat_axis,
                 bool is_present_len);
+
     bool visit_attributes(ov::AttributeVisitor& visitor) override;
 
     void validate_and_infer_types() override;

@@ -329,7 +329,7 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
 
             static const auto gqareuse = []() {
                 const auto txt = std::getenv("gqareuse");
-                return !(txt && txt == std::string_view("false"));
+                return txt && txt == std::string_view("true");
             }();
             ov::Output<ov::Node> total_seqlen_output;
             if (pattern_map.count(total_seqlen) > 0) {
@@ -460,8 +460,13 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                     }
                 } else {
                     const auto idx_data = idx_const->cast_vector<int64_t>();
-                    if (idx_data.size() < 1 || idx_data[0] != 0) {
+                    if (idx_data.size() < 1) {
                         return false;
+                    }
+                    for (size_t i = 0; i < idx_data.size(); ++i) {
+                        if (idx_data[i] != static_cast<int64_t>(i)) {
+                            return false;
+                        }
                     }
                 }
 
@@ -486,15 +491,24 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         if (transformation_callback(kv_sdpa_node)) {
             return false;
         }
-        printf("@@##statelesskv(%s): [%s][%s](%zu) %s[%s] len[%s]\n",
+        static const auto env_nopos = std::getenv("nopos");
+        static const auto nopos = env_nopos && std::string_view("true") == env_nopos;
+        printf("@@##statelesskv(%s): [%s][%s](%zu) %s[%s] len[%s] pos[%s](%c)\n",
              is_slice_concat ? "SC" : (is_update_split ? "US" : "U"),
                past_output.get_any_name().c_str(),
                result_node->get_friendly_name().c_str(),
                result_node->get_instance_id(),
                sdpa_node ? "sdpa" : "next",
                kv_sdpa_node->get_friendly_name().c_str(),
-               seqlen_output.get_node()->get_friendly_name().c_str());
-        auto stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, pos_idx_output, target_axis, is_presnet_len);
+               seqlen_output.get_node()->get_friendly_name().c_str(),
+               pos_idx_output.get_node()->get_friendly_name().c_str(),
+               nopos ? 'N' : 'Y');
+        std::shared_ptr<op::StatelessKV> stateless_kv;
+        if (nopos) {
+            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, target_axis, is_presnet_len);
+        } else {
+            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, pos_idx_output, target_axis, is_presnet_len);
+        }
         stateless_kv->set_friendly_name(past_output.get_any_name() + "_stateless");
         ov::copy_runtime_info(node_infos, stateless_kv);
         stateless_kv->output(0).set_names(result_node->output(0).get_names());

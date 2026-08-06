@@ -744,10 +744,31 @@ struct stateless_kv_impl : typed_primitive_impl_ocl<stateless_kv> {
         }
     }
 
+    std::vector<BufferDescriptor> get_internal_buffer_descs(const kernel_impl_params& impl_param) const override {
+        if (!stateless_kv_inst::is_posid_generation_enabled(impl_param))
+            return {};
+
+        const auto posid_layout = stateless_kv_inst::get_posid_layout(impl_param);
+        // Intermediate allocation requires a static element count. The dynamic rank-1 layout is still used
+        // by kernel selection and shape-info handling until runtime shapes are resolved.
+        if (!posid_layout.is_static())
+            return {};
+
+        OPENVINO_ASSERT(posid_layout.count() > 0, "[GPU] stateless_kv generated posid layout is empty at runtime");
+        return {BufferDescriptor(posid_layout, true, false)};
+    }
+
     kernel_arguments_data get_arguments(const typed_primitive_inst<stateless_kv>& instance) const override {
         kernel_arguments_data args;
         args.inputs.push_back(instance.input_memory_ptr(0)); // past
-        args.inputs.push_back(instance.input_memory_ptr(3)); // pos_idx
+        if (stateless_kv_inst::is_posid_generation_enabled(*instance.get_impl_params())) {
+            const auto& intermediates = instance.get_intermediates_memories();
+            OPENVINO_ASSERT(intermediates.size() == 1 && intermediates[0],
+                            "[GPU] stateless_kv generated posid intermediate is not allocated");
+            args.inputs.push_back(intermediates[0]); // generated pos_idx
+        } else {
+            args.inputs.push_back(instance.input_memory_ptr(3)); // pos_idx
+        }
         args.inputs.push_back(instance.input_memory_ptr(1)); // new_token_data
         args.outputs.push_back(instance.output_memory_ptr(0));
         args.shape_info = instance.shape_info_memory_ptr();
@@ -764,7 +785,10 @@ struct stateless_kv_impl : typed_primitive_impl_ocl<stateless_kv> {
         params.axis = convert_scatter_axis(primitive->concat_axis, impl_param.get_input_layout(0).get_rank());
         params.inputs.resize(3);
         params.inputs[0] = convert_data_tensor(impl_param.get_input_layout(0));
-        params.inputs[1] = convert_data_tensor(impl_param.get_input_layout(3));
+        const auto posid_layout = stateless_kv_inst::is_posid_generation_enabled(impl_param)
+                          ? stateless_kv_inst::get_posid_layout(impl_param)
+                          : impl_param.get_input_layout(3);
+        params.inputs[1] = convert_data_tensor(posid_layout);
         params.inputs[2] = convert_data_tensor(impl_param.get_input_layout(1));
         params.outputs.resize(1);
         params.outputs[0] = convert_data_tensor(impl_param.get_output_layout(0));
