@@ -59,6 +59,14 @@ CL_HPP_DECLARE_PARAM_TRAITS_(cl_device_info, CL_DEVICE_SUB_GROUP_SIZES_INTEL, cl
 
 #endif // OPENVINO_CLHPP_HEADERS_ARE_OLDER_THAN_V2024_10_24
 
+#if !defined(CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT)
+#define CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT 0x1065
+#endif
+
+#if !defined(CL_DEVICE_WORK_GROUP_COLLECTIVE_FUNCTIONS_SUPPORT)
+#define CL_DEVICE_WORK_GROUP_COLLECTIVE_FUNCTIONS_SUPPORT 0x1068
+#endif
+
 /***************************************************************
 * cl_intel_command_queue_families
 ***************************************************************/
@@ -325,6 +333,19 @@ CL_HPP_PARAM_NAME_CL_INTEL_COMMAND_QUEUE_FAMILIES_(CL_HPP_DECLARE_PARAM_TRAITS_)
 }  // namespace cl
 
 #endif // OPENVINO_CLHPP_HEADERS_ARE_OLDER_THAN_V2024_10_24
+
+#if CL_HPP_TARGET_OPENCL_VERSION >= 300 && !defined(CL_HPP_PARAM_NAME_INFO_3_0_)
+namespace cl {
+namespace detail {
+CL_HPP_DECLARE_PARAM_TRAITS_(cl_device_info, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, cl_bool)
+CL_HPP_DECLARE_PARAM_TRAITS_(cl_device_info, CL_DEVICE_WORK_GROUP_COLLECTIVE_FUNCTIONS_SUPPORT, cl_bool)
+}  // namespace detail
+}  // namespace cl
+#endif
+
+#ifndef CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR
+#define CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR 0x2067
+#endif
 
 #define CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL (1 << 23)
 
