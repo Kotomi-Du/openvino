@@ -8,7 +8,6 @@
 #include "intel_gpu/plugin/multi_tensor_variable_state.hpp"
 #include "kv_cache_inst.h"
 #include "primitive_type_base.h"
-#include <limits>
 #include <sstream>
 #include <json_object.h>
 #include "utils.hpp"
@@ -214,20 +213,6 @@ stateless_kv_inst::typed_primitive_inst(network& network, const stateless_kv_nod
     update_output_memory();
 }
 
-bool stateless_kv_inst::is_posid_generation_enabled(const kernel_impl_params& impl_param) {
-    return impl_param.typed_desc<stateless_kv>()->input.size() == 3;
-}
-
-layout stateless_kv_inst::get_posid_layout(const kernel_impl_params& impl_param) {
-    OPENVINO_ASSERT(is_posid_generation_enabled(impl_param));
-
-    const auto& desc = *impl_param.typed_desc<stateless_kv>();
-    const auto& current_shape = impl_param.get_input_layout(1).get_partial_shape();
-
-    const auto posid_shape = ov::PartialShape{current_shape[desc.concat_axis]};
-    return layout(posid_shape, data_types::i32, format::bfyx);
-}
-
 std::optional<int64_t> stateless_kv_inst::compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc) {
     const auto mem_dep_it = impl_param.memory_deps.find(2);
     if (mem_dep_it == impl_param.memory_deps.end())
@@ -286,11 +271,6 @@ void stateless_kv_inst::update_shape_info_tensor(const kernel_impl_params& param
     for (size_t i = 0; i < get_node().get_dependencies().size(); ++i) {
         GPU_DEBUG_TRACE_DETAIL << id() << " : update shape_info for input[" << i << "]" << std::endl;
         fill_shape_info_data(params.input_layouts[i], node_input_layouts[i], shape_info_ptr, offset);
-    }
-
-    if (is_posid_generation_enabled(params)) {
-        GPU_DEBUG_TRACE_DETAIL << id() << " : update shape_info for generated input[3]" << std::endl;
-        fill_shape_info_data(get_posid_layout(params), node_input_layouts[3], shape_info_ptr, offset);
     }
 
     for (size_t i = 0; i < get_node().get_output_layouts().size(); ++i) {
@@ -375,32 +355,6 @@ void stateless_kv_inst::update_output_memory() {
 
 void stateless_kv_inst::on_execute() {
     update_output_memory();
-
-    if (is_posid_generation_enabled(*_impl_params)) {
-        const auto generated_layout = get_posid_layout(*_impl_params);
-        OPENVINO_ASSERT(generated_layout.is_static() && generated_layout.get_dim(0) > 0,
-                        "[GPU] stateless_kv generated posid layout must be static and non-empty at execution");
-
-        const auto& intermediates = get_intermediates_memories();
-        OPENVINO_ASSERT(intermediates.size() == 1 && intermediates[0],
-                        "[GPU] stateless_kv generated posid intermediate is not allocated");
-        OPENVINO_ASSERT(intermediates[0]->get_layout().count() == generated_layout.count(),
-                        "[GPU] stateless_kv generated posid intermediate layout mismatch");
-
-        const auto& desc = *_impl_params->typed_desc<stateless_kv>();
-        const auto& present_shape = _impl_params->get_output_layout(1).get_partial_shape();
-        const auto present_seq_len = present_shape[desc.concat_axis].get_length();
-        const auto current_seq_len = generated_layout.get_dim(0);
-        OPENVINO_ASSERT(present_seq_len >= current_seq_len && present_seq_len <= std::numeric_limits<int32_t>::max(),
-                        "[GPU] stateless_kv generated position ids overflow int32");
-
-        mem_lock<int32_t, mem_lock_type::write> lock(intermediates[0], _network.get_stream());
-        const auto begin = static_cast<int32_t>(present_seq_len - current_seq_len);
-        for (int64_t i = 0; i < current_seq_len; ++i) {
-            lock.data()[i] = static_cast<int32_t>(begin + i);
-        }
-    }
-
     set_arguments();
 }
 
