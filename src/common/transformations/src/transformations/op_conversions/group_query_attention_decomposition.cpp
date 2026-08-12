@@ -122,13 +122,13 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     const auto one_without_shape = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{}, {1}));
     const auto two = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {2}));
     const auto seqlens_elemi64 = register_new_node<v0::Convert>(seqlens_k, ov::element::i64);
-    seqlens_elemi64->set_friendly_name("seqlens_k_i64");
     const auto real_seqlens = register_new_node<v1::Add>(seqlens_elemi64, one);
-    real_seqlens->set_friendly_name("real_seqlens");
 
     // Only consider batch is 1
+    OPENVINO_ASSERT(seqlens_k.get_partial_shape().is_static() &&
+                    shape_size(seqlens_k.get_partial_shape().to_shape()) == 1);
     const auto seqlens_1d = register_new_node<v1::Reshape>(real_seqlens, one, false);
-    const auto past_seqlen = register_new_node<v1::Subtract>(seqlens_1d, current_seqlen);
+    std::shared_ptr<ov::Node> past_seqlen = register_new_node<v1::Subtract>(seqlens_1d, current_seqlen);
     past_seqlen->set_friendly_name("past_seqlen");
     std::shared_ptr<ov::Node> curr_seqlen_scalar = register_new_node<v0::Squeeze>(current_seqlen);
 
@@ -137,74 +137,66 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     const auto axis3 = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{}, {3}));
 
-    ov::Output<ov::Node> q_pos_ids;
-    ov::Output<ov::Node> kv_slices;
-    std::shared_ptr<ov::Node> past_kv_len;
     std::shared_ptr<ov::Node> concat_kv_len;
     static const auto gqareuse = []() {
         const auto txt = std::getenv("gqareuse");
-        return !(txt && txt == std::string_view("false"));
+        return !(txt&& txt == std::string_view("false"));
     }();
     CachedNodes* cache = nullptr;
-    if (const auto it = m_seqk_cache.find(seqlens_k); gqareuse && it != m_seqk_cache.end()) {
-        // printf("Reuse GQA-slice![%s] reuses seq[%s]\n",
-        //        node->get_friendly_name().c_str(),
-        //        seqlens_k.get_node()->get_friendly_name().c_str());
-        q_pos_ids = it->second.pos_ids;
-        kv_slices = it->second.kv_slices;
-        past_kv_len = it->second.past_kv_len;
+    if (const auto it = m_seqk_cache.find(seqlens_k); it != m_seqk_cache.end()) {
         concat_kv_len = it->second.concat_kv_len;
         cache = &it->second;
     } else {
-        std::shared_ptr<ov::Node> q_len_idx = register_new_node<v4::Range>(zero_without_shape,
-                                                                           curr_seqlen_scalar,
-                                                                           one_without_shape,
-                                                                           ov::element::i64);
         concat_kv_len = register_new_node<v0::Convert>(total_sequence_length, ov::element::i64);
-        past_kv_len = register_new_node<v1::Subtract>(concat_kv_len, current_seqlen);
-        // past_kv_len = past_seqlen;
-        // concat_kv_len = seqlens_1d;
-        q_pos_ids = register_new_node<v1::Add>(q_len_idx, past_seqlen);
-
-        kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{seqlens_1d, negone}, 0);
-
-        cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{q_pos_ids, kv_slices, past_kv_len, concat_kv_len})
+        cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{concat_kv_len, {}})
                      .first->second;
     }
     OPENVINO_ASSERT(cache);
+
+    ov::Output<ov::Node> q_pos_ids;
+    ov::Output<ov::Node> kv_slices;
+    std::shared_ptr<ov::Node> reuse_mask;
+    const auto Q_cur_seq_len = Q.get_partial_shape().is_static() ? Q.get_partial_shape()[2].get_length() : -1;
+    CachedNodes::QLenSharedNodes* shared = nullptr;
+    if (Q_cur_seq_len > 0) {
+        if (const auto it_share = cache->q_len_share.find(Q_cur_seq_len);
+            it_share != cache->q_len_share.end() && gqareuse) {
+            shared = &it_share->second;
+            past_seqlen = shared->past_kv_len;
+            q_pos_ids = shared->q_pos_ids;
+            kv_slices = shared->kv_slices;
+            reuse_mask = shared->mask;
+        }
+    }
+    if (shared == nullptr) {
+        std::shared_ptr<ov::Node> q_len_idx =
+            register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
+        past_seqlen = register_new_node<v1::Subtract>(concat_kv_len, current_seqlen);
+        q_pos_ids = register_new_node<v1::Add>(q_len_idx, past_seqlen);
+        kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{seqlens_1d, negone}, 0);
+        shared = &cache->q_len_share
+                      .insert_or_assign(Q_cur_seq_len,
+                                        CachedNodes::QLenSharedNodes{past_seqlen, q_pos_ids, kv_slices, {}, {}})
+                      .first->second;
+    }
 
     if (do_rotary) {
         auto cos_cache = node->input_value(7);
         auto sin_cache = node->input_value(8);
 
-        ov::Output<ov::Node> cos;
-        ov::Output<ov::Node> sin;
-
-        ov::Output<ov::Node> position_ids;
-        // = register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
+        ov::Output<ov::Node> position_ids =
+            register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
         if (node->get_input_size() > 9 && !is_null(node->input_value(9))) {
             // Flatten position_ids to 1D so that Gather produces 2D [seqlen, head_size/2] output,
             // ensuring correct 4D shapes after Unsqueeze in rotaryEmbedding.
             const auto neg_one = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1}));
             position_ids = register_new_node<v1::Reshape>(node->input_value(9), neg_one, false);
-            cos = register_new_node<v8::Gather>(cos_cache, position_ids, zero);
-            sin = register_new_node<v8::Gather>(sin_cache, position_ids, zero);
         } else {
-            position_ids = q_pos_ids;
-            if (const auto it_cos = cache->rotary_cache.find(cos_cache); it_cos != cache->rotary_cache.end()) {
-                cos = it_cos->second;
-            } else {
-                cos = register_new_node<v8::Gather>(cos_cache, position_ids, zero);
-                cache->rotary_cache.insert_or_assign(cos_cache, cos);
-            }
-            if (const auto it_sin = cache->rotary_cache.find(sin_cache); it_sin != cache->rotary_cache.end()) {
-                sin = it_sin->second;
-            } else {
-                sin = register_new_node<v8::Gather>(sin_cache, position_ids, zero);
-                cache->rotary_cache.insert_or_assign(sin_cache, sin);
-            }
+            position_ids = register_new_node<v1::Add>(position_ids, past_seqlen);
         }
 
+        const auto cos = register_new_node<v8::Gather>(cos_cache, position_ids, zero);
+        const auto sin = register_new_node<v8::Gather>(sin_cache, position_ids, zero);
         Q = rotaryEmbedding(Q, cos, sin, rotary_interleaved);
         K = rotaryEmbedding(K, cos, sin, rotary_interleaved);
     }
@@ -235,21 +227,26 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         //
         // Use ScatterUpdate to scatter insert Current into Past
         // Insert current K/V at the correct position [past_seqlen, past_seqlen+curr_seqlen].
-        auto updateK = register_new_node<v3::ScatterUpdate>(past_key, q_pos_ids, K, two);
-        auto updateV = register_new_node<v3::ScatterUpdate>(past_value, q_pos_ids, V, two);
+        present_k = register_new_node<v3::ScatterUpdate>(past_key, q_pos_ids, K, two);
+        present_v = register_new_node<v3::ScatterUpdate>(past_value, q_pos_ids, V, two);
 
-        K = std::make_shared<ov::op::v1::VariadicSplit>(updateK, two_scalar, kv_slices)->outputs()[0];
-        V = std::make_shared<ov::op::v1::VariadicSplit>(updateV, two_scalar, kv_slices)->outputs()[0];
-        
-        present_k = updateK;
-        present_v = updateV;
+        if (is_static_input) {
+            const auto past_kv_len_static = past_key.get_partial_shape()[2].get_length();
+            concat_kv_len =
+                register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {past_kv_len_static}));
+            K = present_k;
+            V = present_v;
+        } else {
+            K = std::make_shared<ov::op::v1::VariadicSplit>(present_k, two_scalar, kv_slices)->outputs()[0];
+            V = std::make_shared<ov::op::v1::VariadicSplit>(present_v, two_scalar, kv_slices)->outputs()[0];
+        }
     } else {
         // assume being dynamic, and present len = past+current
         auto construct_kv_cache = [&](const ov::Output<ov::Node>& past, const ov::Output<ov::Node>& current) {
             return register_new_node<v0::Concat>(ov::OutputVector{past, current}, 2);
         };
-        past_key = register_new_node<v8::Slice>(past_key, zero, past_kv_len, one, two);
-        past_value = register_new_node<v8::Slice>(past_value, zero, past_kv_len, one, two);
+        past_key = register_new_node<v8::Slice>(past_key, zero, past_seqlen, one, two);
+        past_value = register_new_node<v8::Slice>(past_value, zero, past_seqlen, one, two);
         K = construct_kv_cache(past_key, K);
         V = construct_kv_cache(past_value, V);
         present_k = K;
@@ -306,26 +303,31 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         auto mask_squeezed = register_new_node<v0::Squeeze>(original_mask, axes_to_squeeze);
         mask = register_new_node<v8::Slice>(mask_squeezed, zero, concat_kv_len, one, two);
     } else if (build_explict_mask) {
-        std::shared_ptr<ov::Node> hori_range =
-            register_new_node<v4::Range>(zero_without_shape, concat_kv_len_scalar, one_without_shape, ov::element::i64);
-        hori_range = register_new_node<v0::Unsqueeze>(hori_range, zero);
+        if (reuse_mask) {
+            mask = reuse_mask;
+        } else {
+            std::shared_ptr<ov::Node> hori_range =
+                register_new_node<v4::Range>(zero_without_shape, concat_kv_len_scalar, one_without_shape, ov::element::i64);
+            hori_range = register_new_node<v0::Unsqueeze>(hori_range, zero);
 
-        std::shared_ptr<ov::Node> vert_range =
-            register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
-        vert_range = register_new_node<v0::Unsqueeze>(vert_range, one);
-        vert_range = register_new_node<v1::Add>(vert_range, past_seqlen);
+            std::shared_ptr<ov::Node> vert_range =
+                register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
+            vert_range = register_new_node<v0::Unsqueeze>(vert_range, one);
+            vert_range = register_new_node<v1::Add>(vert_range, past_seqlen);
 
-        const auto triu = register_new_node<v1::Greater>(hori_range, vert_range);
-        const auto typed_zero = register_new_node(v0::Constant::create(T, ov::Shape{}, {0}));
-        // cf. make_attention_mask@src\plugins\intel_gpu\tests\common\subgraphs_builders.hpp
-        // Mask with the type's finite lowest(), not -inf: a fully-masked row would otherwise softmax to 0/0 = NaN.
-        std::shared_ptr<ov::Node> minus_inf = nullptr;
-        if (T == ov::element::f32)
-            minus_inf = register_new_node(v0::Constant::create(T, ov::Shape{}, {std::numeric_limits<float>::lowest()}));
-        else if (T == ov::element::f16)
-            minus_inf =
-                register_new_node(v0::Constant::create(T, ov::Shape{}, {std::numeric_limits<ov::float16>::lowest()}));
-        mask = register_new_node<v1::Select>(triu, minus_inf, typed_zero);
+            const auto triu = register_new_node<v1::Greater>(hori_range, vert_range);
+            const auto typed_zero = register_new_node(v0::Constant::create(T, ov::Shape{}, {0}));
+            // cf. make_attention_mask@src\plugins\intel_gpu\tests\common\subgraphs_builders.hpp
+            // Mask with the type's finite lowest(), not -inf: a fully-masked row would otherwise softmax to 0/0 = NaN.
+            std::shared_ptr<ov::Node> minus_inf = nullptr;
+            if (T == ov::element::f32)
+                minus_inf = register_new_node(v0::Constant::create(T, ov::Shape{}, {std::numeric_limits<float>::lowest()}));
+            else if (T == ov::element::f16)
+                minus_inf =
+                    register_new_node(v0::Constant::create(T, ov::Shape{}, {std::numeric_limits<ov::float16>::lowest()}));
+            mask = register_new_node<v1::Select>(triu, minus_inf, typed_zero);
+            shared->mask = mask;
+        }
     }
 
     std::shared_ptr<ov::Node> qga_output;
