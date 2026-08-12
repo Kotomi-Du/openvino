@@ -52,11 +52,15 @@ private:
                                           const std::string& quant_type,
                                           const ov::element::Type& cache_type);
     struct CachedNodes {
-        ov::Output<ov::Node> pos_ids;
-        ov::Output<ov::Node> kv_slices;
-        std::shared_ptr<ov::Node> past_kv_len;
+        struct QLenSharedNodes {
+            std::shared_ptr<ov::Node> past_kv_len;
+            ov::Output<ov::Node> q_pos_ids;
+            ov::Output<ov::Node> kv_slices;
+            std::shared_ptr<ov::Node> mask;
+            std::map<ov::Output<ov::Node>, ov::Output<ov::Node>> rotary_cache;
+        };
         std::shared_ptr<ov::Node> concat_kv_len;
-        std::map<ov::Output<ov::Node>, ov::Output<ov::Node>> rotary_cache;
+        std::map<int64_t, QLenSharedNodes> q_len_share;
     };
     std::map<ov::Output<ov::Node>, CachedNodes> m_seqk_cache;
 };
