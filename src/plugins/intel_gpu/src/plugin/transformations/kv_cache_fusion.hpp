@@ -94,10 +94,16 @@ public:
 
 private:
     struct CachedNodes {
-        ov::Output<ov::Node> update_pos_ids;
-        ov::Output<ov::Node> concat_kv_len;
+        ov::Output<ov::Node> present_kv_len;
+        struct TrimmedMask {
+            int64_t new_token_len = 0;
+            ov::Output<ov::Node> original_mask;
+            std::shared_ptr<ov::Node> trimmed_mask;
+        };
+        std::vector<TrimmedMask> trimmed_masks;
     };
-    std::map<ov::Output<ov::Node>, CachedNodes> m_seqk_cache;
+    std::map<std::shared_ptr<ov::Node>, CachedNodes> m_seqk_cache;
+    std::set<ov::Output<ov::Node>> m_trimmed_masks;
 };
 
 class StatelessKVFusion : public ov::pass::GraphRewrite {

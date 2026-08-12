@@ -17,6 +17,7 @@
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/gather.hpp"
+#include "openvino/op/multiply.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/range.hpp"
 #include "openvino/op/read_value.hpp"
@@ -244,25 +245,38 @@ KVCacheFusion::KVCacheFusion() {
 
 StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
     using namespace ov::pass::pattern;
+    using namespace ov::op;
 
     auto past = wrap_type<ov::op::v0::Parameter>();
-    auto pos_idx = any_input();
     auto new_token_data = any_input();
+
+    auto total_seqlen = wrap_type<ov::op::v0::Parameter>();
+    auto total_seqlen_cvt = wrap_type<ov::op::v0::Convert>({total_seqlen});
+    auto total_seqlen_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{total_seqlen, total_seqlen_cvt});
+    auto cur_seqlen_shapeof = wrap_type<ov::op::v3::ShapeOf>({any_input()});
+    auto seqlen_dim = wrap_type<ov::op::v0::Constant>();
+    auto cur_seqlen = wrap_type<ov::op::v8::Gather>({cur_seqlen_shapeof, seqlen_dim, wrap_type<ov::op::v0::Constant>()});
+    auto neg_one = wrap_type<ov::op::v0::Constant>();
+    auto cur_seqlen_neg = wrap_type<ov::op::v1::Multiply>({cur_seqlen, neg_one});
+    auto cur_seqlen_neg_const = wrap_type<ov::op::v0::Constant>();
+    auto past_seqlen_add =
+        wrap_type<ov::op::v1::Add>({total_seqlen_actual, std::make_shared<ov::pass::pattern::op::Or>(OutputVector{cur_seqlen_neg, cur_seqlen_neg_const})});
+    auto past_seqlen_sub = wrap_type<ov::op::v1::Subtract>({total_seqlen_actual, cur_seqlen});
+
+    auto range_cur = wrap_type<ov::op::v4::Range>({wrap_type<ov::op::v0::Constant>(), any_input(), wrap_type<ov::op::v0::Constant>()});
+    auto const_range_cur = wrap_type<ov::op::v0::Constant>();
+    auto pos_idx_base = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{range_cur, const_range_cur});
+    auto past_seqlen_from_param = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{past_seqlen_add, past_seqlen_sub, any_input()});
+    auto shifted_pos_idx = wrap_type<ov::op::v1::Add>({pos_idx_base, past_seqlen_from_param});
+    auto pos_idx = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{shifted_pos_idx, any_input()});
     auto scatter_axis = wrap_type<ov::op::v0::Constant>();
     auto scatter_update = wrap_type<ov::op::v3::ScatterUpdate>({past, pos_idx, new_token_data, scatter_axis});
 
     auto slice_start = wrap_type<ov::op::v0::Constant>();
-    auto slice_stop_any = any_input();
-    auto total_seqlen = wrap_type<ov::op::v0::Parameter>();
-    auto total_seqlen_cvt = wrap_type<ov::op::v0::Convert>({total_seqlen});
-    auto total_seqlen_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{total_seqlen, total_seqlen_cvt});
-    auto past_seqlen_add = wrap_type<ov::op::v1::Add>({total_seqlen_actual, any_input()});
-    auto past_seqlen_sub = wrap_type<ov::op::v1::Subtract>({total_seqlen_actual, any_input()});
-    auto past_seqlen = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{past_seqlen_add, past_seqlen_sub});
-    auto slice_stop_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{past_seqlen, slice_stop_any});
     auto slice_step = wrap_type<ov::op::v0::Constant>();
     auto slice_axis = wrap_type<ov::op::v0::Constant>();
-    auto slice = wrap_type<ov::op::v8::Slice>({past, slice_start, slice_stop_actual, slice_step, slice_axis});
+    auto past_seqlen_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{past_seqlen_add, past_seqlen_sub, any_input()});
+    auto slice = wrap_type<ov::op::v8::Slice>({past, slice_start, past_seqlen_actual, slice_step, slice_axis});
     auto concat = wrap_type<ov::op::v0::Concat>({slice, new_token_data});
 
     auto kv_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{scatter_update, concat});
@@ -285,13 +299,14 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         const auto kv_present_output = result_input.get_source_output();
         const auto past_output = pattern_map.at(past);
         const auto new_token_output = pattern_map.at(new_token_data);
+        const auto new_token_shape = new_token_output.get_partial_shape();
         std::optional<ov::Input<ov::Node>> kv_to_sdpa_input;
         std::optional<ov::Input<ov::Node>> kv_sdpa_input;
         ov::Output<ov::Node> pos_idx_output;
         ov::Output<ov::Node> seqlen_output;
         ov::NodeVector node_infos;
         int64_t target_axis = 0;
-        bool is_presnet_len = true;
+        bool is_present_len = true;
 
         const bool is_slice_concat = pattern_map.count(concat) > 0;
         bool is_update_split = false;
@@ -307,11 +322,46 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         }
         OPENVINO_ASSERT(kv_to_sdpa_input.has_value());
 
+        if (pattern_map.count(neg_one) > 0) {
+            auto neg_one_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(neg_one).get_node_shared_ptr());
+            const auto neg_one_values = neg_one_node->cast_vector<int64_t>();
+            if (neg_one_values.size() != 1 || neg_one_values[0] != -1) {
+                return false;
+            }
+        }
+        std::optional<int64_t> shapeof_axis;
+        if (pattern_map.count(seqlen_dim) > 0) {
+            auto seqlen_dim_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(seqlen_dim).get_node_shared_ptr());
+            const auto seqlen_dim_values = seqlen_dim_node->cast_vector<int64_t>();
+            if (seqlen_dim_values.size() != 1) {
+                return false;
+            }
+            shapeof_axis = seqlen_dim_values[0];
+        }
+        std::optional<int64_t> neg_cur_seqlen;
+        if (pattern_map.count(cur_seqlen_neg_const) > 0) {
+            auto cur_neg_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(cur_seqlen_neg_const).get_node_shared_ptr());
+            const auto cur_neg_values = cur_neg_node->cast_vector<int64_t>();
+            if (cur_neg_values.size() != 1) {
+                return false;
+            }
+            neg_cur_seqlen = cur_neg_values[0];
+        }
+        static const auto gqareuse = []() {
+            const auto txt = std::getenv("gqareuse");
+            return !(txt && txt == std::string_view("false"));
+        }();
+        ov::Output<ov::Node> total_seqlen_output;
+        if (pattern_map.count(total_seqlen) > 0) {
+            total_seqlen_output = pattern_map.at(total_seqlen);
+        }
+        CachedNodes& cache = m_seqk_cache[total_seqlen_output.get_node_shared_ptr()];
+
         if (is_slice_concat) {  // original dynamic pattern
             auto slice_node = ov::as_type_ptr<ov::op::v8::Slice>(pattern_map.at(slice).get_node_shared_ptr());
             auto concat_node = ov::as_type_ptr<ov::op::v0::Concat>(pattern_map.at(concat).get_node_shared_ptr());
             auto slice_start_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(slice_start).get_node_shared_ptr());
-            auto slice_stop_node = pattern_map.at(slice_stop_actual).get_node_shared_ptr();
+            auto slice_stop_node = pattern_map.at(past_seqlen_actual).get_node_shared_ptr();
             auto slice_step_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(slice_step).get_node_shared_ptr());
             auto slice_axis_node = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(slice_axis).get_node_shared_ptr());
 
@@ -326,43 +376,18 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                 return false;
             }
             target_axis = concat_node->get_axis();
-
-            static const auto gqareuse = []() {
-                const auto txt = std::getenv("gqareuse");
-                return txt && txt == std::string_view("true");
-            }();
-            ov::Output<ov::Node> total_seqlen_output;
-            if (pattern_map.count(total_seqlen) > 0) {
-                total_seqlen_output = pattern_map.at(total_seqlen);
-            }
-            if (const auto it = this->m_seqk_cache.find(total_seqlen_output); gqareuse && total_seqlen_output.get_node() && it != m_seqk_cache.end()) {
-                pos_idx_output = it->second.update_pos_ids;
-                seqlen_output = it->second.concat_kv_len;
+            
+            if (gqareuse && total_seqlen_output.get_node() && cache.present_kv_len.get_node()) {
+                seqlen_output = cache.present_kv_len;
             } else {
-                const auto zero_without_shape = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
-                const auto one_without_shape = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {1});
                 if (total_seqlen_output.get_node()) {
                     seqlen_output = total_seqlen_output;
-                    auto past_len_scalar = std::make_shared<ov::op::v0::Squeeze>(slice_stop_node);
-                    auto present_len_scalar = std::make_shared<ov::op::v0::Squeeze>(seqlen_output);
-                    pos_idx_output = std::make_shared<ov::op::v4::Range>(past_len_scalar, present_len_scalar, one_without_shape, ov::element::i32);
+                    if (gqareuse) {
+                        cache.present_kv_len = total_seqlen_output;
+                    }
                 } else {
-                    auto new_token_shape = std::make_shared<ov::op::v3::ShapeOf>(new_token_output);
-                    auto new_token_len = std::make_shared<ov::op::v8::Gather>(new_token_shape,
-                                                                              ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {target_axis}),
-                                                                              zero_without_shape);
-                    auto curr_seqlen_scalar = std::make_shared<ov::op::v0::Squeeze>(new_token_len);
-                    std::shared_ptr<Node> past_len_node32 = slice_stop_node->output(0).get_element_type() != ov::element::i32
-                                                              ? std::make_shared<ov::op::v0::Convert>(slice_stop_node, ov::element::i32)
-                                                              : slice_stop_node;
-                    seqlen_output =
-                        std::make_shared<ov::op::v1::Add>(past_len_node32, std::make_shared<ov::op::v0::Convert>(curr_seqlen_scalar, ov::element::i32));
-                    auto new_len_idx = std::make_shared<ov::op::v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i32);
-                    pos_idx_output = std::make_shared<ov::op::v1::Add>(new_len_idx, slice_stop_node);
-                }
-
-                if (gqareuse && total_seqlen_output.get_node()) {
-                    m_seqk_cache.insert_or_assign(total_seqlen_output, CachedNodes{pos_idx_output, seqlen_output});
+                    seqlen_output = slice_stop_node;
+                    is_present_len = false;
                 }
             }
             node_infos = {slice_node, concat_node};
@@ -425,40 +450,18 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                 }
                 kv_sdpa_input.emplace(*split_output_consumers.begin());
             } else {  // original static pattern
-                if (past_output.get_partial_shape().is_dynamic() || new_token_output.get_partial_shape().is_dynamic()) {
-                    return false;
-                }
-                auto pos_idx_add = ov::as_type_ptr<ov::op::v1::Add>(pos_idx_output.get_node_shared_ptr());
-                if (!pos_idx_add) {
+                if (past_output.get_partial_shape().is_dynamic() || new_token_shape.is_dynamic()) {
                     return false;
                 }
 
-                ov::Output<ov::Node> past_seqlen_output;
-                ov::op::v0::Constant* idx_const = nullptr;
-                ov::op::v4::Range* idx_range = nullptr;
-                idx_const = ov::as_type<ov::op::v0::Constant>(pos_idx_add->get_input_node_ptr(0));
-                idx_range = ov::as_type<ov::op::v4::Range>(pos_idx_add->get_input_node_ptr(0));
-                if (idx_const || idx_range) {
-                    past_seqlen_output = pos_idx_add->get_input_source_output(1);
-                } else {
-                    past_seqlen_output = pos_idx_add->get_input_source_output(0);
-                    idx_const = ov::as_type<ov::op::v0::Constant>(pos_idx_add->get_input_node_ptr(1));
-                    idx_range = ov::as_type<ov::op::v4::Range>(pos_idx_add->get_input_node_ptr(1));
-                    if (!idx_const && !idx_range) {
-                        return false;
-                    }
+                if (pattern_map.count(shifted_pos_idx) == 0) {
+                    return false;
                 }
+
+                ov::Output<ov::Node> past_seqlen_output = pattern_map.at(past_seqlen_from_param).get_node_shared_ptr();
                 // make sure idx_* starts from 0 so that the other input is the past_seqlen_node
-                if (idx_range) {
-                    const auto range_begin = ov::as_type<ov::op::v0::Constant>(idx_range->get_input_node_ptr(0));
-                    if (!range_begin) {
-                        return false;
-                    }
-                    const auto range_begin_data = range_begin->cast_vector<int64_t>();
-                    if (range_begin_data.size() != 1 || range_begin_data[0] != 0) {
-                        return false;
-                    }
-                } else {
+                if (pattern_map.count(const_range_cur) > 0) {
+                    ov::op::v0::Constant* idx_const = ov::as_type<ov::op::v0::Constant>(pattern_map.at(const_range_cur).get_node());
                     const auto idx_data = idx_const->cast_vector<int64_t>();
                     if (idx_data.size() < 1) {
                         return false;
@@ -468,15 +471,30 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                             return false;
                         }
                     }
+                } else {
+                    ov::op::v4::Range* idx_range = ov::as_type<ov::op::v4::Range>(pattern_map.at(range_cur).get_node());
+                    const auto range_begin = ov::as_type<ov::op::v0::Constant>(idx_range->get_input_node_ptr(0));
+                    const auto range_step = ov::as_type<ov::op::v0::Constant>(idx_range->get_input_node_ptr(2));
+                    if (!range_begin || !range_step) {  // should already be garuanteed
+                        return false;
+                    }
+                    const auto range_begin_data = range_begin->cast_vector<int64_t>();
+                    const auto range_step_data = range_step->cast_vector<int64_t>();
+                    if (range_begin_data.size() != 1 || range_begin_data[0] != 0 || range_step_data.size() != 1 || range_step_data[0] != 1) {
+                        return false;
+                    }
                 }
 
                 seqlen_output = past_seqlen_output;
-                is_presnet_len = false;
-                //const auto new_token_len = new_token_output.get_partial_shape()[target_axis].get_length();
-                //present_len_node =
-                //    std::make_shared<ov::op::v1::Add>(past_seqlen_output,
-                //                                      ov::op::v0::Constant::create(past_seqlen_output.get_element_type(), ov::Shape{}, {new_token_len}));
+                is_present_len = false;
             }
+        }
+
+        if (shapeof_axis && *shapeof_axis != target_axis) {
+            return false;
+        }
+        if (neg_cur_seqlen && (new_token_shape[target_axis].is_dynamic() || new_token_shape[target_axis].get_length() * -1 != *neg_cur_seqlen)) {
+            return false;
         }
 
         if (!kv_sdpa_input) {
@@ -491,23 +509,83 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         if (transformation_callback(kv_sdpa_node)) {
             return false;
         }
+
+        auto get_trimmed_mask = [&](const ov::Output<ov::Node>& full_mask, const ov::Dimension& cur_seqlen) -> std::shared_ptr<ov::Node> {
+            if (gqareuse && total_seqlen_output.get_node() && cur_seqlen.is_static()) {
+                for (const auto& [len, old_mask, new_mask] : cache.trimmed_masks) {
+                    if (len != cur_seqlen.get_length())
+                        continue;
+                    if (old_mask == full_mask) {
+                        return new_mask;
+                    }
+                }
+            }
+            return {};
+        };
+        // mask trimming for pure-scatter_update case
+        if (!is_slice_concat && !is_update_split && sdpa_node && sdpa_node->inputs().size() == 4 &&
+            m_trimmed_masks.count(sdpa_node->input_value(3)) == 0) {
+            const auto full_mask = sdpa_node->input_value(3);
+            const auto& cur_seqlen = new_token_shape[target_axis];
+            auto trimmed_mask = get_trimmed_mask(full_mask, cur_seqlen);
+            if (!trimmed_mask) {
+                std::shared_ptr<ov::Node> present_len;
+                const auto present_len_type = seqlen_output.get_element_type();
+                if (total_seqlen_output.get_node()) {
+                    present_len = total_seqlen_output.get_node_shared_ptr();
+                } else {
+                    std::shared_ptr<ov::Node> cur_seqlen_node;
+                    if (cur_seqlen.is_static()) {
+                        cur_seqlen_node = v0::Constant::create(present_len_type, ov::Shape{1}, {cur_seqlen.get_length()});
+                    } else {
+                        const auto zero_without_shape = v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
+                        auto new_token_shape = std::make_shared<v3::ShapeOf>(new_token_output, present_len_type);
+                        cur_seqlen_node = std::make_shared<v8::Gather>(new_token_shape,
+                                                                        v0::Constant::create(ov::element::i64, ov::Shape{1}, {target_axis}),
+                                                                        zero_without_shape);
+                    }
+                    present_len = std::make_shared<v1::Add>(seqlen_output.get_node_shared_ptr(), cur_seqlen_node);
+                }
+                const auto split_lengths =
+                    std::make_shared<v0::Concat>(ov::OutputVector{present_len, v0::Constant::create(present_len_type, ov::Shape{1}, {-1})}, 0);
+                const auto mask_split =
+                    std::make_shared<v1::VariadicSplit>(full_mask, v0::Constant::create(present_len_type, ov::Shape{}, {1}), split_lengths);
+                trimmed_mask = mask_split;
+                if (gqareuse && total_seqlen_output.get_node() && cur_seqlen.is_static()) {
+                    cache.trimmed_masks.push_back({cur_seqlen.get_length(), full_mask, trimmed_mask});
+                }
+            }
+            printf("@@##statelesskv: mask-trim [%s] -> [%s]\n",
+                    full_mask.get_node()->get_friendly_name().c_str(),
+                    trimmed_mask->get_friendly_name().c_str());
+            sdpa_node->set_argument(3, trimmed_mask->output(0));
+            m_trimmed_masks.insert(trimmed_mask->output(0));
+        }
+
         static const auto env_nopos = std::getenv("nopos");
         static const auto nopos = env_nopos && std::string_view("true") == env_nopos;
-        printf("@@##statelesskv(%s): [%s][%s](%zu) %s[%s] len[%s] pos[%s](%c)\n",
-             is_slice_concat ? "SC" : (is_update_split ? "US" : "U"),
+        std::string posidname;
+        if (pos_idx_output.get_node()) {
+            posidname = pos_idx_output.get_node()->get_friendly_name();
+            if (nopos) {
+                posidname += "(remove)";
+            }
+        }
+        printf("@@##statelesskv(%s): [%s][%s](%zu) %s[%s] len[%s](%s) pos[%s]\n",
+               is_slice_concat ? "SC" : (is_update_split ? "US" : "U"),
                past_output.get_any_name().c_str(),
                result_node->get_friendly_name().c_str(),
                result_node->get_instance_id(),
                sdpa_node ? "sdpa" : "next",
                kv_sdpa_node->get_friendly_name().c_str(),
                seqlen_output.get_node()->get_friendly_name().c_str(),
-               pos_idx_output.get_node()->get_friendly_name().c_str(),
-               nopos ? 'N' : 'Y');
+               is_present_len ? "present" : "past",
+               posidname.c_str());
         std::shared_ptr<op::StatelessKV> stateless_kv;
-        if (nopos) {
-            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, target_axis, is_presnet_len);
+        if (nopos || !pos_idx_output.get_node()) {
+            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, target_axis, is_present_len);
         } else {
-            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, pos_idx_output, target_axis, is_presnet_len);
+            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, pos_idx_output, target_axis, is_present_len);
         }
         stateless_kv->set_friendly_name(past_output.get_any_name() + "_stateless");
         ov::copy_runtime_info(node_infos, stateless_kv);
