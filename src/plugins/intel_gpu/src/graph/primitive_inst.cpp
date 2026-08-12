@@ -2503,6 +2503,15 @@ primitive_inst::primitive_inst(network & network, program_node const& node, bool
         };
         allocate_memory = _mem_allocated = available_allocate_memory(_impl_params->output_layouts);
     }
+    if (allocate_memory && node.is_type<stateless_kv>()) {
+        allocate_memory = _mem_allocated = false;
+    }
+    if (allocate_memory && node.is_output() && node.is_type<reorder>()) {
+        if (const auto [prev_node, prev_idx] = node.get_dependency_with_port(0); prev_node->is_type<stateless_kv>() && prev_idx == 0) {
+            allocate_memory = _mem_allocated = false;
+        }
+    }
+
 
     if (allocate_memory) {
         // In case when output is mutable_data primitive, and other users dependencies are only used for
@@ -2562,8 +2571,11 @@ primitive_inst::primitive_inst(network & network, program_node const& node, bool
 }
 
 memory::ptr primitive_inst::allocate_internal_buffer(const layout& layout, size_t idx, bool reset, bool lockable, bool shareable) {
-    if (_impl == nullptr || _outputs.empty() || _outputs[0] == nullptr)
+    if (_impl == nullptr || _outputs.empty() || std::any_of(_outputs.begin(), _outputs.end(), [](const auto& output){
+            return output == nullptr;
+        })) {
         return nullptr;
+    }
 
     auto device_mem_acc = [&](size_t a, std::pair<primitive_inst*, int32_t> b) {
         if (!b.first->mem_allocated()) return a;

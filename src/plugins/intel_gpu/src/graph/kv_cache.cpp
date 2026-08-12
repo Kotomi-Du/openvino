@@ -259,6 +259,26 @@ std::optional<int64_t> stateless_kv_inst::compute_update_offset(const kernel_imp
     return past_seq_len;
 }
 
+void stateless_kv_inst::update_shape_info_tensor(const kernel_impl_params& params) {
+    if (!_shape_info_memory) {
+        allocate_shape_info_memory();
+    }
+    mem_lock<int32_t> lock(_shape_info_memory, _network.get_stream());
+    auto shape_info_ptr = lock.data();
+    size_t offset = 0;
+
+    const auto node_input_layouts = get_node().get_shape_info_input_layouts();
+    for (size_t i = 0; i < get_node().get_dependencies().size(); ++i) {
+        GPU_DEBUG_TRACE_DETAIL << id() << " : update shape_info for input[" << i << "]" << std::endl;
+        fill_shape_info_data(params.input_layouts[i], node_input_layouts[i], shape_info_ptr, offset);
+    }
+
+    for (size_t i = 0; i < get_node().get_output_layouts().size(); ++i) {
+        GPU_DEBUG_TRACE_DETAIL << id() << " : update shape_info for output[" << i << "]" << std::endl;
+        fill_shape_info_data(params.output_layouts[i], get_node().get_output_layout(i), shape_info_ptr, offset);
+    }
+}
+
 layout stateless_kv_inst::calc_output_layout(const stateless_kv_node& node, kernel_impl_params const& impl_param) {
     return calc_output_layouts<ov::PartialShape>(node, impl_param).front();
 }

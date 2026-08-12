@@ -63,6 +63,7 @@ public:
     std::vector<size_t> get_shape_infer_dependencies() const override {
         return {2};
     }
+
 };
 
 using stateless_kv_node = typed_program_node<stateless_kv>;
@@ -146,6 +147,7 @@ public:
     bool get_is_inplace() const { return m_is_inplace; }
 
     static std::optional<int64_t> compute_update_offset(const kernel_impl_params& impl_param, const stateless_kv& desc);
+    void update_shape_info_tensor(const kernel_impl_params& params) override;
 
     typed_primitive_inst(network& network, const stateless_kv_node& desc);
     typed_primitive_inst(network& network) : parent(network) {}

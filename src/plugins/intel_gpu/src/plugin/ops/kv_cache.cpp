@@ -67,7 +67,7 @@ void CreateKVCacheCompressedOp(ProgramBuilder& p, const std::shared_ptr<ov::op::
 }
 
 void CreateStatelessKVOp(ProgramBuilder& p, const std::shared_ptr<ov::op::internal::StatelessKV>& op) {
-    validate_inputs_count(op, {4});
+    validate_inputs_count(op, {3, 4});
     auto inputs = p.GetInputInfo(op);
     int64_t rank = op->get_input_partial_shape(0).size();
     auto prim = cldnn::stateless_kv(layer_type_name_ID(op), inputs, ov::util::normalize(op->get_concat_axis(), rank), op->get_is_present_len());
