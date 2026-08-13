@@ -121,15 +121,10 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
     const auto one = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {1}));
     const auto one_without_shape = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{}, {1}));
     const auto two = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {2}));
-    const auto seqlens_elemi64 = register_new_node<v0::Convert>(seqlens_k, ov::element::i64);
-    const auto real_seqlens = register_new_node<v1::Add>(seqlens_elemi64, one);
 
     // Only consider batch is 1
     OPENVINO_ASSERT(seqlens_k.get_partial_shape().is_static() &&
                     shape_size(seqlens_k.get_partial_shape().to_shape()) == 1);
-    const auto seqlens_1d = register_new_node<v1::Reshape>(real_seqlens, one, false);
-    std::shared_ptr<ov::Node> past_seqlen = register_new_node<v1::Subtract>(seqlens_1d, current_seqlen);
-    past_seqlen->set_friendly_name("past_seqlen");
     std::shared_ptr<ov::Node> curr_seqlen_scalar = register_new_node<v0::Squeeze>(current_seqlen);
 
     const auto negone = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1}));
@@ -147,12 +142,16 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         concat_kv_len = it->second.concat_kv_len;
         cache = &it->second;
     } else {
-        concat_kv_len = register_new_node<v0::Convert>(total_sequence_length, ov::element::i64);
+        const auto seqlens_elemi64 = register_new_node<v0::Convert>(seqlens_k, ov::element::i64);
+        const auto real_seqlens = register_new_node<v1::Add>(seqlens_elemi64, one);
+        const auto seqlens_1d = register_new_node<v1::Reshape>(real_seqlens, one, false);
+        concat_kv_len = seqlens_1d;
         cache = &m_seqk_cache.insert_or_assign(seqlens_k, CachedNodes{concat_kv_len, {}})
                      .first->second;
     }
     OPENVINO_ASSERT(cache);
 
+    std::shared_ptr<ov::Node> past_seqlen;
     ov::Output<ov::Node> q_pos_ids;
     ov::Output<ov::Node> kv_slices;
     std::shared_ptr<ov::Node> reuse_mask;
@@ -172,8 +171,9 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         std::shared_ptr<ov::Node> q_len_idx =
             register_new_node<v4::Range>(zero_without_shape, curr_seqlen_scalar, one_without_shape, ov::element::i64);
         past_seqlen = register_new_node<v1::Subtract>(concat_kv_len, current_seqlen);
+        past_seqlen->set_friendly_name("past_seqlen");
         q_pos_ids = register_new_node<v1::Add>(q_len_idx, past_seqlen);
-        kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{seqlens_1d, negone}, 0);
+        kv_slices = std::make_shared<ov::op::v0::Concat>(ov::NodeVector{concat_kv_len, negone}, 0);
         shared = &cache->q_len_share
                       .insert_or_assign(Q_cur_seq_len,
                                         CachedNodes::QLenSharedNodes{past_seqlen, q_pos_ids, kv_slices, {}, {}})
