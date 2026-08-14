@@ -28,7 +28,9 @@
 #include "openvino/op/fake_quantize.hpp"
 #include "openvino/op/gather.hpp"
 #include "openvino/op/less.hpp"
+#include "openvino/op/logical_or.hpp"
 #include "openvino/op/matmul.hpp"
+#include "openvino/op/maximum.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/mvn.hpp"
 #include "openvino/op/reshape.hpp"
@@ -205,38 +207,41 @@ bool FQStrippingTransformation::run_on_model(const std::shared_ptr<ov::Model>& f
 
     auto fq_ranges_are_the_same = [](const std::shared_ptr<ov::op::v0::FakeQuantize>& fq) {
         auto equal_with_threshold = [](const ov::Output<ov::Node>& val1, const ov::Output<ov::Node>& val2) {
-            auto c1 = ov::util::get_constant_from_source(val1);
-            auto c2 = ov::util::get_constant_from_source(val2);
-            if (!c1 || !c2)
-                return false;
+            auto all_true = [](const std::shared_ptr<ov::op::v0::Constant>& c) {
+                auto v = c->get_vector<bool>();
+                return std::all_of(v.begin(), v.end(), [](bool b) {
+                    return b;
+                });
+            };
+            if (val1.get_element_type() != val2.get_element_type()) {
+                auto abs1 = std::make_shared<ov::op::v0::Abs>(val1);
+                auto cast = std::make_shared<ov::op::v0::Convert>(val2, val1.get_element_type());
+                auto abs2 = std::make_shared<ov::op::v0::Abs>(cast);
+                auto diff = std::make_shared<ov::op::v1::Subtract>(val1, cast);
+                auto abs_diff = std::make_shared<ov::op::v0::Abs>(diff);
+                auto max_abs = std::make_shared<ov::op::v1::Maximum>(abs1, abs2);
 
-            auto v1 = c1->cast_vector<float>();
-            auto v2 = c2->cast_vector<float>();
-            if (v1.size() != v2.size())
-                return false;
+                // In the mixed precision case, an absolute difference check may not be applicable due to
+                // stored precision differences. Therefore, a mixed check is used, with the error criteria
+                // being an absolute error of over 1e-6 (effective for small values) and a relative error
+                // of over 1% (effective for large values)
+                auto eps = ov::op::v0::Constant::create(val1.get_element_type(), {}, {1e-6f});
+                auto relative_eps = ov::op::v0::Constant::create(val1.get_element_type(), {}, {1e-2f});
+                auto relative_eps_full = std::make_shared<ov::op::v1::Multiply>(max_abs, relative_eps);
+                auto is_less_absolute = std::make_shared<ov::op::v1::Less>(abs_diff, eps);
+                auto is_less_relative = std::make_shared<ov::op::v1::Less>(abs_diff, relative_eps_full);
+                auto is_less = ov::util::get_constant_from_source(
+                    std::make_shared<ov::op::v1::LogicalOr>(is_less_absolute, is_less_relative));
 
-            // Detect precision mismatch from the folded constants' element types.
-            // ConvertQuantizeDequantize preserves the dequantizer scale precision in
-            // output_low/high, so a mismatch (e.g., FP16 vs FP32) is directly visible.
-            const bool has_precision_mismatch = c1->get_element_type() != c2->get_element_type();
+                return is_less && all_true(is_less);
+            } else {
+                auto diff = std::make_shared<ov::op::v1::Subtract>(val1, val2);
+                auto abs_diff = std::make_shared<ov::op::v0::Abs>(diff);
+                auto eps = ov::op::v0::Constant::create(val1.get_element_type(), {}, {1e-6f});
+                auto is_less = ov::util::get_constant_from_source(std::make_shared<ov::op::v1::Less>(abs_diff, eps));
 
-            constexpr float strict_eps = 1e-6f;
-            constexpr float relaxed_rel_eps = 1e-2f;
-            for (size_t i = 0; i < v1.size(); ++i) {
-                const float diff = std::abs(v1[i] - v2[i]);
-                if (has_precision_mismatch) {
-                    const float max_abs = std::max(std::abs(v1[i]), std::abs(v2[i]));
-                    if (diff > strict_eps && diff > relaxed_rel_eps * max_abs) {
-                        return false;
-                    }
-                } else {
-                    if (diff > strict_eps) {
-                        return false;
-                    }
-                }
+                return is_less && all_true(is_less);
             }
-           
-            return true;
         };
 
         return equal_with_threshold(fq->input_value(1), fq->input_value(3)) &&
