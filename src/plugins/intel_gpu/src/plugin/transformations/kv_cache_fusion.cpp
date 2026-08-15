@@ -10,6 +10,7 @@
 #include "intel_gpu/op/read_value.hpp"
 #include "intel_gpu/op/sdpa.hpp"
 #include "intel_gpu/plugin/common_utils.hpp"
+#include "intel_gpu/runtime/debug_configuration.hpp"
 #include "openvino/core/node_vector.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/add.hpp"
@@ -588,16 +589,15 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                 posidname += "(remove)";
             }
         }
-        printf("@@##statelesskv(%s): [%s][%s] %s[%s] len[%s](%s) pos[%s] clen[%s]\n",
-               is_slice_concat ? "SC" : (is_update_split ? "US" : "U"),
-               past_output.get_any_name().c_str(),
-               result_node->get_friendly_name().c_str(),
-               sdpa_node ? "sdpa" : "next",
-               kv_sdpa_node->get_friendly_name().c_str(),
-               seqlen_output.get_node()->get_friendly_name().c_str(),
-               is_present_len ? "present" : "past",
-               posidname.c_str(),
-               cache->present_kv_len.get_node() ? cache->present_kv_len.get_node()->get_friendly_name().c_str() : "");
+        GPU_DEBUG_TRACE_DETAIL << "@@##statelesskv(" << (is_slice_concat ? "SC" : (is_update_split ? "US" : "U"))
+                       << "): [" << past_output.get_any_name() << "][" << result_node->get_friendly_name()
+                       << "] " << (sdpa_node ? "sdpa" : "next") << "[" << kv_sdpa_node->get_friendly_name()
+                               << "] len[" << seqlen_output.get_node()->get_friendly_name() << "](" << (is_present_len ? "present" : "past")
+                               << ") pos[" << posidname << "] clen["
+                       << (cache->present_kv_len.get_node()
+                           ? cache->present_kv_len.get_node()->get_friendly_name()
+                           : "")
+                       << "]" << std::endl;
         std::shared_ptr<op::StatelessKV> stateless_kv;
         if (nopos || !pos_idx_output.get_node()) {
             stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, target_axis, is_present_len);
