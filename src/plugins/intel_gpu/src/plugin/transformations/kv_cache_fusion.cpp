@@ -573,9 +573,9 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                     cache->trimmed_masks.push_back({cur_seqlen.get_length(), full_mask, trimmed_mask});
                 }
             }
-            printf("@@##statelesskv: mask-trim [%s] -> [%s]\n",
-                    full_mask.get_node()->get_friendly_name().c_str(),
-                    trimmed_mask->get_friendly_name().c_str());
+            GPU_DEBUG_TRACE_DETAIL << "@@##statelesskv: mask-trim ["
+                                   << full_mask.get_node()->get_friendly_name() << "] -> ["
+                                   << trimmed_mask->get_friendly_name() << "]" << std::endl;
             sdpa_node->set_argument(3, trimmed_mask->output(0));
             m_trimmed_masks.insert(trimmed_mask->output(0));
         }
