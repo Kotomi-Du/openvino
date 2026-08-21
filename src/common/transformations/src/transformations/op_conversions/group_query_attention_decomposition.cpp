@@ -343,56 +343,36 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
 
     const auto concat_kv_len_scalar = register_new_node<v0::Squeeze>(concat_kv_len);
 
-    static const auto qknobcast = []() {
-        const auto txt = std::getenv("qknobcast");
-        return !(txt && txt == std::string_view("false"));
-    }();
     // Broadcast KV if grouped query attention
     const size_t kv_num_heads_factor = num_heads / kv_num_heads;
     if (kv_num_heads_factor > 1) {
-        if (qknobcast) {
-            // printf("skip QK broadcast![%s] with [%zu]/[%zu]\n",
-            //        node->get_friendly_name().c_str(),
-            //        size_t(num_heads),
-            //        size_t(kv_num_heads));
-        } else {
-            const auto kv_shape = register_new_node<v3::ShapeOf>(K);
-            const auto kv_shape_prev_2 = get_dimensions(kv_shape, {0, 1});
-            const auto kv_shape_last_2 = get_dimensions(kv_shape, {2, 3});
-            auto new_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{kv_shape_prev_2, one, kv_shape_last_2}, 0);
-            K = register_new_node<v1::Reshape>(K, new_kv_shape, false);
-            V = register_new_node<v1::Reshape>(V, new_kv_shape, false);
-            K = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, K), 2);
-            V = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, V), 2);
-            const auto q_shape = register_new_node<v3::ShapeOf>(Q);
-            const auto q_shape_prev_2 = get_dimensions(q_shape, {0, 1});
-            auto extended_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{q_shape_prev_2, kv_shape_last_2}, 0);
-            K = register_new_node<v1::Reshape>(K, extended_kv_shape, false);
-            V = register_new_node<v1::Reshape>(V, extended_kv_shape, false);
-        }
+        const auto kv_shape = register_new_node<v3::ShapeOf>(K);
+        const auto kv_shape_prev_2 = get_dimensions(kv_shape, {0, 1});
+        const auto kv_shape_last_2 = get_dimensions(kv_shape, {2, 3});
+        auto new_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{kv_shape_prev_2, one, kv_shape_last_2}, 0);
+        K = register_new_node<v1::Reshape>(K, new_kv_shape, false);
+        V = register_new_node<v1::Reshape>(V, new_kv_shape, false);
+        K = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, K), 2);
+        V = register_new_node<v0::Concat>(ov::OutputVector(kv_num_heads_factor, V), 2);
+        const auto q_shape = register_new_node<v3::ShapeOf>(Q);
+        const auto q_shape_prev_2 = get_dimensions(q_shape, {0, 1});
+        auto extended_kv_shape = register_new_node<v0::Concat>(ov::NodeVector{q_shape_prev_2, kv_shape_last_2}, 0);
+        K = register_new_node<v1::Reshape>(K, extended_kv_shape, false);
+        V = register_new_node<v1::Reshape>(V, extended_kv_shape, false);
     }
 
     ov::Output<ov::Node> external_bias;
     if (node->get_input_size() > 10 && !is_null(node->input_value(10))) {
         external_bias = node->input_value(10);
     }
-    std::shared_ptr<ov::Node> mask;
-    auto build_explict_mask = node->get_sliding_window_cache() || external_bias.get_node() || (scale != 0.0f || is_static_input);
-    if (build_explict_mask) {
-        if (reuse_mask) {
-            mask = reuse_mask;
-        } else {
-            mask = make_attention_mask(curr_seqlen_scalar,
-                                        concat_kv_len_scalar,
-                                        concat_kv_len,
-                                        mask_past_seqlen,
-                                        T,
-                                        local_window_size,
-                                        external_bias,
-                                        bias_col_offset);
-            shared->mask = mask;
-        }
-    }
+    const auto mask = make_attention_mask(curr_seqlen_scalar,
+                                          concat_kv_len_scalar,
+                                          concat_kv_len,
+                                          mask_past_seqlen,
+                                          T,
+                                          local_window_size,
+                                          external_bias,
+                                          bias_col_offset);
 
     // head_sink (input 11) or smooth_softmax add an extra logit to the softmax denominator. SDPA models
     // this with its sink input: a [1, num_heads, 1, 1] tensor appended as one logit column, included in
@@ -434,11 +414,7 @@ ov::OutputVector ov::pass::GroupQueryAttentionDecomposition::decompose(
         auto scale_node = register_new_node(v0::Constant::create(T, Shape{}, {scale}));
         qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, mask, scale_node, false);
     } else {
-        if (mask == nullptr) {
-            qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, true);
-        } else {
-            qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, mask, false);
-        }
+        qga_output = register_new_node<v13::ScaledDotProductAttention>(Q, K, V, mask, false);
     }
 
     // transpose the result from (batch_size, num_heads, sequence_length, head_size)
