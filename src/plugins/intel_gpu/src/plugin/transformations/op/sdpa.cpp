@@ -69,10 +69,10 @@ void SDPA::validate_and_infer_types() {
 
     const auto compression_inputs = get_compression_inputs_num();
     NODE_VALIDATION_CHECK(this,
-        input_size >= 3 + compression_inputs && input_size <= 5 + compression_inputs,
+        input_size >= 3 + compression_inputs && input_size <= 6 + compression_inputs,
         "Number of inputs is incorrect. Current value is: ",
         input_size,
-        ", expected 3, 4 or 5 data inputs and ", compression_inputs, " KV-cache compression related inputs");
+        ", expected 3, 4, 5 or 6 data inputs and ", compression_inputs, " KV-cache compression related inputs");
 
     std::vector<ov::PartialShape> input_shapes;
     for (size_t i = 0; i < input_size; i++) {
