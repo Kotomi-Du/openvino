@@ -65,23 +65,28 @@ std::shared_ptr<ov::intel_gpu::op::SDPA> decompose_and_get_sdpa(const ov::Dimens
     manager.run_passes(model);
 
     bool has_gqa = false;
+    std::shared_ptr<ov::intel_gpu::op::SDPA> result;
     for (const auto& node : model->get_ordered_ops()) {
         has_gqa |= ov::is_type<ov::op::internal::GroupQueryAttention>(node);
         if (auto sdpa = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(node)) {
-            EXPECT_FALSE(has_gqa);
-            return sdpa;
+            result = sdpa;
         }
     }
     EXPECT_FALSE(has_gqa);
-    return nullptr;
+    return result;
 }
 
 TEST(GroupQueryAttentionDecompositionTest, uses_causal_sdpa_without_explicit_mask) {
     const auto sdpa = decompose_and_get_sdpa(ov::Dimension::dynamic());
 
     ASSERT_NE(sdpa, nullptr);
-    EXPECT_EQ(sdpa->get_input_size(), 3u);
+    ASSERT_EQ(sdpa->get_input_size(), 3u);
     EXPECT_TRUE(sdpa->get_causal());
+    EXPECT_EQ(sdpa->get_causal_mask_alignment(), ov::intel_gpu::op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
+
+    const auto cloned = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(sdpa->clone_with_new_inputs(sdpa->input_values()));
+    ASSERT_NE(cloned, nullptr);
+    EXPECT_EQ(cloned->get_causal_mask_alignment(), ov::intel_gpu::op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
 }
 
 TEST(GroupQueryAttentionDecompositionTest, builds_explicit_mask_for_static_input) {

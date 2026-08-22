@@ -18,13 +18,15 @@ SDPA::SDPA(const OutputVector& inputs,
            const std::vector<int64_t>& order_k,
            const std::vector<int64_t>& order_v,
            const std::vector<int64_t>& order_out,
-           const ov::element::Type output_type)
+           const ov::element::Type output_type,
+           const ov::intel_gpu::op::SDPA::CausalMaskAlignment causal_mask_alignment)
     : m_is_causal(is_causal)
     , m_order_q(order_q)
     , m_order_k(order_k)
     , m_order_v(order_v)
     , m_order_out(order_out)
     , m_output_type(output_type)
+    , m_causal_mask_alignment(causal_mask_alignment)
     , m_compressed(false) {
     set_arguments(inputs);
     set_causal(is_causal);
@@ -38,13 +40,15 @@ SDPA::SDPA(const OutputVector& inputs,
            const std::vector<int64_t>& order_v,
            const std::vector<int64_t>& order_out,
            const QuantizationAttribute& quantization_attrs,
-           const ov::element::Type output_type)
+           const ov::element::Type output_type,
+           const ov::intel_gpu::op::SDPA::CausalMaskAlignment causal_mask_alignment)
     : m_is_causal(is_causal)
     , m_order_q(order_q)
     , m_order_k(order_k)
     , m_order_v(order_v)
     , m_order_out(order_out)
     , m_output_type(output_type)
+    , m_causal_mask_alignment(causal_mask_alignment)
     , m_compressed(true)
     , m_quantization_attrs(quantization_attrs) {
     set_arguments(inputs);
@@ -61,7 +65,8 @@ std::shared_ptr<ov::Node> SDPA::clone_with_new_inputs(const ov::OutputVector& ne
                                   m_order_k,
                                   m_order_v,
                                   m_order_out,
-                                  m_output_type);
+                                  m_output_type,
+                                  m_causal_mask_alignment);
 }
 
 void SDPA::validate_and_infer_types() {
@@ -91,11 +96,14 @@ void SDPA::validate_and_infer_types() {
 }
 
 bool SDPA::visit_attributes(ov::AttributeVisitor &visitor) {
+    visitor.on_attribute("is_causal", m_is_causal);
     visitor.on_attribute("order_q", m_order_q);
     visitor.on_attribute("order_k", m_order_k);
     visitor.on_attribute("order_v", m_order_v);
     visitor.on_attribute("order_out", m_order_out);
     visitor.on_attribute("output_type", m_output_type);
+    bool causal_lower_right = m_causal_mask_alignment == CausalMaskAlignment::LOWER_RIGHT;
+    visitor.on_attribute("causal_lower_right", causal_lower_right);
     return true;
 }
 

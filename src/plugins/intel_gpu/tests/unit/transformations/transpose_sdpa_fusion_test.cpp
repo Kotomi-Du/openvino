@@ -28,6 +28,32 @@ namespace ov {
 namespace test {
 namespace intel_gpu {
 
+TEST_F(TransformationTestsF, preserves_gpu_sdpa_causal_alignment) {
+    const auto order = ov::intel_gpu::op::SDPA::default_order(4);
+    auto input_q = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape::dynamic(4));
+    auto input_k = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape::dynamic(4));
+    auto input_v = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape::dynamic(4));
+    auto sdpa = std::make_shared<ov::intel_gpu::op::SDPA>(
+        ov::OutputVector{input_q, input_k, input_v},
+        true,
+        order,
+        order,
+        order,
+        order,
+        ov::element::dynamic,
+        ov::intel_gpu::op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
+    model = std::make_shared<ov::Model>(ov::OutputVector{sdpa}, ov::ParameterVector{input_q, input_k, input_v});
+    manager.register_pass<TransposeFusion>();
+    manager.run_passes(model);
+
+    const auto transformed_sdpa = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(
+        model->get_results().front()->input_value(0).get_node_shared_ptr());
+    ASSERT_NE(transformed_sdpa, nullptr);
+    EXPECT_NE(transformed_sdpa, sdpa);
+    EXPECT_EQ(transformed_sdpa->get_causal_mask_alignment(),
+              ov::intel_gpu::op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
+}
+
 TEST_F(TransformationTestsF, TranposeSDPAFusion1) {
     const bool is_causal = true;
     {

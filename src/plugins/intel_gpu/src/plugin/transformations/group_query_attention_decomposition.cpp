@@ -27,7 +27,14 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_sdpa(const ov::
     }
 
     const auto order = op::SDPA::default_order(query.get_partial_shape().rank().get_length());
-    return register_new_node<op::SDPA>(inputs, is_causal, order, order, order, order);
+    return register_new_node<op::SDPA>(inputs,
+                                       is_causal,
+                                       order,
+                                       order,
+                                       order,
+                                       order,
+                                       ov::element::dynamic,
+                                       op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
 }
 
 std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_attention_mask(
