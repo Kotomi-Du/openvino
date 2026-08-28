@@ -231,7 +231,7 @@ ov::OutputVector group_query_attention(const ov::frontend::onnx::Node& node) {
                                                            v_quant_type,
                                                            local_window_size,
                                                            sliding_window_cache != 0,
-                                                           smooth_softmax != 0)
+                                                           smooth_softmax != 0 && smooth_softmax != -1)
         ->outputs();
 }
 
