@@ -35,6 +35,7 @@
 #include "openvino/op/slice.hpp"
 #include "openvino/op/squeeze.hpp"
 #include "openvino/op/subtract.hpp"
+#include "openvino/op/transpose.hpp"
 #include "openvino/op/variadic_split.hpp"
 #include "intel_gpu/op/stateless_kv.hpp"
 
@@ -135,6 +136,78 @@ TEST_F(TransformationTestsF, StatelessKVFusion_Update) {
         comparator.enable(FunctionsComparator::ATTRIBUTES);
         comparator.enable(FunctionsComparator::CONST_VALUES);
     }
+}
+
+TEST_F(TransformationTestsF, StatelessKVFusion_SplitConcatTransposedV) {
+    static constexpr size_t current_seqlen = 2;
+    const ov::PartialShape current_shape{1, 2, current_seqlen, 4};
+    const ov::PartialShape past_shape{1, 2, 8, 4};
+    const ov::PartialShape past_value_shape{1, 2, 4, 8};
+    const auto order = ov::intel_gpu::op::SDPA::default_order(4);
+    const std::vector<int64_t> value_order{0, 1, 3, 2};
+
+    auto build_model = [&](bool reference) {
+        auto query = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, current_shape);
+        auto key = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, current_shape);
+        auto value = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, current_shape);
+        auto past_key = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, past_shape);
+        auto past_value = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, past_value_shape);
+        auto seqlens_k = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{1, 1});
+
+        const auto [real_seqlen, present_seqlen] = make_sequence_lengths(seqlens_k);
+        auto key_axis = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {2});
+        auto transpose_order = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{4}, value_order);
+        auto transposed_past_value = std::make_shared<ov::op::v1::Transpose>(past_value, transpose_order);
+        auto past_key_seqlen = make_past_cur_seqlens(present_seqlen, query, key_axis).first;
+        auto past_value_seqlen = make_past_cur_seqlens(present_seqlen, value, key_axis).first;
+        auto start = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {0});
+        auto step = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {1});
+
+        ov::Output<ov::Node> present_key;
+        ov::Output<ov::Node> present_value;
+        ov::Output<ov::Node> key_result;
+        ov::Output<ov::Node> value_result;
+        if (reference) {
+            auto key_cache = std::make_shared<ov::intel_gpu::op::StatelessKV>(past_key, key, real_seqlen, 2, true);
+            auto transposed_value = std::make_shared<ov::op::v1::Transpose>(value, transpose_order);
+            auto value_cache = std::make_shared<ov::intel_gpu::op::StatelessKV>(past_value, transposed_value, real_seqlen, 3, true);
+            present_key = key_cache->output(1);
+            present_value = value_cache->output(1);
+            key_result = key_cache->output(0);
+            value_result = value_cache->output(0);
+        } else {
+            auto key_slice = std::make_shared<ov::op::v8::Slice>(past_key, start, past_key_seqlen, step, key_axis);
+            auto value_slice = std::make_shared<ov::op::v8::Slice>(transposed_past_value, start, past_value_seqlen, step, key_axis);
+            auto key_concat = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{key_slice, key}, 2);
+            auto value_concat = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{value_slice, value}, 2);
+            present_key = key_concat;
+            present_value = value_concat;
+            key_result = key_concat;
+            value_result = value_concat;
+        }
+
+        auto sdpa = std::make_shared<ov::intel_gpu::op::SDPA>(ov::OutputVector{query, present_key, present_value},
+                                                               true,
+                                                               order,
+                                                               order,
+                                                               reference ? value_order : order,
+                                                               order);
+        ov::Output<ov::Node> present_value_result = value_result;
+        if (!reference) {
+            present_value_result = std::make_shared<ov::op::v1::Transpose>(value_result, transpose_order);
+        }
+        return std::make_shared<ov::Model>(ov::ResultVector{std::make_shared<ov::op::v0::Result>(sdpa),
+                                                            std::make_shared<ov::op::v0::Result>(key_result),
+                                                            std::make_shared<ov::op::v0::Result>(present_value_result)},
+                                           ov::ParameterVector{query, key, value, past_key, past_value, seqlens_k});
+    };
+
+    model = build_model(false);
+    model_ref = build_model(true);
+    manager.register_pass<StatelessKVFusion>();
+    disable_result_friendly_names_check();
+    comparator.enable(FunctionsComparator::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CONST_VALUES);
 }
 
 // Static pastKV and dynamic Q ScatterUpdate with VariadicSplit towards SDPA
