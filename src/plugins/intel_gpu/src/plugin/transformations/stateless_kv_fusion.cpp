@@ -14,6 +14,7 @@
 #include "intel_gpu/runtime/debug_configuration.hpp"
 #include "openvino/core/node_vector.hpp"
 #include "openvino/core/rt_info.hpp"
+#include "openvino/core/graph_util.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/concat.hpp"
 #include "openvino/op/constant.hpp"
@@ -28,6 +29,7 @@
 #include "openvino/op/shape_of.hpp"
 #include "openvino/op/slice.hpp"
 #include "openvino/op/subtract.hpp"
+#include "openvino/op/transpose.hpp"
 #include "openvino/op/variadic_split.hpp"
 #include "openvino/pass/graph_rewrite.hpp"
 #include "openvino/pass/pattern/op/label.hpp"
@@ -42,6 +44,9 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
     using namespace ov::op;
 
     auto past = wrap_type<ov::op::v0::Parameter>();
+    auto past_transpose_order = wrap_type<ov::op::v0::Constant>();
+    auto transposed_past = wrap_type<ov::op::v1::Transpose>({past, past_transpose_order});
+    auto past_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{past, transposed_past});
     auto new_token_data = any_input();
 
     auto total_seqlen = wrap_type<ov::op::v0::Parameter>(shape_matches("[1]"));
@@ -70,14 +75,17 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
     auto shifted_pos_idx = wrap_type<ov::op::v1::Add>({pos_idx_base, past_seqlen_from_param});
     auto pos_idx = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{shifted_pos_idx, any_input()});
     auto scatter_axis = wrap_type<ov::op::v0::Constant>(shape_matches("[1]"));
-    auto scatter_update = wrap_type<ov::op::v3::ScatterUpdate>({past, pos_idx, new_token_data, scatter_axis});
+    auto scatter_update = wrap_type<ov::op::v3::ScatterUpdate>({past_actual, pos_idx, new_token_data, scatter_axis});
 
     auto slice_axis = wrap_type<ov::op::v0::Constant>();
     auto past_seqlen_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{past_seqlen_add, past_seqlen_sub, any_input()});
-    auto slice = wrap_type<ov::op::v8::Slice>({past, 0, past_seqlen_actual, 1, slice_axis});
+    auto slice = wrap_type<ov::op::v8::Slice>({past_actual, 0, past_seqlen_actual, 1, slice_axis});
     auto concat = wrap_type<ov::op::v0::Concat>({slice, new_token_data});
 
-    auto kv_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{scatter_update, concat});
+    auto present_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{scatter_update, concat});
+    auto present_transpose_order = wrap_type<ov::op::v0::Constant>();
+    auto transposed_present = wrap_type<ov::op::v1::Transpose>({present_actual, present_transpose_order});
+    auto kv_actual = std::make_shared<ov::pass::pattern::op::Or>(OutputVector{present_actual, transposed_present});
     auto result = wrap_type<ov::op::v0::Result>({kv_actual});
 
     ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](ov::pass::pattern::Matcher& m) {
@@ -88,8 +96,13 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         const auto& pattern_map = m.get_pattern_value_map();
         auto result_node = ov::as_type_ptr<ov::op::v0::Result>(pattern_map.at(result).get_node_shared_ptr());
         const auto result_input = result_node->input(0);
-        const auto kv_present_output = result_input.get_source_output();
-        const auto past_output = pattern_map.at(past);
+        const bool has_present_transpose = pattern_map.count(transposed_present) > 0;
+        const auto kv_present_output = pattern_map.at(present_actual);
+        auto kv_result_input = has_present_transpose
+                        ? ov::as_type_ptr<ov::op::v1::Transpose>(pattern_map.at(transposed_present).get_node_shared_ptr())->input(0)
+                        : result_input;
+        const auto past_output = pattern_map.at(past_actual);
+        const bool has_past_transpose = pattern_map.count(transposed_past) > 0;
         const auto new_token_output = pattern_map.at(new_token_data);
         const auto new_token_shape = new_token_output.get_partial_shape();
         std::optional<ov::Input<ov::Node>> kv_to_sdpa_input;
@@ -104,8 +117,38 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         const bool is_slice_concat = pattern_map.count(concat) > 0;
         bool is_update_split = false;
 
+        // check if the transpose is in a pair if exists
+        std::shared_ptr<ov::op::v0::Constant> transpose_order;
+        std::vector<int64_t> transpose_order_value;
+        if (has_past_transpose != has_present_transpose) {
+            return false;
+        }
+        if (has_past_transpose) {
+            const auto past_transpose =
+                ov::as_type_ptr<ov::op::v1::Transpose>(pattern_map.at(transposed_past).get_node_shared_ptr());
+            const auto present_transpose =
+                ov::as_type_ptr<ov::op::v1::Transpose>(pattern_map.at(transposed_present).get_node_shared_ptr());
+            if (!past_transpose || !present_transpose) {
+                return false;
+            }
+
+            transpose_order =
+                ov::as_type_ptr<ov::op::v0::Constant>(past_transpose->input_value(1).get_node_shared_ptr());
+            const auto present_transpose_order =
+                ov::as_type_ptr<ov::op::v0::Constant>(present_transpose->input_value(1).get_node_shared_ptr());
+            if (!transpose_order || !present_transpose_order) {
+                return false;
+            }
+
+            transpose_order_value = transpose_order->cast_vector<int64_t>();
+            if (transpose_order_value != std::vector<int64_t>{0, 1, 3, 2} ||
+                present_transpose_order->cast_vector<int64_t>() != transpose_order_value) {
+                return false;
+            }
+        }
+
         for (const auto& input : kv_present_output.get_target_inputs()) {
-            if (input == result_input) {
+            if (input == kv_result_input) {
                 continue;
             }
             ov::Node* shapeof_node = ov::as_type<ov::op::v3::ShapeOf>(input.get_node());
@@ -302,7 +345,11 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         if (sdpa_node && kv_sdpa_input->get_index() != 1 && kv_sdpa_input->get_index() != 2) {
             return false;
         }
-        if (transformation_callback(kv_sdpa_node)) {
+        if (has_past_transpose && (!sdpa_node || kv_sdpa_input->get_index() != 2)) {
+            return false;
+        }
+
+        if (transformation_callback(sdpa_node ? sdpa_node : kv_sdpa_node)) {
             return false;
         }
 
@@ -369,17 +416,58 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                                << ") pos:" << posidname
                                << " clen:" << (cache->present_kv_len.get_node() ? cache->present_kv_len.get_node()->get_friendly_name() : "") << std::endl;
         std::shared_ptr<op::StatelessKV> stateless_kv;
+        auto stateless_past = past_output;
+        auto stateless_new_token = new_token_output;
+        if (has_past_transpose) {
+            const auto past_transpose =
+                ov::as_type_ptr<ov::op::v1::Transpose>(pattern_map.at(transposed_past).get_node_shared_ptr());
+            stateless_past = past_transpose->input_value(0);
+            stateless_new_token = std::make_shared<ov::op::v1::Transpose>(new_token_output, transpose_order);
+            target_axis = transpose_order_value.at(target_axis);
+        }
         if (!pos_idx_output.get_node()) {
-            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, target_axis, is_present_len);
+            stateless_kv = std::make_shared<op::StatelessKV>(stateless_past, stateless_new_token, seqlen_output, target_axis, is_present_len);
         } else {
-            stateless_kv = std::make_shared<op::StatelessKV>(past_output, new_token_output, seqlen_output, pos_idx_output, target_axis, is_present_len);
+            stateless_kv = std::make_shared<op::StatelessKV>(stateless_past, stateless_new_token, seqlen_output, pos_idx_output, target_axis, is_present_len);
         }
         stateless_kv->set_friendly_name(past_output.get_any_name() + "_stateless");
         ov::copy_runtime_info(node_infos, stateless_kv);
         stateless_kv->output(0).set_names(result_node->output(0).get_names());
 
-        kv_sdpa_input->replace_source_output(stateless_kv->output(1));
+        if (has_past_transpose) {
+            auto sdpa_inputs = sdpa_node->input_values();
+            sdpa_inputs[2] = stateless_kv->output(1);
+
+            std::shared_ptr<op::SDPA> new_sdpa;
+            if (sdpa_node->get_kv_compressed()) {
+                new_sdpa = std::make_shared<op::SDPA>(sdpa_inputs,
+                                                      sdpa_node->get_causal(),
+                                                      sdpa_node->get_input0_transpose_order(),
+                                                      sdpa_node->get_input1_transpose_order(),
+                                                      transpose_order_value,
+                                                      sdpa_node->get_output_transpose_order(),
+                                                      sdpa_node->get_quantization_attrs(),
+                                                      sdpa_node->get_output_type(),
+                                                      sdpa_node->get_causal_mask_alignment());
+            } else {
+                new_sdpa = std::make_shared<op::SDPA>(sdpa_inputs,
+                                                      sdpa_node->get_causal(),
+                                                      sdpa_node->get_input0_transpose_order(),
+                                                      sdpa_node->get_input1_transpose_order(),
+                                                      transpose_order_value,
+                                                      sdpa_node->get_output_transpose_order(),
+                                                      sdpa_node->get_output_type(),
+                                                      sdpa_node->get_causal_mask_alignment());
+            }
+            new_sdpa->set_friendly_name(sdpa_node->get_friendly_name());
+            ov::copy_runtime_info(sdpa_node, new_sdpa);
+            ov::replace_node(sdpa_node, new_sdpa);
+        } else {
+            kv_sdpa_input->replace_source_output(stateless_kv->output(1));
+        }
+
         result_node->input(0).replace_source_output(stateless_kv->output(0));
+        
         for (auto& input : other_inputs) {
             // for full static case, need to keep other inputs to use original full shape
             input.replace_source_output(stateless_kv->output(is_slice_concat || is_update_split ? 1 : 0));
