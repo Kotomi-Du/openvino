@@ -551,18 +551,6 @@ void SyncInferRequest::wait() {
             }
         }
 
-        static const auto inplacekv = []() {
-            const auto txt = std::getenv("inplacekv");
-            return !(txt && txt == std::string_view("false"));
-        }();
-        bool zerocopy = false;
-        if (inplacekv) {
-            if (internal_name.find("present") != std::string::npos) {
-                zerocopy = true;
-            }
-        }
-
-
         if (need_output_update) {
             OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "SyncInferRequest::wait::update_output");
             auto mem_shape = output_layout.get_shape();
@@ -611,9 +599,7 @@ void SyncInferRequest::wait() {
 
         // mapping remote blobs not needed -
         // let the user take care of them explicitly
-        if (zerocopy) {
-        }
-        else if (!is_remote_tensor_impl && output_memory) {
+        if (!is_remote_tensor_impl && output_memory) {
             if (!is_generic_remote) {
                 auto* dst_ptr = static_cast<uint8_t*>(output_tensor->data());
                 bool same_mem = same_host_mem(output_memory, dst_ptr);
