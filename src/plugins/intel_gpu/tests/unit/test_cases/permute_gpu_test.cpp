@@ -7,6 +7,7 @@
 #include "random_generator.hpp"
 
 #include <intel_gpu/primitives/input_layout.hpp>
+#include <intel_gpu/primitives/implementation_desc.hpp>
 #include <intel_gpu/primitives/permute.hpp>
 #include <intel_gpu/primitives/reorder.hpp>
 #include <intel_gpu/primitives/data.hpp>
@@ -502,6 +503,48 @@ TEST(permute_gpu_i32, basic_bfyx_permute_0_1_3_2) {
 
 TEST(permute_gpu_i64, basic_bfyx_permute_0_1_3_2) {
     permute_test_with_reorder<data_types::i64>();
+}
+
+TEST(permute_gpu_u2, basic_bfyx_permute_0_2_1_3) {
+    auto& engine = get_test_engine();
+    auto input = engine.allocate_memory({data_types::f32, format::bfyx, {1, 2, 2, 4}});
+
+    set_values(input, {0.f, 1.f, 2.f, 3.f,
+                       1.f, 2.f, 3.f, 0.f,
+                       2.f, 3.f, 0.f, 1.f,
+                       3.f, 0.f, 1.f, 2.f});
+
+    topology topology(input_layout("input", input->get_layout()),
+                      reorder("to_u2", input_info("input"), {data_types::u2, format::bfyx, {1, 2, 2, 4}}),
+                      permute("permute", input_info("to_u2"), {0, 2, 1, 3}),
+                      reorder("output", input_info("permute"), {data_types::f32, format::bfyx, {1, 2, 2, 4}}));
+
+    network network(engine, topology, get_test_default_config(engine));
+    network.set_input_data("input", input);
+    auto output = network.execute().at("output").get_memory();
+
+    const std::vector<float> expected = {0.f, 1.f, 2.f, 3.f,
+                                         2.f, 3.f, 0.f, 1.f,
+                                         1.f, 2.f, 3.f, 0.f,
+                                         3.f, 0.f, 1.f, 2.f};
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        ASSERT_FLOAT_EQ(expected[i], output_ptr[i]);
+    }
+}
+
+TEST(permute_gpu_u2, rank3_transpose_1_0_2_uses_bf_swap) {
+    auto& engine = get_test_engine();
+    const layout input_layout{ov::PartialShape{80, 17920, 64}, data_types::u2, format::bfyx};
+    topology topology(cldnn::input_layout("input", input_layout),
+                      permute("permute", input_info("input"), {1, 0, 2}));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc bf_swap = {format::bfyx, "permute_bf_swap"};
+    config.set_property(ov::intel_gpu::force_implementations(
+        ov::intel_gpu::ImplForcingMap{{"permute", bf_swap}}));
+
+    EXPECT_NO_THROW(program::build_program(engine, topology, config, false, false));
 }
 
 TEST(permute_fuse_reorder_gpu_f32, basic_b_fs_yx_fsv4_permute_1_8_16_1)
@@ -2457,6 +2500,9 @@ TEST_P(permute_xy_swap, combined) {
     run_test<cldnn::data_types::u8>(p.sizes, p.format_fsv, "permute_xy_swap", {0, 1, 3, 2});
     run_test<cldnn::data_types::i8>(p.sizes, p.format_fsv, "permute_xy_swap", {0, 1, 3, 2});
     run_test<cldnn::data_types::i32>(p.sizes, p.format_fsv, "permute_xy_swap", {0, 1, 3, 2});
+    if (p.sizes[2] % 4 == 0 && p.sizes[3] % 4 == 0) {
+        run_test<cldnn::data_types::u2>(p.sizes, p.format_fsv, "permute_xy_swap", {0, 1, 3, 2});
+    }
 }
 
 struct TiledPerformancePermuteTest : TiledPermuteTest
