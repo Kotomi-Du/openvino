@@ -369,6 +369,9 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
         if (!is_slice_concat && !is_update_split && sdpa_node && sdpa_node->inputs().size() - sdpa_node->get_compression_inputs_num() >= 4 &&
             m_trimmed_masks.count(sdpa_node->input_value(3)) == 0) {
             const auto full_mask = sdpa_node->input_value(3);
+            if (full_mask.get_partial_shape().rank().is_dynamic()) {
+                return false;
+            }
             const auto& cur_seqlen = new_token_shape[target_axis];
             auto trimmed_mask = get_trimmed_mask(full_mask, cur_seqlen);
             if (!trimmed_mask) {
@@ -394,7 +397,8 @@ StatelessKVFusionMatcher::StatelessKVFusionMatcher() {
                 }
                 const auto split_lengths =
                     std::make_shared<v0::Concat>(ov::OutputVector{present_len, v0::Constant::create(present_len_type, ov::Shape{1}, {-1})}, 0);
-                const auto mask_split = std::make_shared<v1::VariadicSplit>(full_mask, v0::Constant::create(present_len_type, ov::Shape{}, {1}), split_lengths);
+                const auto mask_split =
+                    std::make_shared<v1::VariadicSplit>(full_mask, v0::Constant::create(present_len_type, ov::Shape{}, {-1}), split_lengths);
                 trimmed_mask = mask_split;
                 if (cache->present_kv_len.get_node() && cur_seqlen.is_static()) {
                     cache->trimmed_masks.push_back({cur_seqlen.get_length(), full_mask, trimmed_mask});
