@@ -18,6 +18,7 @@
 #include "openvino/op/select.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/squeeze.hpp"
+#include "openvino/op/transpose.hpp"
 #include "openvino/op/unsqueeze.hpp"
 
 namespace ov::intel_gpu {
@@ -37,18 +38,49 @@ GroupQueryAttentionDecomposition::KVCacheOutputs GroupQueryAttentionDecompositio
     const ov::Output<ov::Node>& /*current_seqlen_scalar*/) {
     const auto window_size = node->get_sliding_window_cache() ? node->get_local_window_size() : 0;
     const auto key_cache = register_new_node<op::StatelessKV>(past_key, key, seqlens_1d, 2, true, window_size);
-    const auto value_cache = register_new_node<op::StatelessKV>(past_value, value, seqlens_1d, 2, true, window_size);
-    printf("Here statelessKV[%s][%s](%d) on [%s]\n",
-           past_key.get_node()->get_friendly_name().c_str(),
-           past_value.get_node()->get_friendly_name().c_str(),
-           window_size,
-           seqlens_1d.get_node()->get_friendly_name().c_str());
+    const auto value_transpose_order =
+        register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{4}, {0, 1, 3, 2}));
+    const auto get_value_transpose = [](const ov::Output<ov::Node>& output) {
+        const auto transpose = ov::as_type_ptr<v1::Transpose>(output.get_node_shared_ptr());
+        if (!transpose) {
+            return std::shared_ptr<v1::Transpose>{};
+        }
+        const auto order = ov::as_type_ptr<v0::Constant>(transpose->input_value(1).get_node_shared_ptr());
+        if (!order || order->cast_vector<int64_t>() != std::vector<int64_t>{0, 1, 3, 2}) {
+            return std::shared_ptr<v1::Transpose>{};
+        }
+        return transpose;
+    };
 
+    const auto input_past_value = node->input_value(4);
+    const auto input_value = node->input_value(2);
+    const auto past_value_transpose = get_value_transpose(input_past_value);
+    const auto value_transpose = get_value_transpose(input_value);
+    std::shared_ptr<v1::Transpose> present_value_transpose;
+    if (node->output(2).get_target_inputs().size() == 1) {
+        const auto& target = *node->output(2).get_target_inputs().begin();
+        present_value_transpose = get_value_transpose(target.get_node()->output(target.get_index()));
+    }
+
+    m_transpose_v = past_value_transpose && value_transpose && present_value_transpose;
+    std::shared_ptr<op::StatelessKV> value_cache;
+    if (m_transpose_v) {
+        value_cache = register_new_node<op::StatelessKV>(past_value_transpose->input_value(0),
+                                                         value,
+                                                         seqlens_1d,
+                                                         3,
+                                                         true,
+                                                         window_size);
+    } else {
+        value_cache = register_new_node<op::StatelessKV>(past_value, value, seqlens_1d, 2, true, window_size);
+    }
     KVCacheOutputs outputs;
     outputs.present_key = key_cache->output(0);
     outputs.present_value = value_cache->output(0);
     outputs.sdpa_key = key_cache->output(1);
-    outputs.sdpa_value = value_cache->output(1);
+    outputs.sdpa_value = m_transpose_v ? register_new_node<v1::Transpose>(value_cache->output(1), value_transpose_order)
+                                       : value_cache->output(1);
+
     outputs.mask_past_seqlen = past_seqlen;
     outputs.bias_col_offset = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {0}));
 
@@ -76,6 +108,7 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_sdpa(const ov::
                                                                       const ov::Output<ov::Node>& scale,
                                                                       const ov::Output<ov::Node>& sink,
                                                                       bool is_causal) {
+    const auto order = op::SDPA::default_order(query.get_partial_shape().rank().get_length());
     ov::OutputVector inputs{query, key, value};
     if (mask.get_node()) {
         inputs.push_back(mask);
@@ -87,7 +120,6 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_sdpa(const ov::
         inputs.push_back(sink);
     }
 
-    const auto order = op::SDPA::default_order(query.get_partial_shape().rank().get_length());
     auto sdpa = register_new_node<op::SDPA>(inputs,
                                        is_causal,
                                        order,
@@ -120,14 +152,9 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_attention_mask(
     // so the explicit mask subgraph is unneeded whenever that path is reachable.
     if (causal && !external_bias.get_node() && scale == 0.0f && !has_sink &&
         (local_window_size == -1 || sliding_window_cache)) {
-        printf("Here causal skip mask on [%s]\n", curr_seqlen_scalar.get_node()->get_friendly_name().c_str());
         return nullptr;
     }
 
-    printf("Here original mask %c(%d) on [%s]\n",
-           sliding_window_cache ? 'Y' : 'N',
-           local_window_size,
-           curr_seqlen_scalar.get_node()->get_friendly_name().c_str());
     return ov::pass::GroupQueryAttentionDecomposition::make_attention_mask(curr_seqlen_scalar,
                                                                            kv_len_scalar,
                                                                            kv_len_1d,

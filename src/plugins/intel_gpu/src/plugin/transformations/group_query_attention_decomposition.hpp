@@ -43,6 +43,7 @@ protected:
                                                   bool has_sink) override;
 
     int64_t m_local_window_size = -1;
+    bool m_transpose_v = false;
 };
 
 }  // namespace ov::intel_gpu
