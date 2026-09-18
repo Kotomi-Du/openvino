@@ -155,6 +155,46 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_attention_mask(
         return nullptr;
     }
 
+    if (sliding_window_cache && !external_bias.get_node()) {
+        const auto zero = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {0}));
+        const auto one = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{1}, {1}));
+        const auto zero_scalar = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{}, {0}));
+        const auto one_scalar = register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{}, {1}));
+        const auto window_size = local_window_size - 1;
+        const auto window =
+            register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{}, {window_size}));
+
+        std::shared_ptr<ov::Node> key_positions =
+            register_new_node<v4::Range>(zero_scalar, kv_len_scalar, one_scalar, ov::element::i64);
+        key_positions = register_new_node<v0::Unsqueeze>(key_positions, zero);
+        std::shared_ptr<ov::Node> query_positions =
+            register_new_node<v4::Range>(zero_scalar, curr_seqlen_scalar, one_scalar, ov::element::i64);
+        query_positions = register_new_node<v0::Unsqueeze>(query_positions, one);
+        query_positions = register_new_node<v1::Add>(query_positions, past_seqlen);
+
+        std::shared_ptr<ov::Node> masked = register_new_node<v1::Greater>(key_positions, query_positions);
+        const auto distance = register_new_node<v1::Subtract>(query_positions, key_positions);
+        const auto too_old = register_new_node<v1::Greater>(distance, window);
+        masked = register_new_node<v1::LogicalOr>(masked, too_old);
+
+        const auto typed_zero = register_new_node(v0::Constant::create(compute_type, ov::Shape{}, {0}));
+        std::shared_ptr<ov::Node> minus_inf;
+        if (compute_type == ov::element::f16) {
+            minus_inf = register_new_node(
+                v0::Constant::create(compute_type, ov::Shape{}, {std::numeric_limits<ov::float16>::lowest()}));
+        } else if (compute_type == ov::element::bf16) {
+            minus_inf = register_new_node(
+                v0::Constant::create(compute_type, ov::Shape{}, {std::numeric_limits<ov::bfloat16>::lowest()}));
+        } else {
+            minus_inf = register_new_node(
+                v0::Constant::create(compute_type, ov::Shape{}, {std::numeric_limits<float>::lowest()}));
+        }
+        auto mask = register_new_node<v1::Select>(masked, minus_inf, typed_zero);
+
+        printf("Here statelessKV SWA mask(%d) on [%s]\n", local_window_size, curr_seqlen_scalar.get_node()->get_friendly_name().c_str());
+        return mask;
+    }
+
     return ov::pass::GroupQueryAttentionDecomposition::make_attention_mask(curr_seqlen_scalar,
                                                                            kv_len_scalar,
                                                                            kv_len_1d,
