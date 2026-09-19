@@ -10,6 +10,7 @@
 #include "intel_gpu/op/stateless_kv.hpp"
 #include "openvino/core/model.hpp"
 #include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
 #include "openvino/op/group_query_attention.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/result.hpp"
@@ -36,6 +37,7 @@ struct GQAConfig {
     bool flag_a = false;  // do_rotary
     bool flag_b = false;  // rotary_interleaved
     int64_t softcap = 0;
+    int64_t kv_cache_bit_width = 0;
     QuantType kv_quant = QuantType::NONE;
     QuantType out_quant = QuantType::NONE;
     int64_t local_window_size = -1;  // >= 1 enables sliding window attention
@@ -55,9 +57,10 @@ std::shared_ptr<ov::Model> make_gqa_model(const GQAConfig& cfg) {
         f32,
         cfg.transpose_value ? ov::PartialShape{1, kv_num_heads, head_size, 1}
                              : ov::PartialShape{1, kv_num_heads, 1, head_size});
-    auto past_key = std::make_shared<ov::op::v0::Parameter>(f32, ov::PartialShape{1, kv_num_heads, past_len, head_size});
+    const auto cache_type = cfg.kv_cache_bit_width ? ov::element::i8 : f32;
+    auto past_key = std::make_shared<ov::op::v0::Parameter>(cache_type, ov::PartialShape{1, kv_num_heads, past_len, head_size});
     auto past_value = std::make_shared<ov::op::v0::Parameter>(
-        f32,
+        cache_type,
         cfg.transpose_value ? ov::PartialShape{1, kv_num_heads, head_size, past_len}
                              : ov::PartialShape{1, kv_num_heads, past_len, head_size});
     auto seqlens_k = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{1});
@@ -72,6 +75,18 @@ std::shared_ptr<ov::Model> make_gqa_model(const GQAConfig& cfg) {
     }
 
     ov::OutputVector inputs{query, key, gqa_value, past_key, gqa_past_value, seqlens_k, total_sequence_length};
+    ov::ParameterVector parameters{query, key, value, past_key, past_value, seqlens_k, total_sequence_length};
+    if (cfg.kv_cache_bit_width) {
+        for (size_t index = 0; index < 5; ++index) {
+            inputs.push_back(ov::op::v0::Constant::create(f32, ov::Shape{0}, {}));
+        }
+        auto key_scale = std::make_shared<ov::op::v0::Parameter>(f32, ov::PartialShape{1});
+        auto value_scale = std::make_shared<ov::op::v0::Parameter>(f32, ov::PartialShape{1});
+        inputs.push_back(key_scale);
+        inputs.push_back(value_scale);
+        parameters.push_back(key_scale);
+        parameters.push_back(value_scale);
+    }
 
     auto gqa = std::make_shared<ov::op::internal::GroupQueryAttention>(inputs,
                                                                        num_heads,
@@ -79,7 +94,7 @@ std::shared_ptr<ov::Model> make_gqa_model(const GQAConfig& cfg) {
                                                                        cfg.scale,
                                                                        cfg.flag_a,
                                                                        cfg.flag_b,
-                                                                       cfg.softcap,
+                                                                       cfg.kv_cache_bit_width,
                                                                        cfg.kv_quant,
                                                                        cfg.out_quant,
                                                                        cfg.local_window_size,
@@ -95,7 +110,7 @@ std::shared_ptr<ov::Model> make_gqa_model(const GQAConfig& cfg) {
         }
         results.push_back(std::make_shared<ov::op::v0::Result>(output));
     }
-    return std::make_shared<ov::Model>(results, ov::ParameterVector{query, key, value, past_key, past_value, seqlens_k, total_sequence_length});
+    return std::make_shared<ov::Model>(results, parameters);
 }
 
 std::shared_ptr<ov::intel_gpu::op::SDPA> decompose_and_get_sdpa(const GQAConfig& cfg) {
@@ -156,6 +171,30 @@ TEST(GroupQueryAttentionDecompositionTest, control_plain_causal_uses_lower_right
     EXPECT_EQ(sdpa->get_causal_mask_alignment(), ov::intel_gpu::op::SDPA::CausalMaskAlignment::LOWER_RIGHT);
 }
 
+TEST(GroupQueryAttentionDecompositionTest, quantized_kv_uses_compressed_sdpa_before_cache_dequantization) {
+    GQAConfig cfg;
+    cfg.kv_cache_bit_width = 8;
+    cfg.kv_quant = QuantType::PER_TENSOR;
+    cfg.out_quant = QuantType::PER_TENSOR;
+
+    const auto sdpa = decompose_and_get_sdpa(cfg);
+
+    ASSERT_NE(sdpa, nullptr);
+    EXPECT_TRUE(sdpa->get_kv_compressed());
+    ASSERT_EQ(sdpa->get_input_size(), 5u);
+    EXPECT_TRUE(ov::is_type<ov::intel_gpu::op::StatelessKV>(sdpa->input_value(1).get_node_shared_ptr()));
+    EXPECT_TRUE(ov::is_type<ov::intel_gpu::op::StatelessKV>(sdpa->input_value(2).get_node_shared_ptr()));
+    EXPECT_EQ(sdpa->get_quantization_attrs().quantization_dt, ov::element::i8);
+    EXPECT_EQ(sdpa->get_quantization_attrs().scale_dt, ov::element::f16);
+
+    for (const auto& node : sdpa->get_function()->get_ordered_ops()) {
+        const auto convert = ov::as_type_ptr<ov::op::v0::Convert>(node);
+        if (convert) {
+            EXPECT_FALSE(ov::is_type<ov::intel_gpu::op::StatelessKV>(convert->input_value(0).get_node_shared_ptr()));
+        }
+    }
+}
+
 TEST(GroupQueryAttentionDecompositionTest, value_cache_keeps_plain_layout_without_transposes) {
     auto model = make_gqa_model({});
     ov::pass::Manager manager;
@@ -201,9 +240,17 @@ TEST(GroupQueryAttentionDecompositionTest, value_cache_absorbs_matching_transpos
 
     const auto present_value = model->get_results().at(2)->input_value(0);
     const auto present_value_transpose = ov::as_type_ptr<ov::op::v1::Transpose>(present_value.get_node_shared_ptr());
-    ASSERT_NE(present_value_transpose, nullptr);
-    EXPECT_EQ(present_value_transpose->input_value(0), value_cache->output(0));
-    EXPECT_EQ(present_value.get_partial_shape(), (ov::PartialShape{1, kv_num_heads, head_size, ov::Dimension::dynamic()}));
+    EXPECT_EQ(present_value_transpose, nullptr);
+    EXPECT_EQ(present_value, value_cache->output(0));
+
+    std::shared_ptr<ov::intel_gpu::op::SDPA> sdpa;
+    for (const auto& node : model->get_ordered_ops()) {
+        if (const auto candidate = ov::as_type_ptr<ov::intel_gpu::op::SDPA>(node)) {
+            sdpa = candidate;
+        }
+    }
+    ASSERT_NE(sdpa, nullptr);
+    EXPECT_EQ(sdpa->get_input2_transpose_order(), (std::vector<int64_t>{0, 1, 3, 2}));
 }
 
 // A sliding-window cache retains the explicit attention mask.

@@ -41,6 +41,9 @@ protected:
                                              const ov::Output<ov::Node>& seqlens_1d,
                                              const ov::Output<ov::Node>& past_seqlen,
                                              const ov::Output<ov::Node>& current_seqlen_scalar);
+    virtual bool use_compressed_kv() const {
+        return false;
+    }
     virtual std::shared_ptr<ov::Node> make_sdpa(const ov::Output<ov::Node>& query,
                                                 const ov::Output<ov::Node>& key,
                                                 const ov::Output<ov::Node>& value,
