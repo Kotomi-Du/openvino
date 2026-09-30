@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "openvino/op/group_query_attention.hpp"
 #include "openvino/op/shape_of.hpp"
 #include "openvino/pass/matcher_pass.hpp"
@@ -32,6 +34,12 @@ protected:
         ov::Output<ov::Node> bias_col_offset;
     };
 
+    struct CompressedKV {
+        ov::Output<ov::Node> key;
+        ov::Output<ov::Node> value;
+        ov::OutputVector quantization_inputs;
+    };
+
     ov::OutputVector decompose(std::shared_ptr<ov::op::internal::GroupQueryAttention> node);
     virtual KVCacheOutputs construct_kvcache(const std::shared_ptr<ov::op::internal::GroupQueryAttention>& node,
                                              const ov::Output<ov::Node>& past_key,
@@ -48,7 +56,16 @@ protected:
                                                 const ov::Output<ov::Node>& scale,
                                                 const ov::Output<ov::Node>& sink,
                                                 bool is_causal,
-                                                int64_t local_window_size = -1);
+                                                int64_t local_window_size,
+                                                const std::optional<CompressedKV>& compressed_kv);
+    virtual std::optional<CompressedKV> prepare_compressed_kv(
+        const std::shared_ptr<ov::op::internal::GroupQueryAttention>& node,
+        const ov::Output<ov::Node>& key,
+        const ov::Output<ov::Node>& value,
+        const ov::Output<ov::Node>& key_scale,
+        const ov::Output<ov::Node>& value_scale) {
+        return std::nullopt;
+    }
     std::shared_ptr<ov::Node> get_dimensions(const std::shared_ptr<op::v3::ShapeOf>& shape,
                                              const std::vector<int>& dims);
     std::shared_ptr<ov::Node> get_dimensions(const std::shared_ptr<ov::Node>& node, const std::vector<int>& dims);
