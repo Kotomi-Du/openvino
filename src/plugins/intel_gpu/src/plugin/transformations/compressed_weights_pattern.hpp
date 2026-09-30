@@ -25,14 +25,20 @@ using ov::pass::operator|;
         auto decompressed_weights_m =\
             ov::pass::pattern::optional<ov::op::v1::Reshape>({convert_m, any_input()});\
 \
-        auto sub_const_m = wrap_type<ov::op::v0::Constant>();\
-        auto sub_convert_const_m = ov::pass::pattern::optional<ov::op::v0::Convert>({sub_const_m});\
+        auto zp_m = wrap_type<ov::op::v0::Constant, ov::op::v0::Parameter>();\
+        auto zp_convert_m = ov::pass::pattern::optional<ov::op::v0::Convert>({zp_m});\
+        auto zp_reshape_m =\
+            ov::pass::pattern::optional<ov::op::v1::Reshape>({zp_convert_m, any_input()});\
+        auto zp_decompression_m = ov::pass::pattern::optional<ov::op::v0::Convert>({zp_reshape_m});\
         auto subtract_m =\
-            ov::pass::pattern::optional<ov::op::v1::Subtract>({decompressed_weights_m, sub_convert_const_m});\
+            ov::pass::pattern::optional<ov::op::v1::Subtract>({decompressed_weights_m, zp_decompression_m});\
 \
-        auto mul_const_m = wrap_type<ov::op::v0::Constant>();\
-        auto mul_const_convert_m = ov::pass::pattern::optional<ov::op::v0::Convert>(mul_const_m);\
-        auto mul_m = wrap_type<ov::op::v1::Multiply>({subtract_m, mul_const_convert_m});\
+        auto scale_m = wrap_type<ov::op::v0::Constant, ov::op::v0::Parameter>();\
+        auto scale_convert_m = ov::pass::pattern::optional<ov::op::v0::Convert>({scale_m});\
+        auto scale_reshape_m =\
+            ov::pass::pattern::optional<ov::op::v1::Reshape>({scale_convert_m, any_input()});\
+        auto scale_decompression_m = ov::pass::pattern::optional<ov::op::v0::Convert>({scale_reshape_m});\
+        auto mul_m = wrap_type<ov::op::v1::Multiply>({subtract_m, scale_decompression_m});\
 \
         /* No transpose: Multiply, Reshape, Convert(Reshape), or Multiply(Reshape). */\
         auto reshape_const_m = wrap_type<ov::op::v0::Constant>();\
