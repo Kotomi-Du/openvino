@@ -99,6 +99,10 @@ public:
         }
         return layouts;
     }
+
+    bool can_support_input_output_alias(size_t input_idx, size_t output_idx) const override {
+        return input_idx == 0 && output_idx == 0;
+    }
 };
 
 using stateless_kv_node = typed_program_node<stateless_kv>;
