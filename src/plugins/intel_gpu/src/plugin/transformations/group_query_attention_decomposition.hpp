@@ -52,6 +52,7 @@ protected:
         const ov::Output<ov::Node>& value_scale) override;
 
     op::SDPA::QuantizationAttribute m_quantization_attrs;
+    bool m_transpose_v = false;
 };
 
 }  // namespace ov::intel_gpu

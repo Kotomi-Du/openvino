@@ -24,6 +24,7 @@
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/squeeze.hpp"
 #include "openvino/op/unsqueeze.hpp"
+#include "openvino/op/transpose.hpp"
 
 namespace ov::intel_gpu {
 
@@ -42,12 +43,49 @@ GroupQueryAttentionDecomposition::KVCacheOutputs GroupQueryAttentionDecompositio
     const ov::Output<ov::Node>& /*current_seqlen_scalar*/) {
     const auto window_size = node->get_sliding_window_cache() ? node->get_local_window_size() : 0;
     const auto key_cache = register_new_node<op::StatelessKV>(past_key, key, seqlens_1d, 2, true, window_size);
-    const auto value_cache = register_new_node<op::StatelessKV>(past_value, value, seqlens_1d, 2, true, window_size);
-    printf("Here statelessKV[%s][%s](%d) on [%s]\n",
-           past_key.get_node()->get_friendly_name().c_str(),
-           past_value.get_node()->get_friendly_name().c_str(),
-           window_size,
-           seqlens_1d.get_node()->get_friendly_name().c_str());
+
+    int64_t value_seq_axis = 2;
+    const auto value_transpose_order =
+        register_new_node(v0::Constant::create(ov::element::i64, ov::Shape{4}, {0, 1, 3, 2}));
+    const auto find_value_transpose = [](const ov::Output<ov::Node>& output) {
+        const auto transpose = ov::as_type_ptr<v1::Transpose>(output.get_node_shared_ptr());
+        if (!transpose) {
+            return std::shared_ptr<v1::Transpose>{};
+        }
+        const auto order = ov::as_type_ptr<v0::Constant>(transpose->input_value(1).get_node_shared_ptr());
+        if (!order || order->cast_vector<int64_t>() != std::vector<int64_t>{0, 1, 3, 2}) {
+            return std::shared_ptr<v1::Transpose>{};
+        }
+        return transpose;
+    };
+
+    const auto input_past_value = node->input_value(4);
+    const auto past_value_transpose = find_value_transpose(input_past_value);
+    std::shared_ptr<v1::Transpose> present_value_transpose;
+    if (node->output(2).get_target_inputs().size() == 1) {
+        const auto& target = *node->output(2).get_target_inputs().begin();
+        present_value_transpose = find_value_transpose(target.get_node()->output(target.get_index()));
+    }
+
+    m_transpose_v = past_value_transpose && present_value_transpose;
+    std::shared_ptr<op::StatelessKV> value_cache;
+    if (m_transpose_v) {
+        // Before: past_value -> Transpose -> GQA cache -> Transpose -> present_value.
+        // After:  past_value -------------------------> StatelessKV(axis=3) -> present_value.
+        //         current_value -> Transpose ----------^      (the output Transpose is bypassed)
+        value_seq_axis = 3;
+        const auto transposed_value = register_new_node<v1::Transpose>(value, value_transpose_order);
+        value_cache = register_new_node<op::StatelessKV>(past_value_transpose->input_value(0),
+                                                         transposed_value,
+                                                         seqlens_1d,
+                                                         value_seq_axis,
+                                                         true,
+                                                         window_size);
+        present_value_transpose->output(0).replace(value_cache->output(0));
+    } else {
+        value_cache =
+            register_new_node<op::StatelessKV>(past_value, value, seqlens_1d, value_seq_axis, true, window_size);
+    }
 
     KVCacheOutputs outputs;
     outputs.present_key = key_cache->output(0);
@@ -175,6 +213,7 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_sdpa(const ov::
     }
 
     const auto order = op::SDPA::default_order(query.get_partial_shape().rank().get_length());
+    const auto value_order = m_transpose_v ? std::vector<int64_t>{0, 1, 3, 2} : order;
     // GQA's -1 sentinel for "no window" maps to SDPA's 0 = disabled.
     const int64_t sdpa_window = (local_window_size >= 1) ? local_window_size : 0;
     const auto alignment = is_causal ? op::SDPA::CausalMaskAlignment::LOWER_RIGHT : op::SDPA::CausalMaskAlignment::UPPER_LEFT;
@@ -185,7 +224,7 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_sdpa(const ov::
             is_causal,
             order,
             order,
-            order,
+            value_order,
             order,
             m_quantization_attrs,
             ov::element::dynamic,
@@ -197,7 +236,7 @@ std::shared_ptr<ov::Node> GroupQueryAttentionDecomposition::make_sdpa(const ov::
             is_causal,
             order,
             order,
-            order,
+            value_order,
             order,
             ov::element::dynamic,
             alignment,
