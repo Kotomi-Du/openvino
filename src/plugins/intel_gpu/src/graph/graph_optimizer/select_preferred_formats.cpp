@@ -229,6 +229,15 @@ void select_preferred_formats::run(program& p) {
                 GPU_DEBUG_LOG << "WARNING(select_preferred_formats): " << exception.what() << std::endl;
             }
             print_selected_formats(*n);
+        } else {
+            for (size_t i = 0; i < n->get_dependencies().size(); ++i) {
+                const auto input_format = n->get_dependency(i).get_output_layout().format;
+                n->set_preferred_input_fmt(i, input_format);
+            }
+            for (size_t i = 0; i < n->get_outputs_count(); ++i) {
+                const auto output_format = n->get_output_layout().format;
+                n->set_preferred_output_fmt(i, output_format);
+            }
         }
     }
 }
