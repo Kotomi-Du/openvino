@@ -207,6 +207,7 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
                 std::iota(new_order.begin(), new_order.end(), 0);
                 std::swap(new_order[new_order.size() - 1], new_order[new_order.size() - 2]);
                 transpose_const = std::make_shared<ov::op::v0::Constant>(ov::element::i32, ov::Shape{new_order.size()}, new_order);
+                result_nodes.push_back(transpose_const);
             }
 
             fc_input_b = transpose->clone_with_new_inputs({fc_input_b->output(0), transpose_const});
