@@ -17,6 +17,8 @@
 #include "openvino/op/matmul.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/reshape.hpp"
+#include "openvino/op/slice.hpp"
+#include "openvino/op/strided_slice.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/transpose.hpp"
 #include "openvino/pass/pattern/op/or.hpp"
@@ -129,8 +131,16 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
         };
 
         auto convert_const_to_u8 = [&](std::shared_ptr<ov::Node> node) {
+            auto is_slice = [](const std::shared_ptr<ov::Node>& n) {
+                return ov::is_type<ov::op::v8::Slice>(n) || ov::is_type<ov::op::v1::StridedSlice>(n);
+            };
             auto source = node;
-            while (ov::is_type<ov::op::v1::Reshape>(source) || ov::is_type<ov::op::v0::Convert>(source)) {
+            std::shared_ptr<ov::Node> zp_slice = nullptr;
+            while (ov::is_type<ov::op::v1::Reshape>(source) || ov::is_type<ov::op::v0::Convert>(source) ||
+                   is_slice(source)) {
+                if (is_slice(source)) {
+                    zp_slice = source;
+                }
                 source = source->get_input_node_shared_ptr(0);
             }
             std::shared_ptr<ov::Node> result = node;
@@ -139,7 +149,26 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
                 return result;
             }
             if (source->get_element_type() == ov::element::u4 || source->get_element_type() == ov::element::u2) {
-                result = std::make_shared<ov::op::v0::Convert>(node, ov::element::u8);
+                if (zp_slice) {
+                    // ZP is (Strided)Slice(Convert(low-bit Constant)), optionally followed by a Reshape added above.
+                    // Slicing can't evaluate sub-byte types, so convert the packed ZP to u8 first and replay
+                    // the Slice (and Reshape) on u8 data, which ConstantFolding can fold later.
+                    OPENVINO_ASSERT(node == zp_slice || node->get_input_node_shared_ptr(0) == zp_slice,
+                                    "Unexpected zero point subgraph for FullyConnectedCompressed");
+                    auto zp_u8 = std::make_shared<ov::op::v0::Convert>(source, ov::element::u8);
+                    result_nodes.push_back(zp_u8);
+                    auto slice_inputs = zp_slice->input_values();
+                    slice_inputs[0] = zp_u8;
+                    result = zp_slice->clone_with_new_inputs(slice_inputs);
+                    if (node != zp_slice) {
+                        result_nodes.push_back(result);
+                        auto node_inputs = node->input_values();
+                        node_inputs[0] = result;
+                        result = node->clone_with_new_inputs(node_inputs);
+                    }
+                } else {
+                    result = std::make_shared<ov::op::v0::Convert>(node, ov::element::u8);
+                }
                 // Only unsigned ZP types can be converted to u8.
             } else if (weight_u8 && sub_with_convert && !source->get_element_type().is_signed()) {
                 result = std::make_shared<ov::op::v0::Convert>(node, ov::element::u8);

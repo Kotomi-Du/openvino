@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "openvino/op/slice.hpp"
+#include "openvino/op/strided_slice.hpp"
 #include "openvino/pass/pattern/op/optional.hpp"
 
 using namespace ov::pass::pattern;
@@ -31,8 +33,17 @@ using ov::pass::operator|;
         auto sub_value_param_convert_m = wrap_type<ov::op::v0::Convert>({sub_value_param_m});\
         auto sub_value_param_convert_reshape_m =\
             wrap_type<ov::op::v1::Reshape>({sub_value_param_convert_m, any_input()});\
+        /* Packed sub-byte ZP with padding trimmed after decompression: (Strided)Slice(Convert(Constant)). */\
+        /* Slice is converted to StridedSlice by SliceToStridedSlice in CommonOptimizations. */\
+        auto sub_value_slice_const_m = wrap_type<ov::op::v0::Constant>();\
+        auto sub_value_slice_convert_m = wrap_type<ov::op::v0::Convert>({sub_value_slice_const_m});\
+        auto sub_value_const_convert_slice_m = wrap_type<ov::op::v8::Slice>(\
+            {sub_value_slice_convert_m, any_input(), any_input(), any_input(), any_input()});\
+        auto sub_value_const_convert_strided_slice_m = wrap_type<ov::op::v1::StridedSlice>(\
+            {sub_value_slice_convert_m, any_input(), any_input(), any_input()});\
         auto sub_const_m = sub_value_const_m | sub_value_param_m | sub_value_param_reshape_m |\
-                           sub_value_param_convert_reshape_m;\
+                           sub_value_param_convert_reshape_m | sub_value_const_convert_slice_m |\
+                           sub_value_const_convert_strided_slice_m;\
         auto sub_convert_const_m = wrap_type<ov::op::v0::Convert>({sub_const_m});\
         auto sub_with_convert_m =\
             wrap_type<ov::op::v1::Subtract>({decompressed_weights_m, sub_convert_const_m});\
