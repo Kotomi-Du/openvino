@@ -1973,6 +1973,11 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
                 // in a statically shaped model, e.g. a separate decode model, the activations would always be
                 // quantized. u2 has int8-activation kernels for prefill-sized batches only, so keep f16 there.
                 if (root->get_input_element_type(1) == ov::element::u2) {
+                    const auto fc_u2 = ov::as_type_ptr<const ov::intel_gpu::op::FullyConnectedCompressed>(root);
+                    if (fc_u2 && fc_u2->get_weights_layout() == ov::intel_gpu::op::FcWeightsLayout::GNK) {
+                        GPU_DEBUG_TRACE << root->get_friendly_name() << "  dyn_quan is turned off: u2 GNK weights" << std::endl;
+                        return true;
+                    }
                     const auto& act_shape = root->get_input_partial_shape(0);
                     if (act_shape.is_static() && act_shape.size() >= 2) {
                         const auto rows = ov::shape_size(act_shape.to_shape()) / act_shape.to_shape().back();
