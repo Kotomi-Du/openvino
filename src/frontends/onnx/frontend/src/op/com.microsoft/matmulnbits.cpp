@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <numeric>
 #include <optional>
 #include <vector>
@@ -32,8 +33,7 @@ using namespace ov::op;
 namespace ov::frontend::onnx::com_microsoft::opset_1 {
 namespace {
 // MatMulNBits repacks B/scales/zero_point initializers into new low-bit Constants. Preserve the
-// original ONNX initializer's friendly name and tensor names on the repacked Constant so weight
-// sharing / weights-as-input can still identify it as the same external weight.
+// original ONNX initializer's friendly name and tensor names for downstream graph identification.
 void preserve_initializer_name(const std::shared_ptr<v0::Constant>& repacked,
                                const std::shared_ptr<v0::Constant>& original) {
     repacked->set_friendly_name(original->get_friendly_name());
@@ -280,8 +280,7 @@ ov::OutputVector matmulnbits(const ov::frontend::onnx::Node& node) {
             break;
         }
 
-        // Preserve the original B initializer name on the repacked weight constant so it can still be
-        // identified by name downstream (e.g. for weight sharing).
+        // Preserve the original B initializer name on the repacked weight constant.
         if (const auto casted_b_const = ov::as_type_ptr<v0::Constant>(casted_b.get_node_shared_ptr())) {
             preserve_initializer_name(casted_b_const, b_const);
         }
@@ -342,8 +341,7 @@ ov::OutputVector matmulnbits(const ov::frontend::onnx::Node& node) {
                 converted_zero_points = std::make_shared<v0::Constant>(a.get_element_type(),
                                                                        casted_zp_shape,
                                                                        zero_points_const->get_data_ptr());
-                // Preserve the original zero_point name on the repacked Constant (as done for B) so weight
-                // sharing / weights-as-input can still identify it by name.
+                // Preserve the original zero_point name on the repacked Constant, as done for B.
                 if (const auto casted_zp_const =
                         ov::as_type_ptr<v0::Constant>(converted_zero_points.get_node_shared_ptr())) {
                     preserve_initializer_name(casted_zp_const, zero_points_const);
@@ -417,21 +415,34 @@ ov::OutputVector matmulnbits(const ov::frontend::onnx::Node& node) {
                                      " bytes, got: ",
                                      zero_points_const->get_byte_size());
                 }
-                auto casted_zp_org =
-                    std::make_shared<v0::Constant>(zp_element_type, casted_zp_shape, zero_points_const->get_data_ptr());
-                // Preserve the original zero_point name on the repacked Constant (as done for B) so
-                // weight sharing can promote it. The packed Constant keeps the source uint8 byte count, so
-                // the promoted input's tensor matches the external weight at runtime - true whether or not
-                // the Slice below is inserted, so name it unconditionally.
-                preserve_initializer_name(casted_zp_org, zero_points_const);
-                converted_zero_points = std::make_shared<v0::Convert>(casted_zp_org, a.get_element_type());
                 if (pack_dim != num_elements_aligned) {
-                    // if not aligned, e.g. pack_dim is 13, bits is 2, num_per_byte is 4: packed into 4
-                    // bytes, so make a constant {outer_dim, 16} then slice to {outer_dim, 13}
-                    const auto num_elements =
-                        std::make_shared<v0::Constant>(ov::element::i32, Shape{1}, static_cast<int32_t>(pack_dim));
-                    converted_zero_points =
-                        std::make_shared<v8::Slice>(converted_zero_points, zero, num_elements, one, axis);
+                    // The ONNX buffer byte-aligns each row. Unpack only the valid values and let Constant
+                    // repack them contiguously, so the graph does not need a padding-trimming Slice.
+                    const auto packed_data = static_cast<const uint8_t*>(zero_points_const->get_data_ptr());
+                    const auto value_mask = (1u << bits) - 1;
+                    std::vector<uint8_t> zero_point_values(static_cast<size_t>(outer_dim * pack_dim));
+                    for (uint64_t outer = 0; outer < outer_dim; ++outer) {
+                        for (uint64_t i = 0; i < pack_dim; ++i) {
+                            const auto byte_index = outer * num_byte + i / num_per_byte;
+                            const auto bit_shift = (i % num_per_byte) * bits;
+                            zero_point_values[static_cast<size_t>(outer * pack_dim + i)] =
+                                static_cast<uint8_t>((packed_data[byte_index] >> bit_shift) & value_mask);
+                        }
+                    }
+                    auto unpacked_zp =
+                        std::make_shared<v0::Constant>(zp_element_type,
+                                                       ov::Shape{static_cast<size_t>(outer_dim),
+                                                                 static_cast<size_t>(pack_dim),
+                                                                 1},
+                                                       zero_point_values);
+                    preserve_initializer_name(unpacked_zp, zero_points_const);
+                    converted_zero_points = std::make_shared<v0::Convert>(unpacked_zp, a.get_element_type());
+                } else {
+                    auto casted_zp_org = std::make_shared<v0::Constant>(zp_element_type,
+                                                                        casted_zp_shape,
+                                                                        zero_points_const->get_data_ptr());
+                    preserve_initializer_name(casted_zp_org, zero_points_const);
+                    converted_zero_points = std::make_shared<v0::Convert>(casted_zp_org, a.get_element_type());
                 }
             } else {
                 FRONT_END_THROW("Unexpected zero point type");
