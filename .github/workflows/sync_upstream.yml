@@ -1,0 +1,21 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # every day at 02:00 UTC
+  workflow_dispatch:       # allow manual runs
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository == 'Kotomi-Du/openvino'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream master into fork master
+        env:
+          # Use a PAT with 'repo' + 'workflow' scopes if upstream changes .github/workflows files
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/merge-upstream" -f branch=master
