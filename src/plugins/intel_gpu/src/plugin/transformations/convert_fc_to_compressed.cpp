@@ -137,7 +137,7 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
             return std::static_pointer_cast<ov::Node>(reshape);
         };
 
-        auto convert_zp_const = [&](std::shared_ptr<ov::Node> node) {
+        auto convert_zp = [&](std::shared_ptr<ov::Node> node) {
             auto constant = ov::as_type_ptr<ov::op::v0::Constant>(node);
             const auto zp_type = node->get_element_type();
             std::shared_ptr<ov::Node> result = node;
@@ -176,29 +176,39 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
                         reshaped[0].get_length() == static_cast<int64_t>(w[1]) && reshaped[1].get_length() == static_cast<int64_t>(w[0] * w[2]);
         }
         const bool has_zp = pattern_map.count(subtract_m) > 0;
-        const auto scale_const = ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(mul_const_m).get_node_shared_ptr());
-        const auto zp_const = has_zp ? ov::as_type_ptr<ov::op::v0::Constant>(pattern_map.at(sub_const_m).get_node_shared_ptr()) : nullptr;
-        if (is_gnk_u2 && scale_const && zp_const &&
+        const auto scale_node = pattern_map.at(mul_const_m).get_node_shared_ptr();
+        const auto zp_node = has_zp ? pattern_map.at(sub_const_m).get_node_shared_ptr() : nullptr;
+        if (is_gnk_u2 && has_zp &&
             cm::woq_u2_accepts_gnk(m_device_info,
                                    m_cm_jit_supported,
                                    weight_ptr->get_element_type(),
                                    weight_ptr->get_output_partial_shape(0),
-                                   scale_const->get_element_type(),
-                                   scale_const->get_output_partial_shape(0),
+                                   scale_node->get_element_type(),
+                                   scale_node->get_output_partial_shape(0),
                                    has_zp,
-                                   zp_const->get_element_type(),
-                                   zp_const->get_output_partial_shape(0))) {
+                                   zp_node->get_element_type(),
+                                   zp_node->get_output_partial_shape(0))) {
             const auto& w_shape = weight_ptr->get_output_shape(0);
-            auto to_gn = [&](const std::shared_ptr<ov::op::v0::Constant>& constant) {
-                auto reshaped = std::make_shared<ov::op::v0::Constant>(*constant, ov::Shape{w_shape[0], w_shape[1]});
-                ov::copy_weightless_cache_attr(constant, reshaped);
+            auto to_gn = [&](const std::shared_ptr<ov::Node>& node) -> std::shared_ptr<ov::Node> {
+                const ov::Shape gn_shape{w_shape[0], w_shape[1]};
+                if (auto constant = ov::as_type_ptr<ov::op::v0::Constant>(node)) {
+                    auto reshaped = std::make_shared<ov::op::v0::Constant>(*constant, gn_shape);
+                    ov::copy_weightless_cache_attr(constant, reshaped);
+                    return reshaped;
+                }
+                if (node->get_output_shape(0) == gn_shape) {
+                    return node;
+                }
+                auto shape = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{gn_shape.size()}, gn_shape);
+                auto reshaped = std::make_shared<ov::op::v1::Reshape>(node, shape, false);
+                ov::copy_runtime_info(node, {shape, reshaped});
                 return reshaped;
             };
-            const auto gnk_zp = convert_zp_const(to_gn(zp_const));
+            const auto gnk_zp = convert_zp(to_gn(zp_node));
             auto gnk_fc = std::make_shared<op::FullyConnectedCompressed>(fc->input_value(0),
                                                                          weight_ptr,
                                                                          pattern_map.at(bias_m),
-                                                                         to_gn(scale_const),
+                                                                         to_gn(scale_node),
                                                                          gnk_zp,
                                                                          fc->get_output_type(),
                                                                          true,
@@ -221,7 +231,7 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
             const auto zero_point = has_transpose_before_reshape
                                         ? pattern_map.at(sub_const_m).get_node_shared_ptr()
                                         : reshape_input(pattern_map.at(sub_const_m).get_node_shared_ptr());
-            optional_zero_point = convert_zp_const(zero_point);
+            optional_zero_point = convert_zp(zero_point);
         }
 
         std::shared_ptr<ov::Node> fc_input_b = weight_ptr;

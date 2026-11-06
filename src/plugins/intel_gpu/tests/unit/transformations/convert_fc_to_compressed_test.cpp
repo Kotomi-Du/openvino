@@ -981,6 +981,28 @@ std::shared_ptr<ov::Node> make_gnk_u2_fc_ref(const ov::Output<ov::Node>& input, 
                                                                          false,
                                                                          ov::intel_gpu::op::FcWeightsLayout::GNK);
 }
+
+std::shared_ptr<ov::Node> make_gnk_u2_parameter_fc_ref(const ov::Output<ov::Node>& input,
+                                                       const ov::Output<ov::Node>& weights,
+                                                       const ov::Output<ov::Node>& scale,
+                                                       const ov::Output<ov::Node>& zero_point) {
+    auto scale_shape = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{2}, {2, 32});
+    auto gnk_scale = std::make_shared<ov::op::v1::Reshape>(scale, scale_shape, false);
+    auto zp_shape = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{2}, {2, 32});
+    auto gnk_zp = std::make_shared<ov::op::v1::Reshape>(zero_point, zp_shape, false);
+    auto zero_point_u8 = std::make_shared<ov::op::v0::Convert>(gnk_zp, ov::element::u8);
+    auto no_bias = std::make_shared<ov::intel_gpu::op::Placeholder>();
+    return std::make_shared<ov::intel_gpu::op::FullyConnectedCompressed>(input,
+                                                                         weights,
+                                                                         no_bias,
+                                                                         gnk_scale,
+                                                                         zero_point_u8,
+                                                                         ov::element::dynamic,
+                                                                         true,
+                                                                         false,
+                                                                         false,
+                                                                         ov::intel_gpu::op::FcWeightsLayout::GNK);
+}
 }  // namespace
 
 TEST_F(TransformationTestsF, ConvertFCToCompressed25_GnkU2ConstantWeightsOnCmDevice) {
@@ -1008,6 +1030,38 @@ TEST_F(TransformationTestsF, ConvertFCToCompressed26_GnkU2ParameterWeightsOnCmDe
         auto input = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::PartialShape{-1, 128});
         auto weights = std::make_shared<ov::op::v0::Parameter>(ov::element::u2, ov::Shape{2, 32, 64});
         model_ref = std::make_shared<ov::Model>(ov::OutputVector{make_gnk_u2_fc_ref(input, weights)}, ov::ParameterVector{input, weights});
+    }
+}
+
+TEST_F(TransformationTestsF, ConvertFCToCompressed_GnkU2ParameterScaleAndZeroPointOnCmDevice) {
+    comparator.enable(FunctionsComparator::ATTRIBUTES);
+    {
+        auto input = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::PartialShape{-1, 128});
+        auto weights = std::make_shared<ov::op::v0::Parameter>(ov::element::u2, ov::Shape{2, 32, 64});
+        auto scale = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::Shape{2, 32, 1});
+        auto zero_point = std::make_shared<ov::op::v0::Parameter>(ov::element::u2, ov::Shape{2, 32, 1});
+        auto weights_convert = std::make_shared<ov::op::v0::Convert>(weights, ov::element::f16);
+        auto zero_point_convert = std::make_shared<ov::op::v0::Convert>(zero_point, ov::element::f16);
+        auto subtract = std::make_shared<ov::op::v1::Subtract>(weights_convert, zero_point_convert);
+        auto multiply = std::make_shared<ov::op::v1::Multiply>(subtract, scale);
+        auto transpose_order = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{3}, {1, 0, 2});
+        auto transpose = std::make_shared<ov::op::v1::Transpose>(multiply, transpose_order);
+        auto reshape_shape = ov::op::v0::Constant::create(ov::element::i32, ov::Shape{2}, {32, 128});
+        auto reshape = std::make_shared<ov::op::v1::Reshape>(transpose, reshape_shape, false);
+        auto no_bias = std::make_shared<ov::intel_gpu::op::Placeholder>();
+        auto fc = std::make_shared<ov::intel_gpu::op::FullyConnected>(input, reshape, no_bias);
+
+        model = std::make_shared<ov::Model>(ov::OutputVector{fc}, ov::ParameterVector{input, weights, scale, zero_point});
+        manager.register_pass<ConvertFullyConnectedToFullyConnectedCompressed>(cm_u2_capable_device(), true);
+    }
+    {
+        auto input = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::PartialShape{-1, 128});
+        auto weights = std::make_shared<ov::op::v0::Parameter>(ov::element::u2, ov::Shape{2, 32, 64});
+        auto scale = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::Shape{2, 32, 1});
+        auto zero_point = std::make_shared<ov::op::v0::Parameter>(ov::element::u2, ov::Shape{2, 32, 1});
+        model_ref = std::make_shared<ov::Model>(
+            ov::OutputVector{make_gnk_u2_parameter_fc_ref(input, weights, scale, zero_point)},
+            ov::ParameterVector{input, weights, scale, zero_point});
     }
 }
 
