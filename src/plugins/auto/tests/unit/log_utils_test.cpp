@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -34,11 +34,8 @@ public:
     int _expectCallNum;
 
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<ConfigParams> obj) {
-        std::string logLevel;
-        std::string envLogLevel;
-        int expectCallNum;
-        std::tie(logLevel, envLogLevel, expectCallNum) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<ConfigParams>& obj) {
+        const auto& [logLevel, envLogLevel, expectCallNum] = obj.param;
         std::ostringstream result;
         result << "logLevel_" << logLevel << "_expectCallNum_" << expectCallNum << "envlogLevel" << envLogLevel;
         return result.str();
@@ -46,7 +43,7 @@ public:
 
 #if 0
     void SetTestEnv(std::string key, std::string value) {
-#    ifdef WIN32
+#    ifdef _WIN32
         SetEnvironmentVariable(key.c_str(), value.c_str());
 #    elif defined(__linux__)
         ::setenv(key.c_str(), value.c_str(), true);

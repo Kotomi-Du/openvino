@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,17 +6,21 @@
 
 #include <cstddef>
 #include <memory>
+#include <oneapi/dnnl/dnnl_common.hpp>
+#include <set>
 #include <vector>
 
 #include "cache/multi_cache.h"
-#include "cpu_memory.h"
+#include "emitters/snippets/aarch64/kernel_executors/gemm_copy_b.hpp"
 #include "emitters/snippets/cpu_runtime_configurator.hpp"
-#include "nodes/executors/subgraph.hpp"
+#include "nodes/executors/repacking_subgraph.hpp"
 
 namespace ov::intel_cpu {
 
-class SubgraphExecutor : public SubgraphBaseExecutor {
+class SubgraphExecutor : public SubgraphRepackingExecutor<aarch64::GemmCopyBKernel> {
 public:
+    using SubgraphRepackingExecutor<aarch64::GemmCopyBKernel>::SubgraphRepackingExecutor;
+
     SubgraphExecutor(const std::shared_ptr<CPURuntimeConfig>& snippet_config,
                      const std::shared_ptr<SubgraphAttrs>& snippet_attrs,
                      const std::shared_ptr<SubgraphCodeGenerator>& snippet,
@@ -24,32 +28,24 @@ public:
                      const std::vector<ptrdiff_t>& start_offset_out,
                      const BufferScratchpadAllocator& allocator,
                      const ov::intel_cpu::MultiCacheWeakPtr& kernel_cache);
+
+#ifdef SNIPPETS_DEBUG_CAPS
+protected:
+    void segfault_detector() const override;
+
+private:
+    bool enabled_segfault_detector = false;
+#endif
 };
 
-class SubgraphStaticExecutor : public SubgraphExecutor, public SubgraphStaticBaseExecutor {
+class SubgraphStaticExecutor : public SubgraphRepackingStaticExecutor<SubgraphExecutor> {
 public:
-    template <typename... Args>
-    SubgraphStaticExecutor(const std::shared_ptr<ov::intel_cpu::CPURuntimeConfig>& config,
-                           const std::set<size_t>& external_ptrs_idces,
-                           size_t in_num,
-                           Args&&... rest)
-        : SubgraphExecutor(config, std::forward<Args>(rest)...),
-          SubgraphStaticBaseExecutor(external_ptrs_idces, in_num) {}
-
-    void exec_impl(const std::vector<MemoryPtr>& in_mem_ptrs, const std::vector<MemoryPtr>& out_mem_ptrs) override;
+    using SubgraphRepackingStaticExecutor<SubgraphExecutor>::SubgraphRepackingStaticExecutor;
 };
 
-class SubgraphDynamicSpecializedExecutor : public SubgraphExecutor, public SubgraphDynamicSpecializedBaseExecutor {
+class SubgraphDynamicSpecializedExecutor : public SubgraphRepackingDynamicSpecializedExecutor<SubgraphExecutor> {
 public:
-    template <typename... Args>
-    SubgraphDynamicSpecializedExecutor(const std::shared_ptr<ov::intel_cpu::CPURuntimeConfig>& config,
-                                       const std::set<size_t>& external_ptrs_idces,
-                                       size_t in_num,
-                                       Args&&... rest)
-        : SubgraphExecutor(config, std::forward<Args>(rest)...),
-          SubgraphDynamicSpecializedBaseExecutor(config, external_ptrs_idces, in_num) {}
-
-    void exec_impl(const std::vector<MemoryPtr>& in_mem_ptrs, const std::vector<MemoryPtr>& out_mem_ptrs) override;
+    using SubgraphRepackingDynamicSpecializedExecutor<SubgraphExecutor>::SubgraphRepackingDynamicSpecializedExecutor;
 };
 
 }  // namespace ov::intel_cpu

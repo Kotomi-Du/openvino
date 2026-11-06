@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -56,9 +56,7 @@ inline std::ostream& operator<<(std::ostream& out, const AddExpectedValues& valu
 class ElementwiseWithMultiParentDequantizationFunction {
 public:
     static std::shared_ptr<ov::Model> get(
-        const ov::element::Type precision,
         const ov::Shape& inputShape,
-        const ov::pass::low_precision::LayerTransformation::Params& params,
         const ov::element::Type& precision1,
         const ov::builder::subgraph::DequantizationOperations& dequantization1,
         const ov::element::Type& precision2,

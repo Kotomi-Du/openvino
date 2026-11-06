@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -37,9 +37,9 @@ TEST_P(data_layout_test, size_check) {
 
     auto l = layout(p.dt, p.fmt, tensor{default_fmt, p.size}, p.padd);
 
-    size_t expected_count = std::accumulate(p.size.begin(), p.size.end(), 1, std::multiplies<int>());
-    size_t expected_bytes_count = std::accumulate(p.expected_aligned_size.begin(), p.expected_aligned_size.end(), 1, std::multiplies<int>()) *
-                                  data_type_traits::size_of(p.dt);
+    size_t expected_count = std::accumulate(p.size.begin(), p.size.end(), static_cast<size_t>(1), std::multiplies<ov::Dimension::value_type>());
+    size_t expected_bytes_count = std::accumulate(p.expected_aligned_size.begin(), p.expected_aligned_size.end(), static_cast<size_t>(1),
+                                                  std::multiplies<ov::Dimension::value_type>()) * data_type_traits::size_of(p.dt);
 
     ASSERT_EQ(l.bytes_count(), expected_bytes_count);
     ASSERT_EQ(l.count(), expected_count);
@@ -104,6 +104,7 @@ INSTANTIATE_TEST_SUITE_P(smoke, data_layout_test,
         {data_types::f32, format::bs_fs_yx_bsv4_fsv4, {2, 33, 3, 5}, {4, 36, 3, 5}, {0, 1, 2, 3}, {}, {495, 15, 5, 1}},
         {data_types::f32, format::bfzyx, {3, 2, 2, 2, 2}, {3, 2, 2, 2, 2}, {0, 1, 2, 3, 4}, {}, {16, 8, 4, 2, 1}},
         {data_types::f32, format::bzyxf, {3, 2, 2, 2, 2}, {3, 2, 2, 2, 2}, {0, 2, 3, 4, 1}, {}, {16, 1, 8, 4, 2}},
+        {data_types::u8, format::bfyx, {2150615040, 1, 1, 1}, {2150615040, 1, 1, 1}, {0, 1, 2, 3}, {}, {1, 1, 1, 1}},
     }));
 
 class weights_layout_test : public testing::TestWithParam<layout_test_params> { };
@@ -181,7 +182,7 @@ TEST_P(weights_layout_test, size_check) {
         ASSERT_EQ(ordered_dims[i], p.size[p.expected_order[i]]);
     }
 
-    if (p.expected_pitches.size() > 0)
+    if (!p.expected_pitches.empty())
         ASSERT_EQ(l.get_pitches(), p.expected_pitches);
     else {
         l.get_pitches();
@@ -207,6 +208,14 @@ struct layouts_cmp_test_params {
 };
 
 class layout_cmp_test : public testing::TestWithParam<layouts_cmp_test_params> { };
+
+TEST(layout_test, to_short_string_contains_padding_details) {
+    const auto l = layout{ov::PartialShape{1, 2, 3, 4}, data_types::f32, format::bfyx, padding{{1, 2, 3, 4}, {5, 6, 7, 8}}};
+    const auto str = l.to_short_string();
+
+    EXPECT_NE(str.find(":pad_l[1,2,3,4]"), std::string::npos);
+    EXPECT_NE(str.find(":pad_u[5,6,7,8]"), std::string::npos);
+}
 
 TEST_P(layout_cmp_test, basic) {
     auto p = GetParam();
@@ -420,19 +429,19 @@ INSTANTIATE_TEST_SUITE_P(smoke, custom_layout_test,
         {
             {16, 16, 8, 8},
             format_traits{
-                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{1, 16}, {0, 16}}
+                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{1, 16}, {0, 16}}, {{1, 16}, {0, 16}}, 16384
             },
             format_traits{
-                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{0, 2}, {1, 8}, {0, 8}, {1, 2}}
+                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{0, 2}, {1, 8}, {0, 8}, {1, 2}}, {{0, 2}, {1, 8}}, 16384
             }
         },
         {
             {32, 32, 8, 8},
             format_traits{
-                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{1, 4}, {0, 8}, {1, 8}, {0, 4}}
+                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{1, 4}, {0, 8}, {1, 8}, {0, 4}}, {{1, 4}, {0, 8}}, 65536
             },
             format_traits{
-                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{0, 2}, {1, 8}, {0, 8}, {1, 2}}
+                "custom", 1, 1, 2, 0, {0, 1, 2, 3}, "oiyx", "oixy?", {{0, 2}, {1, 8}, {0, 8}, {1, 2}}, {{0, 2}, {1, 8}}, 65536
             }
         },
     }));

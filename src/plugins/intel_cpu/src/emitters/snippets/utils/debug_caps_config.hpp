@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #ifdef SNIPPETS_DEBUG_CAPS
@@ -15,7 +15,7 @@ public:
         readProperties();
     }
 
-    bool enable_segfault_detector;
+    bool enable_segfault_detector = false;
 
 private:
     void readProperties();

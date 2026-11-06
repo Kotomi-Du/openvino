@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -147,20 +147,32 @@ void regmodule_offline_transformations(py::module m) {
            bool use_block_indices_inputs,
            bool use_score_outputs,
            bool allow_score_aggregation,
-           bool allow_cache_rotation) {
+           bool allow_cache_rotation,
+           bool allow_xattention,
+           bool allow_adaptive_rkv,
+           bool allow_qq_bias,
+           bool is_draft_model) {
             const auto model = Common::utils::convert_to_model(ie_api_model);
             ov::pass::Manager manager;
             manager.register_pass<ov::pass::SDPAToPagedAttention>(use_block_indices_inputs,
                                                                   use_score_outputs,
                                                                   allow_score_aggregation,
-                                                                  allow_cache_rotation);
+                                                                  allow_cache_rotation,
+                                                                  allow_xattention,
+                                                                  allow_adaptive_rkv,
+                                                                  allow_qq_bias,
+                                                                  is_draft_model);
             manager.run_passes(model);
         },
         py::arg("model"),
         py::arg("use_block_indices_inputs") = false,
         py::arg("use_score_outputs") = false,
         py::arg("allow_score_aggregation") = false,
-        py::arg("allow_cache_rotation") = false);
+        py::arg("allow_cache_rotation") = false,
+        py::arg("allow_xattention") = false,
+        py::arg("allow_adaptive_rkv") = false,
+        py::arg("allow_qq_bias") = false,
+        py::arg("is_draft_model") = false);
 
     m_offline_transformations.def(
         "stateful_to_stateless_transformation",

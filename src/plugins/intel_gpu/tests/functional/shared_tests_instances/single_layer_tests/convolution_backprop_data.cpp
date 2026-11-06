@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,34 @@
 #include "single_op_tests/convolution_backprop_data.hpp"
 #include "common_test_utils/test_constants.hpp"
 
+namespace ov {
+namespace test {
+
+class ConvolutionBackpropDataLayerSharedGPUTest : public ConvolutionBackpropDataLayerTest {
+protected:
+    void SetUp() override {
+        ConvolutionBackpropDataLayerTest::SetUp();
+        // FP16 outputs have limited precision (~1/1024 mantissa). For dilated deconv with
+        // larger spatial inputs, output values can be large enough that FP16 rounding error
+        // exceeds the default epsilon-based threshold. This is not an accumulator issue
+        // (accumulator is already FP32 for dilated FP16) but an output representation limit.
+        const auto& [convParams, model_type, shapes, output_shapes, dev] = this->GetParam();
+        if (model_type == ov::element::f16) {
+            abs_threshold = 0.5;
+            rel_threshold = 0.01;
+        }
+    }
+};
+
+TEST_P(ConvolutionBackpropDataLayerSharedGPUTest, Inference) {
+    run();
+}
+
+}  // namespace test
+}  // namespace ov
+
 namespace {
-using ov::test::ConvolutionBackpropDataLayerTest;
-using ov::test::convBackpropDataLayerTestParamsSet;
+using ov::test::ConvolutionBackpropDataLayerSharedGPUTest;
 
 const std::vector<ov::element::Type> netPrecisions = {
         ov::element::f32,
@@ -56,23 +81,23 @@ const auto conv2DParams_AutoPadValid = ::testing::Combine(
         ::testing::ValuesIn(emptyOutputPadding)
 );
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_ExplicitPadding, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_ExplicitPadding, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv2DParams_ExplicitPadding,
                                 ::testing::ValuesIn(netPrecisions2D),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes2D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_AutoPadValid, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_AutoPadValid, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv2DParams_AutoPadValid,
                                 ::testing::ValuesIn(netPrecisions2D),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes2D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
 const std::vector<std::vector<ptrdiff_t>> outputPadding2D = {{1, 1}, {2, 2}};
 const std::vector<std::vector<size_t >> testStrides2D = {{3, 3}};
@@ -98,23 +123,23 @@ const auto conv2DParams_AutoPadValid_output_padding = ::testing::Combine(
         ::testing::ValuesIn(outputPadding2D)
 );
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_ExplicitPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_ExplicitPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv2DParams_AutoPadValid_output_padding,
                                 ::testing::ValuesIn(netPrecisions),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes2D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_AutoPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_AutoPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv2DParams_ExplicitPadding_output_padding,
                                 ::testing::ValuesIn(netPrecisions),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes2D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
 /* ============= 3D ConvolutionBackpropData ============= */
 
@@ -151,23 +176,23 @@ const auto conv3DParams_AutoPadValid = ::testing::Combine(
         ::testing::ValuesIn(emptyOutputPadding)
 );
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_ExplicitPadding, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_ExplicitPadding, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv3DParams_ExplicitPadding,
                                 ::testing::ValuesIn(netPrecisions3D),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes3D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_AutoPadValid, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_AutoPadValid, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv3DParams_AutoPadValid,
                                 ::testing::ValuesIn(netPrecisions3D),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes3D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
 const std::vector<std::vector<ptrdiff_t>> outputPadding3D = {{1, 1, 1}, {2, 2, 2}};
 const std::vector<std::vector<size_t >> testStrides3D = {{3, 3, 3}};
@@ -193,23 +218,23 @@ const auto conv3DParams_AutoPadValid_output_padding = ::testing::Combine(
         ::testing::ValuesIn(outputPadding3D)
 );
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_ExplicitPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_ExplicitPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv3DParams_AutoPadValid_output_padding,
                                 ::testing::ValuesIn(netPrecisions),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes3D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_AutoPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData3D_AutoPadding_OutputPaddingDefined, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv3DParams_ExplicitPadding_output_padding,
                                 ::testing::ValuesIn(netPrecisions),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes3D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
 
 const std::vector<size_t> numOutChannels1d = {256};
 
@@ -239,12 +264,42 @@ const auto conv1DParams_ExplicitPadding_output_padding = ::testing::Combine(
         ::testing::ValuesIn(outputPadding1D)
 );
 
-INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData1D_ExplicitPadding, ConvolutionBackpropDataLayerTest,
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData1D_ExplicitPadding, ConvolutionBackpropDataLayerSharedGPUTest,
                         ::testing::Combine(
                                 conv1DParams_ExplicitPadding_output_padding,
                                 ::testing::ValuesIn(netPrecisions1D),
                                 ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapes1D)),
                                 ::testing::ValuesIn(emptyOutputShape),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
-                        ConvolutionBackpropDataLayerTest::getTestCaseName);
+                        ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
+
+/* ============= 2D ConvolutionBackpropData with Dilation > 1 ============= */
+const std::vector<ov::element::Type> netPrecisionsDilation = {ov::element::f32, ov::element::f16};
+
+const std::vector<std::vector<ov::Shape>> inputShapesDilation2D = {{{1, 1, 3, 3}}, {{1, 3, 10, 10}}, {{1, 16, 5, 5}}};
+const std::vector<std::vector<size_t>> kernelsDilation2D = {{2, 2}, {3, 3}};
+const std::vector<std::vector<size_t>> stridesDilation2D = {{1, 1}};
+const std::vector<std::vector<ptrdiff_t>> padBeginsDilation2D = {{0, 0}};
+const std::vector<std::vector<ptrdiff_t>> padEndsDilation2D = {{0, 0}, {1, 1}};
+const std::vector<std::vector<size_t>> dilationsDilation2D = {{2, 2}, {3, 3}};
+const std::vector<size_t> numOutChannelsDilation = {1, 5};
+
+const auto conv2DParams_Dilation_ExplicitPadding = ::testing::Combine(::testing::ValuesIn(kernelsDilation2D),
+                                                                      ::testing::ValuesIn(stridesDilation2D),
+                                                                      ::testing::ValuesIn(padBeginsDilation2D),
+                                                                      ::testing::ValuesIn(padEndsDilation2D),
+                                                                      ::testing::ValuesIn(dilationsDilation2D),
+                                                                      ::testing::ValuesIn(numOutChannelsDilation),
+                                                                      ::testing::Values(ov::op::PadType::EXPLICIT),
+                                                                      ::testing::ValuesIn(emptyOutputPadding));
+
+INSTANTIATE_TEST_SUITE_P(smoke_ConvolutionBackpropData2D_Dilation,
+                         ConvolutionBackpropDataLayerSharedGPUTest,
+                         ::testing::Combine(conv2DParams_Dilation_ExplicitPadding,
+                                            ::testing::ValuesIn(netPrecisionsDilation),
+                                            ::testing::ValuesIn(ov::test::static_shapes_to_test_representation(inputShapesDilation2D)),
+                                            ::testing::ValuesIn(emptyOutputShape),
+                                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                         ConvolutionBackpropDataLayerSharedGPUTest::getTestCaseName);
+
 }  // namespace

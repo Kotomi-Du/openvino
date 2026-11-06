@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,11 +14,13 @@ ParamsKey ActivationKernelRef::GetSupportedKey() const {
     k.EnableInputDataType(Datatype::UINT8);
     k.EnableInputDataType(Datatype::INT32);
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::INT8);
     k.EnableOutputDataType(Datatype::INT32);
     k.EnableOutputDataType(Datatype::UINT8);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableDifferentTypes();
     k.EnableActivationAdditionalParamsAsInput();
@@ -46,7 +48,7 @@ JitConstants ActivationKernelRef::GetJitConstants(const activation_params& param
         jit.Merge(MakeFusedOpsJitConstants(params, {conf}));
     }
 
-    jit.Merge(MakeActivationJitConstants(params.activations, input_dt, "_KERNEL"));
+    jit.Merge(MakeActivationJitConstants(params.activations, GetComputeDatatype(input_dt), "_KERNEL"));
     return jit;
 }
 
@@ -59,10 +61,12 @@ KernelsPriority ActivationKernelRef::GetKernelsPriority(const Params& /*params*/
 }
 
 bool ActivationKernelRef::Validate(const Params& p) const {
-    if (!Parent::Validate(p)) return false;
+    if (!Parent::Validate(p)) { DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
     const auto& params = static_cast<const activation_params&>(p);
-    if (params.inputs[0].GetDims().size() != params.outputs[0].GetDims().size())
-        return false;
+    if (params.inputs[0].GetDims().size() != params.outputs[0].GetDims().size()) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

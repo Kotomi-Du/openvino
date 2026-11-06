@@ -1,17 +1,15 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
-#include <memory>
 #include <string>
 
 #include "openvino/core/except.hpp"
 #include "openvino/frontend/visibility.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 class FRONTEND_API GeneralFailure : public AssertFailure {
 public:
     [[noreturn]] static void create(const char* file,
@@ -76,7 +74,7 @@ protected:
 /// \param cond Condition to check
 /// \param ... Additional error message info to be added to the error message via the `<<`
 ///            stream-insertion operator. Note that the expressions here will be evaluated lazily,
-///            i.e., only if the `cond` evalutes to `false`.
+///            i.e., only if the `cond` evaluates to `false`.
 /// \throws ::ov::frontend::GeneralFailure if `cond` is false.
 #define FRONT_END_GENERAL_CHECK(...) OPENVINO_ASSERT_HELPER(::ov::frontend::GeneralFailure, "", __VA_ARGS__)
 
@@ -84,7 +82,7 @@ protected:
 /// \param cond Condition to check
 /// \param ... Additional error message info to be added to the error message via the `<<`
 ///            stream-insertion operator. Note that the expressions here will be evaluated lazily,
-///            i.e., only if the `cond` evalutes to `false`.
+///            i.e., only if the `cond` evaluates to `false`.
 /// \throws ::ov::frontend::InitializationFailure if `cond` is false.
 #define FRONT_END_INITIALIZATION_CHECK(...) \
     OPENVINO_ASSERT_HELPER(::ov::frontend::InitializationFailure, "", __VA_ARGS__)
@@ -93,7 +91,7 @@ protected:
 /// \param cond Condition to check
 /// \param ... Additional error message info to be added to the error message via the `<<`
 ///            stream-insertion operator. Note that the expressions here will be evaluated lazily,
-///            i.e., only if the `cond` evalutes to `false`.
+///            i.e., only if the `cond` evaluates to `false`.
 /// \throws ::ov::frontend::OpConversionFailure if `cond` is false.
 #define FRONT_END_OP_CONVERSION_CHECK(...) OPENVINO_ASSERT_HELPER(::ov::frontend::OpConversionFailure, "", __VA_ARGS__)
 
@@ -121,5 +119,4 @@ protected:
 /// \throws ::ov::frontend::GeneralFailure
 #define FRONT_END_THROW(MSG) FRONT_END_GENERAL_CHECK(false, MSG)
 
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

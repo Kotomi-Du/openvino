@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,8 +25,8 @@ namespace ov::intel_cpu {
 class InternalDynShapeInfer final : public ShapeInferEmptyPads {
 public:
     InternalDynShapeInfer() = default;
-    Result infer(const std::vector<std::reference_wrapper<const VectorDims>>& input_shapes,
-                 const std::unordered_map<size_t, MemoryPtr>& data_dependency) override {
+    Result infer([[maybe_unused]] const std::vector<std::reference_wrapper<const VectorDims>>& input_shapes,
+                 [[maybe_unused]] const std::unordered_map<size_t, MemoryPtr>& data_dependency) override {
         return {{}, ShapeInferStatus::skip};
     }
 

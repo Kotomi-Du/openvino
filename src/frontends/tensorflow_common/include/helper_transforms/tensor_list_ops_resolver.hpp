@@ -1,16 +1,12 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
-
 #include "openvino/pass/graph_rewrite.hpp"
 #include "openvino/pass/pass.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace pass {
+namespace ov::frontend::tensorflow::pass {
 
 // Replace internal operation TensorListReserve with a sub-graph producing initial container
 class TensorListReplacer : public ov::pass::MatcherPass {
@@ -49,7 +45,4 @@ public:
     TensorListInLoopOptimization();
 };
 
-}  // namespace pass
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::pass

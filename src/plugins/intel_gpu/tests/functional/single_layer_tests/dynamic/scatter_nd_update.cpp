@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -37,11 +37,8 @@ typedef std::tuple<
 class ScatterUpdateLayerGPUTest : public testing::WithParamInterface<ScatterUpdateParams>,
                                     virtual public ov::test::SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<ScatterUpdateParams> obj) {
-        ScatterUpdateLayerParams scatterParams;
-        ov::element::Type model_type;
-        ov::element::Type idx_type;
-        std::tie(scatterParams, model_type, idx_type) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<ScatterUpdateParams>& obj) {
+        const auto& [scatterParams, model_type, idx_type] = obj.param;
         const auto inputShapes = scatterParams.inputShapes;
         const auto indicesValues = scatterParams.indicesValues;
         const auto scType = scatterParams.scType;
@@ -119,10 +116,8 @@ protected:
 
     void SetUp() override {
         targetDevice = ov::test::utils::DEVICE_GPU;
-        ScatterUpdateLayerParams scatterParams;
-        ov::element::Type model_type;
-        ov::element::Type idx_type;
-        std::tie(scatterParams, model_type, idx_type) = this->GetParam();
+
+        const auto& [scatterParams, model_type, idx_type] = this->GetParam();
         const auto inputShapes = scatterParams.inputShapes;
         const auto scType = scatterParams.scType;
 
@@ -215,7 +210,7 @@ const std::vector<ScatterUpdateLayerParams> scatterNDParams = {
 const std::vector<ScatterUpdateLayerParams> scatterElementsParams = {
     ScatterUpdateLayerParams{
         ScatterUpdateShapes{
-            {{-1, -1, -1, -1, -1}, {{10, 9, 10, 9, 10}, {10, 5, 11, 4, 5}, {10, 15, 8, 1, 7}}},
+            {{-1, -1, -1, -1, -1}, {{10, 9, 10, 9, 10}, {10, 9, 11, 4, 5}, {10, 15, 8, 1, 7}}},
             {{-1, -1, -1, -1, -1 }, {{3, 2, 1, 2, 1}, {3, 2, 1, 2, 1}, {3, 2, 1, 2, 1}}},
             {{-1, -1, -1, -1, -1 }, {{3, 2, 1, 2, 1}, {3, 2, 1, 2, 1}, {3, 2, 1, 2, 1}}},
             {{1}, {{1}}}

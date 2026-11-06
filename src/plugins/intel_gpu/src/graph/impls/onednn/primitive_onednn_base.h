@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,9 +10,9 @@
 #include "intel_gpu/graph/serialization/binary_buffer.hpp"
 #include "intel_gpu/runtime/memory.hpp"
 #include "intel_gpu/runtime/file_util.hpp"
+#include "intel_gpu/runtime/engine_configuration.hpp"
 #include "to_string_utils.h"
 #include "utils.hpp"
-#include "runtime/ocl/ocl_event.hpp"
 
 #include "intel_gpu/primitives/reorder.hpp"
 
@@ -20,6 +20,7 @@
 
 #include <vector>
 #include <utility>
+#include <mutex>
 
 #include <oneapi/dnnl/dnnl.hpp>
 
@@ -70,7 +71,8 @@ struct typed_primitive_onednn_impl : public typed_primitive_impl<PType> {
         _pd(),
         _prim() {
             _enable_profiling = config.get_enable_profiling();
-            GPU_DEBUG_IF(!config.get_dump_profiling_data_path().empty()) {
+            GPU_DEBUG_IF(!config.get_dump_profiling_data_path().empty() ||
+                         !config.get_average_counters().empty()) {
                 _enable_profiling = true;
             }
         }
@@ -109,6 +111,10 @@ struct typed_primitive_onednn_impl : public typed_primitive_impl<PType> {
                 _attrs->get_fpmath_mode(_fmath_mode, _apply_to_int);
                 ob << make_data(&_fmath_mode, sizeof(dnnl::fpmath_mode));
                 ob << _apply_to_int;
+            }
+            {
+                dnnl::accumulation_mode _acc_mode = _attrs->get_accumulation_mode();
+                ob << make_data(&_acc_mode, sizeof(dnnl::accumulation_mode));
             }
             {
                 const dnnl::post_ops _post_ops = _attrs->get_post_ops();
@@ -215,6 +221,11 @@ struct typed_primitive_onednn_impl : public typed_primitive_impl<PType> {
                 _attrs->set_fpmath_mode(_fmath_mode, _apply_to_int);
             }
             {
+                dnnl::accumulation_mode _acc_mode = dnnl::accumulation_mode::strict;
+                ib >> make_data(&_acc_mode, sizeof(dnnl::accumulation_mode));
+                _attrs->set_accumulation_mode(_acc_mode);
+            }
+            {
                 const kernel_impl_params* impl_params = reinterpret_cast<kernel_impl_params*>(ib.getKernelImplParams());
                 const std::vector<cldnn::fused_primitive_desc_onednn>& fused_desc = impl_params->fused_desc_onednn;
                 dnnl::post_ops _post_ops;
@@ -264,13 +275,13 @@ struct typed_primitive_onednn_impl : public typed_primitive_impl<PType> {
                         dnnl::algorithm aalgorithm = dnnl::algorithm::undef;
                         ib >> make_data(&aalgorithm, sizeof(dnnl::algorithm));
 
-                        if (fused_desc.at(idx).dims.size() > 0) {
+                        if (!fused_desc.at(idx).dims.empty()) {
                             _post_ops.append_binary(aalgorithm,
                                 dnnl::memory::desc(fused_desc.at(idx).dims, fused_desc.at(idx).dt, fused_desc.at(idx).tag));
                         } else {
-                            dnnl::memory::desc md = onednn::layout_to_memory_desc(
-                                                            impl_params->get_input_layout(fused_desc.at(idx).mem_dep),
-                                                            fused_desc.at(idx).tag, fused_desc.at(idx).flatten);
+                            dnnl::memory::desc md = fused_desc.at(idx).flatten
+                                ? onednn::layout_to_memory_desc_flatten(impl_params->get_input_layout(fused_desc.at(idx).mem_dep), fused_desc.at(idx).tag)
+                                : onednn::layout_to_memory_desc(impl_params->get_input_layout(fused_desc.at(idx).mem_dep), fused_desc.at(idx).tag);
 
                             _post_ops.append_binary(aalgorithm, md);
                         }
@@ -334,6 +345,9 @@ private:
         }
 
         std::string key_str(key.begin(), key.end());
+        // Partition the oneDNN cache per runtime so a blob built by one runtime is never
+        // loaded by the other (the driver-string difference alone is not a safe guard).
+        key_str += get_runtime_cache_tag();
         size_t hash = std::hash<std::string>()(key_str);
         return path + std::to_string(hash) + ".onednn.cl_cache";
     }
@@ -349,12 +363,16 @@ private:
             _prim = PrimType(_pd);
         } else {
             std::vector<uint8_t> key = _pd.get_cache_blob_id();
+            if (key.empty()) {  // runtime does not support cache blobs (e.g. SYCL)
+                _prim = PrimType(_pd);
+                return;
+            }
             assert(!key.empty());
 
             std::vector<uint8_t> cache;
             {
                 std::lock_guard<std::mutex> lock(cacheAccessMutex);
-                cache = ov::util::load_binary(generate_cache_path_from_key(config, key));
+                cache = ov::util::load_binary(ov::util::make_path(generate_cache_path_from_key(config, key)));
             }
 
             if (cache.empty()) {
@@ -372,6 +390,27 @@ private:
     }
 
 protected:
+    // Returns an empty blob if the primitive does not support cache blob serialization.
+    std::vector<uint8_t> get_cache_blob() const {
+        std::vector<uint8_t> cache;
+        try {
+            cache = _prim.get_cache_blob();
+        } catch (const dnnl::error& e) {
+            if (e.status != dnnl_unimplemented) {
+                throw;
+            }
+        }
+        return cache;
+    }
+
+    // Falls back to constructing the primitive from _pd alone when the blob is empty.
+    PrimType make_primitive_from_blob(const std::vector<uint8_t>& cache_blob) const {
+        if (cache_blob.empty()) {
+            return PrimType(_pd);
+        }
+        return PrimType(_pd, cache_blob);
+    }
+
     virtual bool optimized_out(typed_primitive_inst<PType>&) const { return false; }
 
     void configure_post_ops_arguments(typed_primitive_inst<PType>& instance, std::unordered_map<int, dnnl::memory>& args) const {
@@ -404,8 +443,10 @@ protected:
                 case onednn_post_op_type::binary_add:
                 case onednn_post_op_type::binary_sub:
                 case onednn_post_op_type::binary_mul:
+                case onednn_post_op_type::binary_mul_inplace:
                 case onednn_post_op_type::binary_max:
                 case onednn_post_op_type::binary_min:
+                case onednn_post_op_type::binary_div:
                 {
                     auto binary_op_mem = instance.fused_memory(memory_offset);
                     dnnl::algorithm alg;
@@ -470,7 +511,11 @@ protected:
 
         if (_scratchpad_md.get_size() != 0) {
             // onednn primitive can have only 1 scratchpad memory.
-            auto scratchpad = instance.get_intermediates_memories()[0];
+            const auto& intermediates = instance.get_intermediates_memories();
+            OPENVINO_ASSERT(!intermediates.empty(),
+                            "[GPU] oneDNN primitive ", instance.id(), " requires scratchpad of size ",
+                            _scratchpad_md.get_size(), " bytes, but intermediates memory is missing");
+            auto scratchpad = intermediates[0];
             args.insert({DNNL_ARG_SCRATCHPAD, scratchpad->get_onednn_memory(_scratchpad_md, 0)});
         }
 
@@ -509,8 +554,9 @@ protected:
     void init_kernels(const kernels_cache&, const kernel_impl_params&) override { }
 
     void set_arguments_impl(typed_primitive_inst<PType>& instance) override {
-        if (instance.can_be_optimized())
+        if (instance.can_be_optimized()) {
             return;
+        }
         uint32_t net_id = instance.get_network().get_id();
         _args[net_id] = get_arguments(instance);
     }
@@ -525,6 +571,9 @@ protected:
 
     event::ptr execute_impl(const std::vector<event::ptr>& /* events */,
                             typed_primitive_inst<PType>& instance) override {
+#ifdef OV_GPU_WITH_ZE_RT
+        static std::mutex execute_mutex;
+#endif
         auto& network = instance.get_network();
         auto& stream = network.get_stream();
         auto net_id = network.get_id();
@@ -540,10 +589,25 @@ protected:
 
         if (!instance.can_be_optimized()) {
             try {
+#ifdef OV_GPU_WITH_ZE_RT
+                // Prevent race condition issue for Level Zero runtime
+                // To be removed once MFDNN-15356 is resolved
+                std::lock_guard<std::mutex> lock(execute_mutex);
+#endif
                 _prim.execute(stream.get_onednn_stream(), _args[net_id]);
             } catch (dnnl::error& err) {
-                auto err_code = err.status == dnnl_status_t::dnnl_out_of_memory ? CL_OUT_OF_RESOURCES : CL_INVALID_OPERATION;
-                ocl::rethrow(err.what(), err_code, _engine->get_device_info());
+                OPENVINO_THROW("[", instance.id(), "] ", err.what());
+            }
+
+            // Diagnostic: onednn primitives execute directly on the onednn stream and never pass through
+            // ocl_stream::enqueue_kernel, so force completion here too to surface async errors
+            // (e.g. CL_OUT_OF_RESOURCES) at this exact onednn primitive/layer.
+            GPU_DEBUG_IF(network.get_config().get_finish_after_enqueue()) {
+                try {
+                    stream.finish();
+                } catch (std::exception& err) {
+                    OPENVINO_THROW("[FINISH_AFTER_ENQUEUE][onednn] [", instance.id(), "] ", err.what());
+                }
             }
 
             if (_enable_profiling) {
@@ -552,29 +616,32 @@ protected:
                 stream.wait();
 
                 std::vector<uint64_t> duration = dnnl::get_profiling_data(stream.get_onednn_stream(), dnnl::profiling_data_kind::time);
-                if (duration.empty()) {
-                    event = std::make_shared<ocl::ocl_event>(0);
-                } else {
+                event = stream.create_user_event(true);
+                if (!duration.empty()) {
                     OPENVINO_ASSERT(duration.size() == 1, "[GPU] oneDNN profiling data is expected to have info only for single primitive ",
                                                       "actual number is ", duration.size());
-                    event = std::make_shared<ocl::ocl_event>(duration[0]);
+                    event->set_profiling_duration(duration[0]);
                 }
 
             } else {
                 // If oneDNN primitive is the output primitive or it's user is CPU implementation, then enqueue marker
                 // with empty events wait list (which will trigger wait for all previously enqueued tasks) and
                 // return it as oneDNN primitive's event as it is a single option for proper synchronization
-                if (instance.needs_completion_event())
+                if (instance.needs_completion_event()) {
                     event = stream.enqueue_marker({});
+                }
             }
+        } else if (instance.needs_completion_event()) {
+            event = stream.enqueue_marker({});
         }
 
         return event;
     }
 
     std::vector<BufferDescriptor> get_internal_buffer_descs(const kernel_impl_params&) const override {
-        if (_scratchpad_md.get_size() == 0)
+        if (_scratchpad_md.get_size() == 0) {
             return {};
+        }
         return {BufferDescriptor(_scratchpad_md.get_size(), cldnn::data_types::u8)};
     }
 };

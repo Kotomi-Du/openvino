@@ -1,5 +1,4 @@
-#!/usr/bin/python3
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import os
@@ -7,6 +6,27 @@ import argparse
 import glob
 import ntpath
 import re
+
+def detect_guard_patterns(content):
+    # Detect include guard macros (#ifndef X paired with bodyless #define X for the
+    # same name) to avoid adding #undef for them. Without this, the guard is
+    # defeated when multiple kernels with the same inlined header are batched
+    # into a single compilation unit.
+    # The following patterns are supported:
+    # 1. #ifndef X
+    #    #define X
+    # 2. #if !defined(X)
+    #    #define X
+    # 3. #if !defined X
+    #    #define X
+    # All patterns allowed to have arbitrary whitespace between the tokens
+    ifndef_pattern = re.compile(r'#\s*ifndef\s+(\w+)\s*\n\s*#\s*define\s+(\w+)\s*\n')
+    ifndef_pattern2 = re.compile(r'#\s*if\s+!\s*defined\s*\(\s*(\w+)\s*\)\s*\n\s*#\s*define\s+(\w+)\s*\n')
+    ifndef_pattern3 = re.compile(r'#\s*if\s+!\s*defined\s+(\w+)\s*\n\s*#\s*define\s+(\w+)\s*\n')
+    ifndef_names = set(match.group(1) for match in ifndef_pattern.finditer(content) if match.group(1) == match.group(2))
+    ifndef_names.update(match.group(1) for match in ifndef_pattern2.finditer(content) if match.group(1) == match.group(2))
+    ifndef_names.update(match.group(1) for match in ifndef_pattern3.finditer(content) if match.group(1) == match.group(2))
+    return ifndef_names
 
 class Code2CHeaders(object):
     def __init__(self, kernels_folder, headers_folder, lang):
@@ -67,7 +87,7 @@ class Code2CHeaders(object):
                         return self.process_includes(included_content, include_paths, processed_includes)
             return ''
 
-        content = re.sub(r'#include\s+"([^"]+)"(\s+\[\[no_opt\]\])?', replace_include, content)
+        content = re.sub(r'#\s*include\s+"([^"]+)"(\s+\[\[no_opt\]\])?', replace_include, content)
 
         return '\n'.join(batch_headers) + '\n' + content.strip()
 
@@ -77,8 +97,12 @@ class Code2CHeaders(object):
 
         defines = set(match.group(1) for match in define_pattern.finditer(content))
         undef_directives = []
-        content_lines = content.split("\n")
+        guard_patterns = detect_guard_patterns(content)
+
         for define in defines:
+            if define in guard_patterns:
+                continue
+
             # Regex to check if #undef for this define already exists
             undef_pattern = re.compile(r'#undef\s+' + re.escape(define) + r'\s*(?:\n|$)')
 
@@ -89,6 +113,36 @@ class Code2CHeaders(object):
             content += '\n' + '\n'.join(sorted(undef_directives))
 
         return content
+
+    def _check_cat_usage(self, macro, line):
+        cat_pattern = re.compile(r'CAT\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)')
+
+        for match in cat_pattern.finditer(line):
+            cat_content = match.group(1)
+            parts = re.split(r'\s*,\s*', cat_content)
+
+            if len(parts) >= 2:
+                potential_macro = ''.join(part.strip() for part in parts)
+                if macro in potential_macro or any(part.strip() in macro for part in parts):
+                    return True
+
+        return False
+
+    def found_potential_macro_user(self, macro, content):
+        content_lines = content.split('\n')
+
+        for line in content_lines:
+            if re.match(r'^\s*#\s*(define|undef)\s+' + re.escape(macro) + r'\b', line):
+                continue
+
+            if re.search(r'\b' + re.escape(macro) + r'\b', line):
+                return True
+
+            if "CAT" in line:
+                if self._check_cat_usage(macro, line):
+                    return True
+
+        return False
 
     def remove_unused_macros(self, content):
         macro_pattern = re.compile(r'^#define\s+(\w+)\s*(.*)', re.MULTILINE)
@@ -101,7 +155,7 @@ class Code2CHeaders(object):
 
         # Check for direct usage of macros (excluding their definition and undef lines)
         for macro in macros:
-            if re.search(r'(?<!#define\s)(?<!#undef\s)\b' + macro + r'\b', content):
+            if self.found_potential_macro_user(macro, content):
                 used_macros.add(macro)
 
         # Expand CAT() recursively to track macro usage.

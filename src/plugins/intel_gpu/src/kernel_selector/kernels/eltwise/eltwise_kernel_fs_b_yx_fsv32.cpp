@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,9 @@ namespace kernel_selector {
 ParamsKey EltwiseKernel_fs_b_yx_fsv32::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableInputLayout(DataLayout::fs_b_yx_fsv32);
     k.EnableOutputLayout(DataLayout::fs_b_yx_fsv32);
     k.EnableBatching();
@@ -25,7 +27,7 @@ JitConstants EltwiseKernel_fs_b_yx_fsv32::GetJitConstants(const eltwise_params& 
 
 bool EltwiseKernel_fs_b_yx_fsv32::Validate(const Params& params) const {
     if (!EltwiseKernelBase::Validate(params)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     const auto& ewParams = static_cast<const eltwise_params&>(params);
@@ -38,14 +40,16 @@ bool EltwiseKernel_fs_b_yx_fsv32::Validate(const Params& params) const {
     bool bCheckSizes = true;
     for (size_t i = 0; i < ewParams.inputs.size(); i++) {
         // allow only the same input sizes or scalars, without pitches
-        if (!(ewParams.inputs[0] == ewParams.inputs[i] && ewParams.inputs[i] == ewParams.outputs[0]) && ewParams.inputs[i].PhysicalSize() != 1)
+        if ((ewParams.inputs[0] != ewParams.inputs[i] || ewParams.inputs[i] != ewParams.outputs[0]) && ewParams.inputs[i].PhysicalSize() != 1) {
             bCheckSizes = false;
+        }
     }
 
     // TODO: add support to this implementation when user requests input values updates
     bool bCheckUpdateInput = true;
-    if (!ewParams.updateInputIds.empty())
+    if (!ewParams.updateInputIds.empty()) {
         bCheckUpdateInput = false;
+    }
 
     // TODO: add support for reading from output buffer and using its values in computation
     bool bCheckUseOutput = true;
@@ -58,11 +62,12 @@ bool EltwiseKernel_fs_b_yx_fsv32::Validate(const Params& params) const {
         }
     }
 
-    if (IsUnsupportedModeForVecCode(ewParams))
-        return false;
+    if (IsUnsupportedModeForVecCode(ewParams)) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
 
     if (!bCheckSizes || !bSupportedCount || !bCheckUpdateInput || !bCheckUseOutput) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     return true;

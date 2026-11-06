@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,14 +9,11 @@
 #include "core/node.hpp"
 #include "utils/common.hpp"
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace variadic {
+namespace ov::frontend::onnx::variadic {
 /// \brief Create an OpenVINO version of an ONNX variadic operation.
 ///        This creates a subgraph with a series of binary operations.
 ///
-/// \param node Incoming ONNX opearation.
+/// \param node Incoming ONNX operation.
 ///
 /// \tparam T   Class of an OpenVINO binary operation (e.g. Add, Minimum, Maximum)
 ///
@@ -47,7 +44,4 @@ inline ov::OutputVector make_ng_variadic_op(
     return {result};
 }
 
-}  // namespace variadic
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::variadic

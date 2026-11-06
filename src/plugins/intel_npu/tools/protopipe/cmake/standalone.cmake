@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2024 Intel Corporation.
+# Copyright (C) 2018-2026 Intel Corporation.
 # SPDX-License-Identifier: Apache 2.0
 #
 
@@ -52,14 +52,43 @@ if (WIN32)
     list(APPEND DEPENDENCIES "winmm.lib")
 endif()
 
-file(GLOB_RECURSE SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-list(APPEND SOURCES main.cpp)
+set(SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/graph.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/result.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser/config.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser/parser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/scenario/accuracy_metrics.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/scenario/criterion.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/scenario/inference.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/scenario/scenario_graph.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/accuracy_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/computation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/computation_builder.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/dummy_source.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/executor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/layer_validator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/layers_data.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/layers_reader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/operations.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/ov_layers_reader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/performance_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/reference_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/simulation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/validation_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/data_providers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/timer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils/utils.cpp
+)
 
 add_executable(${TARGET_NAME} ${SOURCES})
 target_link_libraries(${TARGET_NAME} PRIVATE ${DEPENDENCIES})
 target_include_directories(${TARGET_NAME} PUBLIC "${PROJECT_SOURCE_DIR}/src/"
                                           PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version")
-
+if (WIN32)
+    target_link_options(${TARGET_NAME} PRIVATE "/MANIFESTINPUT:${CMAKE_SOURCE_DIR}/protopipe.exe.manifest")
+endif()
 
 install(TARGETS ${TARGET_NAME}
         DESTINATION "tools/${TARGET_NAME}"

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,6 +23,14 @@
 #include "intel_gpu/plugin/graph.hpp"
 #include "intel_gpu/plugin/simple_math.hpp"
 
+#include "intel_gpu/primitives/dynamic_quantize.hpp"
+#include "intel_gpu/primitives/grouped_matmul.hpp"
+#include "intel_gpu/primitives/fully_connected.hpp"
+#include "intel_gpu/primitives/kv_cache.hpp"
+#include "dynamic_quantize_inst.h"
+#include "grouped_matmul_inst.h"
+#include "fully_connected_inst.h"
+
 #include <list>
 #include <set>
 #include <unordered_set>
@@ -32,16 +40,51 @@
 #include <algorithm>
 #include <fstream>
 #include <utility>
+#include <optional>
 #include <sys/types.h>
 #include <sys/stat.h>
 
+namespace {
+
+std::optional<std::chrono::microseconds> extract_start_time_from_intervals(
+    const std::vector<cldnn::instrumentation::profiling_interval>& intervals) {
+    std::optional<std::chrono::microseconds> earliest_timestamp;
+    std::optional<std::chrono::microseconds> executing_timestamp;
+
+    for (const auto& interval : intervals) {
+        if (!interval.is_valid_start) {
+            continue;
+        }
+
+        auto interval_start = std::chrono::duration_cast<std::chrono::microseconds>(interval.start);
+        if (!earliest_timestamp.has_value() || interval_start < earliest_timestamp.value()) {
+            earliest_timestamp = interval_start;
+        }
+
+        if (interval.stage == cldnn::instrumentation::profiling_stage::executing) {
+            if (!executing_timestamp.has_value() || interval_start < executing_timestamp.value()) {
+                executing_timestamp = interval_start;
+            }
+        }
+    }
+
+    auto start_time = executing_timestamp.value_or(earliest_timestamp.value_or(std::chrono::microseconds::zero()));
+    if (start_time == std::chrono::microseconds::zero()) {
+        return std::nullopt;
+    }
+
+    return start_time;
+}
+
+}  // namespace
+
 namespace ov::intel_gpu {
 
-Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id)
+Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id, ov::internal::WeightSharingCtxPtr weight_sharing_ctx)
     : m_context(context)
     , m_config(config)
     , m_stream_id(stream_id) {
-    auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config);
+    auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config, weight_sharing_ctx);
     m_config = program_builder->get_config();
 
     build(program_builder->get_compiled_program());
@@ -52,6 +95,7 @@ Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& con
     profilingIDs = program_builder->profiling_ids;
     perfMap = program_builder->perfMap;
     m_input_layouts = program_builder->get_input_layouts();
+    m_weight_sharing_source_buffers = program_builder->get_weight_sharing_source_buffers();
 }
 
 Graph::Graph(cldnn::BinaryInputBuffer &ib, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id)
@@ -97,7 +141,7 @@ Graph::Graph(cldnn::BinaryInputBuffer &ib, const RemoteContextImpl::Ptr& context
 
     auto imported_prog = std::make_shared<cldnn::program>(get_engine(), m_config);
     // Not passing MODEL_PTR through m_config because values in m_config are immutable after config finalization.
-    imported_prog->load(ib, config.get_model());
+    imported_prog->load(ib, config.get_model(), config.get_weightless_attr());
     build(imported_prog);
 }
 
@@ -134,12 +178,12 @@ Graph::~Graph() {
 
         auto print_entry = [this, &get_time_str, &log_level](std::string name, HostTimeProfilingEntry& entry, int64_t iters_num = 1) {
             if (log_level == 1) {
-                GPU_DEBUG_COUT << "[stream_id=" << m_stream_id << "] " << name << " infer enqueue host time: "
+                GPU_DEBUG_COUT << "[network_id=" << m_network->get_id() << " stream_id=" << m_stream_id << " iter_num=" << iters_num << "] " << name << " infer enqueue host time: "
                                << get_time_str(entry.enqueue, iters_num) << std::endl;
             } else if (log_level >= 2) {
                 auto total_time = entry.inputs_processing + entry.enqueue + entry.wait + entry.outputs_processing;
 
-                GPU_DEBUG_COUT << "[stream_id=" << m_stream_id << "] " << name << " infer host time: "
+                GPU_DEBUG_COUT << "[network_id=" << m_network->get_id() << " stream_id=" << m_stream_id << " iter_num=" << iters_num << "] " << name << " infer host time: "
                                << get_time_str(total_time, iters_num) << std::endl;
                 GPU_DEBUG_COUT << " - " << " Inputs processing: " << get_time_str(entry.inputs_processing, iters_num) << std::endl;
                 GPU_DEBUG_COUT << " - " << " Enqueue: " << get_time_str(entry.enqueue, iters_num) << std::endl;
@@ -148,7 +192,7 @@ Graph::~Graph() {
             }
         };
 
-        if (host_exec_times.size() >= 1) {
+        if (!host_exec_times.empty()) {
             print_entry("First", host_exec_times[0], 1);
         }
 
@@ -157,13 +201,13 @@ Graph::~Graph() {
 
             const auto begin = std::begin(host_exec_times) + 1;
             const auto end = std::end(host_exec_times);
-            avg.inputs_processing = std::accumulate(begin, end, 0,
+            avg.inputs_processing = std::accumulate(begin, end, int64_t{0},
                 [](int64_t sum, const HostTimeProfilingEntry& entry) { return sum + entry.inputs_processing; });
-            avg.enqueue = std::accumulate(begin, end, 0,
+            avg.enqueue = std::accumulate(begin, end, int64_t{0},
                 [](int64_t sum, const HostTimeProfilingEntry& entry) { return sum + entry.enqueue; });
-            avg.wait = std::accumulate(begin, end, 0,
+            avg.wait = std::accumulate(begin, end, int64_t{0},
                 [](int64_t sum, const HostTimeProfilingEntry& entry) { return sum + entry.wait; });
-            avg.outputs_processing = std::accumulate(begin, end, 0,
+            avg.outputs_processing = std::accumulate(begin, end, int64_t{0},
                 [](int64_t sum, const HostTimeProfilingEntry& entry) { return sum + entry.outputs_processing; });
 
             const auto iters_num = host_exec_times.size() - 1;
@@ -175,7 +219,7 @@ Graph::~Graph() {
 void Graph::build(std::shared_ptr<cldnn::program> program) {
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Graph::build");
 
-    auto external_queue = m_context->get_external_queue();
+    auto* external_queue = m_context->get_external_queue();
     if (external_queue) {
         OPENVINO_ASSERT(m_config.get_num_streams() == 1, "[GPU] Throughput streams can't be used with shared queue!");
         const auto &engine = program->get_engine();
@@ -183,6 +227,24 @@ void Graph::build(std::shared_ptr<cldnn::program> program) {
     } else {
         m_network = std::make_shared<cldnn::network>(program, m_stream_id);
     }
+
+    std::vector<cldnn::tensor_conversion_key> conversion_keys;
+    for (const auto& variable : m_network->get_variables_info()) {
+        const auto& info = variable.second;
+        const bool special_kv_state = std::any_of(info.m_primitives.begin(), info.m_primitives.end(),
+            [](const cldnn::primitive* primitive) {
+                const auto* kv = dynamic_cast<const cldnn::kv_cache*>(primitive);
+                return kv != nullptr && (kv->compressed || kv->indirect);
+            });
+        if (special_kv_state)
+            continue;
+
+        const auto source_type = info.m_user_specified_type == ov::element::dynamic
+                                     ? info.m_layout.data_type
+                                     : static_cast<ov::element::Type_t>(info.m_user_specified_type);
+        conversion_keys.emplace_back(source_type, info.m_layout.data_type);
+    }
+    program->prepare_tensor_conversions(conversion_keys);
 
     std::string dry_run_path = GPU_DEBUG_VALUE_OR(m_config.get_dry_run_path(), "");
     std::string dump_graphs_path = GPU_DEBUG_VALUE_OR(m_config.get_dump_graphs_path(), "");
@@ -235,6 +297,7 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                 { "concatenation", "Concat" },
                 { "convolution", "Convolution" },
                 { "deformable_convolution", "DeformableConvolution" },
+                { "dynamic_quantize", "DynamicQuantize" },
                 { "crop", "Crop" },
                 { "custom_gpu_primitive", "CustomGPUPrimitive" },
                 { "data", "Const" },
@@ -243,6 +306,9 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                 { "detection_output", "DetectionOutput" },
                 { "eltwise", "Eltwise" },
                 { "fully_connected", "FullyConnected" },
+                { "gated_delta_net", "GatedDeltaNet" },
+                { "paged_causal_conv1d", "PagedCausalConv1D" },
+                { "paged_selective_ssm", "PagedSelectiveSSM" },
                 { "gather", "Gather" },
                 { "gemm", "Gemm" },
                 { "gru_seq", "GRU_Seq" },
@@ -265,6 +331,7 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                 { "reverse_sequence", "ReverseSequence" },
                 { "roi_pooling", "ROIPooling" },
                 { "scale", "ScaleShift" },
+                { "selective_ssm", "SelectiveSSM" },
                 { "shuffle_channels", "ShuffleChannels" },
                 { "softmax", "SoftMax" },
                 { "strided_slice", "StridedSlice" },
@@ -287,15 +354,17 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                 { "space_to_depth", "SpaceToDepth" },
         };
 
-        if (type_n2l.find(cldnn_name) != type_n2l.end())
+        if (type_n2l.find(cldnn_name) != type_n2l.end()) {
             return type_n2l.at(cldnn_name);
+        }
 
         return cldnn_name;
     };
 
     auto concat_strings = [](std::vector<std::string> strs, char sep) -> std::string {
-        if (strs.empty())
+        if (strs.empty()) {
             return "";
+        }
 
         std::string res = strs[0];
         for (size_t i = 1; i < strs.size(); i++) {
@@ -307,8 +376,9 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
 
     auto remove_type_from_name = [](const std::string& name) -> std::string {
         auto it = std::find(name.begin(), name.end(), ':');
-        if (it == name.end() || (it + 1) == name.end())
+        if (it == name.end() || (it + 1) == name.end()) {
             return name;
+        }
 
         return std::string((it+1), name.end());
     };
@@ -325,17 +395,18 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
     auto get_inputs = [&] (const cldnn::primitive_info& prim_info) {
         ov::OutputVector inputs;
 
-        auto& deps = prim_info.c_dependencies;
+        const auto& deps = prim_info.c_dependencies;
 
         // Decrease expected dependencies count if there is a const input without original id in the IR
-        for (auto& dep : deps) {
+        for (const auto& dep : deps) {
             auto dep_it = std::find_if(primitives_info.begin(), primitives_info.end(), [&](cldnn::primitive_info& entry) {
                 return entry.original_id == dep;
             });
 
             if (filter_const_primitives) {
-                if (dep_it == primitives_info.end())
+                if (dep_it == primitives_info.end()) {
                     continue;
+                }
                 if (dep_it->type_id == "data") {
                     continue;
                 }
@@ -375,12 +446,13 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                 results.emplace_back(std::make_shared<ov::op::v0::Result>(return_node->get_default_output()));
             } else {
                 size_t port = 0;
-                for (auto& usr_id : user_ids) {
+                for (const auto& usr_id : user_ids) {
                     auto usr_it = std::find_if(primitives_info.begin(), primitives_info.end(), [&](cldnn::primitive_info& entry) {
                         return entry.original_id == usr_id;
                     });
-                    if (usr_it == primitives_info.end())
+                    if (usr_it == primitives_info.end()) {
                         continue;
+                    }
 
                     return_node->set_output_type(port, out_et, out_pshape);
                     port++;
@@ -390,8 +462,9 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
 
         auto layerName = remove_type_from_name(prim_info.original_id);
         return_node->set_friendly_name(layerName);
-        if (is_output)
+        if (is_output) {
             results.back()->set_friendly_name(layerName + "_result");
+        }
 
         std::map<std::string, std::string> info;
         info[ov::exec_model_info::OUTPUT_PRECISIONS] = ov::element::Type(prim_info.output_layout.data_type).get_type_name();
@@ -402,10 +475,11 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
         info[ov::exec_model_info::RUNTIME_PRECISION] = ov::element::Type(prim_info.runtime_precision).get_type_name();
 
         std::vector<std::string> originalNames{find_origin_layers(prim_info.original_id)};
-        for (auto& fused_id : prim_info.c_fused_ids) {
+        for (const auto& fused_id : prim_info.c_fused_ids) {
             for (auto& origin_id : find_origin_layers(fused_id)) {
-                if (std::find(originalNames.begin(), originalNames.end(), origin_id) == originalNames.end())
+                if (std::find(originalNames.begin(), originalNames.end(), origin_id) == originalNames.end()) {
                     originalNames.push_back(origin_id);
+                }
             }
         }
         info[ov::exec_model_info::ORIGINAL_NAMES] = concat_strings(originalNames, ',');
@@ -419,13 +493,55 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
         }
         info[ov::exec_model_info::PERF_COUNTER] = exec_time;
 
+        // Expose per-primitive extra attributes in rt_info for debugging / testing.
+        if (prim_info.type_id != "input_layout" && prim_info.type_id != "data") {
+            // The primitive may have been removed from the program during graph optimization
+            // (e.g. when dumping intermediate transformation steps), so skip missing nodes.
+            if (get_network()->get_program()->has_node(prim_info.original_id)) {
+                const auto& node = get_network()->get_primitive(prim_info.original_id)->get_node();
+
+                if (node.is_type<cldnn::dynamic_quantize>()) {
+                    auto dyn_quan = node.as<cldnn::dynamic_quantize>().get_primitive();
+                    info["group_sizes"] = ov::util::join(cldnn::convert_vector<int64_t>(dyn_quan->attrs.group_sizes));
+                    if (dyn_quan->attrs.precomputed_reduction) {
+                        info["precomputed_reduction_dt"] = dyn_quan->attrs.precomputed_reduction_dt.c_type_string();
+                    }
+                } else if (node.is_type<cldnn::grouped_matmul>()) {
+                    auto gm_prim = node.as<cldnn::grouped_matmul>().get_primitive();
+                    if (gm_prim->compressed_weights) {
+                        auto wei_layout = node.get_input_layout(cldnn::grouped_matmul::GroupedMatmulInputIdx::WEIGHT);
+                        info["weights_precision"] = ov::element::Type(wei_layout.data_type).get_type_name();
+                        if (gm_prim->decompression_zero_point.is_valid()) {
+                            auto zp_layout = node.get_input_layout(gm_prim->input.size() + 1);
+                            info["wzp_precision"] = ov::element::Type(zp_layout.data_type).get_type_name();
+                        }
+                    }
+                } else if (node.is_type<cldnn::fully_connected>()) {
+                    auto fc_prim = node.as<cldnn::fully_connected>().get_primitive();
+                    if (fc_prim->decompression_scale.is_valid()) {
+                        auto wei_layout = node.get_input_layout(1);
+                        info["weights_precision"] = ov::element::Type(wei_layout.data_type).get_type_name();
+                        if (fc_prim->decompression_zero_point.is_valid()) {
+                            size_t zp_idx = fc_prim->input.size() + 1 /*weights*/
+                                            + (fc_prim->bias.is_valid() ? 1 : 0)
+                                            + 1 /*scale*/;
+                            auto zp_layout = node.get_input_layout(zp_idx);
+                            info["wzp_precision"] = ov::element::Type(zp_layout.data_type).get_type_name();
+                        }
+                    }
+                }
+            }
+        }
+
         for (auto&& kvp : info) {
             return_node->get_rt_info()[kvp.first] = kvp.second;
-            if (is_output)
+            if (is_output) {
                 results.back()->get_rt_info()[kvp.first] = kvp.second;
+            }
         }
-        if (is_output)
+        if (is_output) {
             results.back()->get_rt_info()[ov::exec_model_info::LAYER_TYPE] = "Result";
+        }
 
         nodes.push_back(return_node);
         node2layer[prim_info.original_id] = return_node;
@@ -441,8 +557,9 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                     auto it = std::find_if(primitives_info.begin(), primitives_info.end(), [&](cldnn::primitive_info& entry) {
                         return entry.original_id == dep;
                     });
-                    if (it == primitives_info.end())
+                    if (it == primitives_info.end()) {
                         continue;
+                    }
 
                     auto& dep_users = it->c_users;
                     // Remove mutable data from users list
@@ -457,12 +574,14 @@ std::shared_ptr<ov::Model> Graph::get_runtime_model(std::vector<cldnn::primitive
                         it = std::find_if(primitives_info.begin(), primitives_info.end(), [&](cldnn::primitive_info& entry) {
                             return entry.original_id == user;
                         });
-                        if (it == primitives_info.end())
+                        if (it == primitives_info.end()) {
                             continue;
+                        }
 
                         for (auto& d : it->c_dependencies) {
-                            if (d == pi.original_id)
+                            if (d == pi.original_id) {
                                 d = dep;
+                            }
                         }
                     }
                 }
@@ -550,8 +669,9 @@ void Graph::update_profiling_info() {
             } else if (interval.stage == cldnn::instrumentation::profiling_stage::duration) {  // "duration" is used for CPU layers
                 pc.cpu_uSec += count;
 
-                if (pc.num == 0)
+                if (pc.num == 0) {
                     pc.isCPU = true;
+                }
             }
         }
     };
@@ -646,15 +766,24 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
     auto getFromProfiling = [&](std::string primId) -> bool {
         auto perfIter = perfMap.find(primId);
 
-        if (perfIter == perfMap.end())
+        if (perfIter == perfMap.end()) {
             return false;
+        }
 
         auto layerName = getClearName(perfIter->second.first);
 
         const auto& perfCounter = perfIter->second.second;
+        std::optional<std::chrono::microseconds> start_time;
 
-        if (!perfCounter.parentPrimitive.empty() && combinePrimByIRLayers)
+        auto execIter = executedPrimitives.find(primId);
+        if (execIter != executedPrimitives.end() && execIter->second) {
+            cldnn::instrumentation::profiling_info cldnnInfo{primId, execIter->second->get_profiling_info()};
+            start_time = extract_start_time_from_intervals(cldnnInfo.intervals);
+        }
+
+        if (!perfCounter.parentPrimitive.empty() && combinePrimByIRLayers) {
             return false;
+        }
 
         auto& extPerfEntry = result[layerName];
 
@@ -677,12 +806,13 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
         extPerfEntry.status = perfCounter.status;
         extPerfEntry.cpu_time = std::chrono::microseconds(perfCounter.cpu_avg());
         extPerfEntry.real_time = std::chrono::microseconds(perfCounter.realTime_avg());
+        extPerfEntry.start_time = start_time.value_or(std::chrono::microseconds::zero());
         extPerfEntry.node_name = layerName;
 
         if (combinePrimByIRLayers) {
-            std::string kernelId = "";
+            std::string kernelId;
             long long kernelTime = 0;  // used for finding the most complex computation kernel in sub_graph for perf stat
-            for (auto &id : profilingIDs) {
+            for (const auto& id : profilingIDs) {
                 auto iter = perfMap.find(id);
                 if (iter == perfMap.end())  continue;
 
@@ -707,7 +837,7 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
     };
 
     // Step 1. Get all primitives in execution order which was added by GPU plugin
-    for (auto& primId : profilingIDs) {
+    for (const auto& primId : profilingIDs) {
         getFromProfiling(primId);
     }
 
@@ -717,17 +847,19 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
         if (perfIter == perfMap.end())  continue;
 
         bool existInProfiling = std::find(profilingIDs.begin(), profilingIDs.end(), primId) != profilingIDs.end();
-        if ((!existInProfiling || (existInProfiling && perfIter->second.first.length() == 0)) &&
+        if ((!existInProfiling || (existInProfiling && perfIter->second.first.empty())) &&
             executedPrimitives.find(primId) != executedPrimitives.end()) {
             auto event = executedPrimitives.at(primId);
-            if (!event)
+            if (!event) {
                 continue;
+            }
 
             cldnn::instrumentation::profiling_info cldnnInfo{primId, event->get_profiling_info()};
 
             // Collect timings
             long long cpuTime = 0;
             long long deviceTime = 0;
+            std::optional<std::chrono::microseconds> start_time;
 
             for (auto &interval : cldnnInfo.intervals) {
                 using duration_t = std::chrono::duration<long long, std::chrono::microseconds::period>;
@@ -742,12 +874,15 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
                 }
             }
 
+            start_time = extract_start_time_from_intervals(cldnnInfo.intervals);
+
             std::string layerName = getClearName(primId);
 
             for (auto& pi : primitivesInfo) {
                 if (pi.original_id == primId) {
-                    if (pi.type_id == "mutable_data")
+                    if (pi.type_id == "mutable_data") {
                         continue;
+                    }
 
                     auto& extPerfEntry = result[layerName];
 
@@ -756,12 +891,16 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
                     } else {
                         extPerfEntry.exec_type = pi.kernel_id;
                     }
+                    if (extPerfEntry.exec_type == "undef") {
+                        extPerfEntry.exec_type = get_network()->get_implementation_info(primId);
+                    }
 
                     extPerfEntry.node_type = getUpperCaseName(pi.type_id);
                     extPerfEntry.node_name = pi.original_id;
                     extPerfEntry.status = ov::ProfilingInfo::Status::EXECUTED;
                     extPerfEntry.cpu_time = std::chrono::microseconds(cpuTime);
                     extPerfEntry.real_time = std::chrono::microseconds(deviceTime);
+                    extPerfEntry.start_time = start_time.value_or(std::chrono::microseconds::zero());
 
                     if (pi.type_id == "input_layout") {
                         extPerfEntry.node_type = "Input";
@@ -773,7 +912,7 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
     }
 
     // Step 3. Checking primitives which has been deleted from execution order but added by GPU plugin
-    for (auto& primId : profilingIDs) {
+    for (const auto& primId : profilingIDs) {
         if (std::find(allIds.begin(), allIds.end(), primId) == allIds.end()) {
             getFromProfiling(primId);
         }
@@ -788,9 +927,10 @@ std::vector<ov::ProfilingInfo> Graph::get_profiling_info() const {
 
         if (first_res != result.end() && second_res != result.end() && first_res != second_res) {
             std::swap(first_res->second.cpu_time,        second_res->second.cpu_time);
-            std::swap(first_res->second.real_time,   second_res->second.real_time);
+            std::swap(first_res->second.real_time,       second_res->second.real_time);
             std::swap(first_res->second.status,          second_res->second.status);
             std::swap(first_res->second.exec_type,       second_res->second.exec_type);
+            std::swap(first_res->second.start_time,      second_res->second.start_time);
         }
     }
 

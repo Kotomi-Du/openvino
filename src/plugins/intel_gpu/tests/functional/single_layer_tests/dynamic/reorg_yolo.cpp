@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,12 +23,8 @@ typedef std::tuple<
 class ReorgYoloLayerGPUTest : public testing::WithParamInterface<ReorgYoloGPUTestParams>,
                               virtual public ov::test::SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<ReorgYoloGPUTestParams> obj) {
-        InputShape shapes;
-        size_t stride;
-        ov::element::Type model_type;
-        std::string targetDev;
-        std::tie(shapes, stride, model_type, targetDev) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<ReorgYoloGPUTestParams>& obj) {
+        const auto& [shapes, stride, model_type, targetDev] = obj.param;
         std::ostringstream result;
         result << "IS=" << ov::test::utils::partialShape2str({shapes.first}) << "_";
         for (const auto& item : shapes.second) {
@@ -42,10 +38,8 @@ public:
 
 protected:
     void SetUp() override {
-        InputShape shapes;
-        size_t stride;
-        ov::element::Type model_type;
-        std::tie(shapes, stride, model_type, targetDevice) = this->GetParam();
+        const auto& [shapes, stride, model_type, _targetDevice] = this->GetParam();
+        targetDevice = _targetDevice;
 
         init_input_shapes({shapes});
 
@@ -71,22 +65,20 @@ const std::vector<ov::test::InputShape> inShapesDynamic2 = {
     {{{1, 2}, -1, -1, -1}, {{1, 9, 3, 3}}}
 };
 
-const auto testCase_stride1_Dynamic = ::testing::Combine(::testing::ValuesIn(inShapesDynamic1),
-                                                         ::testing::Values(strides[0]),
-                                                         ::testing::Values(ov::element::f32),
-                                                         ::testing::Values(ov::test::utils::DEVICE_GPU));
-
-const auto testCase_stride2_Dynamic = ::testing::Combine(::testing::ValuesIn(inShapesDynamic2),
-                                                         ::testing::Values(strides[1]),
-                                                         ::testing::Values(ov::element::f32),
-                                                         ::testing::Values(ov::test::utils::DEVICE_GPU));
-
-INSTANTIATE_TEST_SUITE_P(smoke_TestsReorgYolo_stride1_DynamicShape, ReorgYoloLayerGPUTest,
-                         testCase_stride1_Dynamic,
+INSTANTIATE_TEST_SUITE_P(smoke_TestsReorgYolo_stride1_DynamicShape,
+                         ReorgYoloLayerGPUTest,
+                         ::testing::Combine(::testing::ValuesIn(inShapesDynamic1),
+                                            ::testing::Values(strides[0]),
+                                            ::testing::Values(ov::element::f32),
+                                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
                          ReorgYoloLayerGPUTest::getTestCaseName);
 
-INSTANTIATE_TEST_SUITE_P(smoke_TestsReorgYolo_stride2_DynamicShape, ReorgYoloLayerGPUTest,
-                         testCase_stride2_Dynamic,
+INSTANTIATE_TEST_SUITE_P(smoke_TestsReorgYolo_stride2_DynamicShape,
+                         ReorgYoloLayerGPUTest,
+                         ::testing::Combine(::testing::ValuesIn(inShapesDynamic2),
+                                            ::testing::Values(strides[1]),
+                                            ::testing::Values(ov::element::f32),
+                                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
                          ReorgYoloLayerGPUTest::getTestCaseName);
 
 } // namespace

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,9 +16,7 @@
 #include "openvino/core/node.hpp"
 #include "openvino/core/type/element_type.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class PagedAttention : public Node {
 public:
@@ -52,9 +50,7 @@ public:
     void createPrimitive() override;
     static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
 
-    static bool isQuantByChannel(const Config::CacheQuantMode mode,
-                                 const ov::element::Type precision,
-                                 const bool isKey);
+    static bool isQuantByChannel(Config::CacheQuantMode mode, ov::element::Type precision, bool isKey);
 
 private:
     ov::element::Type getRuntimePrecision() const override;
@@ -64,9 +60,11 @@ private:
     struct AttentionExecutor;
     friend struct PagedAttentionKey;
 
+    size_t m_head_size = 0;
+    size_t m_num_kv_heads = 0;
     bool m_hasScore = false;
+    bool m_has_adaptive_rkv_diversity_output = false;
+    bool m_write_kv_cache = true;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

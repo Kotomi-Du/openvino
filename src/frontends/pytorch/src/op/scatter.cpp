@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,10 +10,7 @@
 #include "openvino/op/slice.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
 
@@ -31,7 +28,7 @@ Output<Node> prepare_source(const NodeContext& context,
     // into shape of indices.
     // TODO: Figure out way to dynamically broadcast scalar src only, without affecting Tensor src. Current
     // implementation will fail if Scalar source would have dynamic rank.
-    auto _src = std::move(src);
+    auto _src = src;
     if (src_partial_shape.rank().is_static() && src_partial_shape.rank().get_length() == 0) {
         _src = context.mark_node(std::make_shared<v3::Broadcast>(_src, index_shape));
     }
@@ -46,9 +43,9 @@ Output<Node> prepare_source(const NodeContext& context,
 
     auto src_input_dtype = context.mark_node(std::make_shared<v1::ConvertLike>(src_pruned, input));
     return src_input_dtype;
-};
+}
 
-const v12::ScatterElementsUpdate::Reduction get_reduction_mode(const std::string& pt_reduce_mode) {
+v12::ScatterElementsUpdate::Reduction get_reduction_mode(const std::string& pt_reduce_mode) {
     static const std::unordered_map<std::string, v12::ScatterElementsUpdate::Reduction> TORCH_REDUCTION_TO_OV{
         {"add", v12::ScatterElementsUpdate::Reduction::SUM},
         {"multiply", v12::ScatterElementsUpdate::Reduction::PROD},
@@ -64,7 +61,7 @@ const v12::ScatterElementsUpdate::Reduction get_reduction_mode(const std::string
     auto reduction = TORCH_REDUCTION_TO_OV.at(pt_reduce_mode);
     return reduction;
 }
-};  // namespace
+}  // namespace
 
 OutputVector translate_scatter(const NodeContext& context) {
     // Out-of-place schema
@@ -94,6 +91,8 @@ OutputVector translate_scatter(const NodeContext& context) {
     if (input_num > 4 && !context.input_is_none(4) && context.get_input_type(4).is<type::Str>()) {
         auto reduce_mode = context.const_input<std::string>(4);
         reduction = get_reduction_mode(reduce_mode);
+    } else if (context.has_attribute("reduce")) {
+        reduction = get_reduction_mode(context.get_attribute<std::string>("reduce"));
     }
 
     auto src_input_dtype = prepare_source(context, src, index, input);
@@ -103,7 +102,7 @@ OutputVector translate_scatter(const NodeContext& context) {
         context.mutate_input(input_num - 1, res);
     }
     return {res};
-};
+}
 
 OutputVector translate_scatter_reduce(const NodeContext& context) {
     // Out-of-place schema
@@ -114,14 +113,14 @@ OutputVector translate_scatter_reduce(const NodeContext& context) {
     // Inplace schema
     // aten::scatter_reduce_.two(Tensor(a!) self, int dim, Tensor index, Tensor src, str reduce, *, bool
     // include_self=True) -> Tensor(a!)
-    num_inputs_check(context, 6, 7);
+    num_inputs_check(context, 5, 7);
     auto input = context.get_input(0);
     auto dim = context.get_input(1);
     auto index = context.mark_node(std::make_shared<v0::Convert>(context.get_input(2), element::i32));
     auto src = context.get_input(3);
     auto reduce_mode = context.const_input<std::string>(4);
     auto reduction = get_reduction_mode(reduce_mode);
-    auto include_self = context.const_input<bool>(5);
+    auto include_self = get_const_input_or_attribute(context, 5, "include_self", true);
     auto src_input_dtype = prepare_source(context, src, index, input);
     auto scatter_result = context.mark_node(
         std::make_shared<v12::ScatterElementsUpdate>(input, index, src_input_dtype, dim, reduction, include_self));
@@ -129,7 +128,7 @@ OutputVector translate_scatter_reduce(const NodeContext& context) {
         context.mutate_input(6, scatter_result);
     }
     return {scatter_result};
-};
+}
 
 OutputVector translate_scatter_add(const NodeContext& context) {
     // aten::scatter_add(Tensor self, int dim, Tensor index, Tensor src) -> Tensor
@@ -146,9 +145,6 @@ OutputVector translate_scatter_add(const NodeContext& context) {
                                                                        dim,
                                                                        v12::ScatterElementsUpdate::Reduction::SUM));
     return {scatter_result};
-};
+}
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

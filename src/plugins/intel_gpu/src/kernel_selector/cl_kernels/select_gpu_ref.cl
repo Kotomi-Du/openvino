@@ -1,25 +1,17 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "include/batch_headers/fetch_data.cl"
 
 #if OUTPUT_DIMS == 5
-    #define INPUT_0 input0[INPUT0_GET_INDEX_SAFE(b, f, z, y, x)]
-    #if INPUT1_DIMS == 4
-        #define INPUT_1 input1[INPUT1_GET_INDEX_SAFE(b, f, y, x)]
-    #else
-        #define INPUT_1 input1[INPUT1_GET_INDEX_SAFE(b, f, z, y, x)]
-    #endif
-    #if INPUT2_DIMS == 4
-        #define INPUT_2 input2[INPUT2_GET_INDEX_SAFE(b, f, y, x)]
-    #else
-        #define INPUT_2 input2[INPUT2_GET_INDEX_SAFE(b, f, z, y, x)]
-    #endif
+    #define INPUT_0 DECODE_INPUT0_COMPUTE_TYPE(input0[INPUT0_GET_INDEX_SAFE(b, f, z, y, x)])
+    #define INPUT_1 DECODE_INPUT1_COMPUTE_TYPE(input1[INPUT1_GET_INDEX_SAFE(b, f, z, y, x)])
+    #define INPUT_2 DECODE_INPUT2_COMPUTE_TYPE(input2[INPUT2_GET_INDEX_SAFE(b, f, z, y, x)])
 #elif OUTPUT_DIMS == 4
-    #define INPUT_0 input0[INPUT0_GET_INDEX_SAFE(b, f, y, x)]
-    #define INPUT_1 input1[INPUT1_GET_INDEX_SAFE(b, f, y, x)]
-    #define INPUT_2 input2[INPUT2_GET_INDEX_SAFE(b, f, y, x)]
+    #define INPUT_0 DECODE_INPUT0_COMPUTE_TYPE(input0[INPUT0_GET_INDEX_SAFE(b, f, y, x)])
+    #define INPUT_1 DECODE_INPUT1_COMPUTE_TYPE(input1[INPUT1_GET_INDEX_SAFE(b, f, y, x)])
+    #define INPUT_2 DECODE_INPUT2_COMPUTE_TYPE(input2[INPUT2_GET_INDEX_SAFE(b, f, y, x)])
 #endif
 
 KERNEL(select)(
@@ -46,10 +38,10 @@ KERNEL(select)(
 #endif
 
     #if INPUT1_IS_FP && !OUTPUT_IS_FP
-     const OUTPUT_TYPE res = TO_OUTPUT_TYPE(convert_long(select(INPUT_2, INPUT_1, MASK)));
+     const OUTPUT_COMPUTE_TYPE res = TO_OUTPUT_COMPUTE_TYPE(convert_long(select(INPUT_2, INPUT_1, MASK)));
     #else
-     const OUTPUT_TYPE res = TO_OUTPUT_TYPE(select(INPUT_2, INPUT_1, MASK));
+     const OUTPUT_COMPUTE_TYPE res = TO_OUTPUT_COMPUTE_TYPE(select(INPUT_2, INPUT_1, MASK));
     #endif
 
-    output[output_offset] = res;
+    output[output_offset] = TO_OUTPUT_TYPE(res);
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,7 +7,9 @@
 
 #include "core/null_node.hpp"
 #include "core/operator_set.hpp"
+#include "exceptions.hpp"
 #include "openvino/core/validation_util.hpp"
+#include "openvino/decompositions/low_precision_dequantize.hpp"
 #include "openvino/frontend/exception.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
@@ -18,24 +20,41 @@
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/transpose.hpp"
 #include "openvino/op/unsqueeze.hpp"
-#include "transformations/rt_info/disable_constant_folding.hpp"
 #include "utils/common.hpp"
 #include "utils/reshape.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
-namespace opset_1 {
-namespace detail {
-std::shared_ptr<ov::Node> get_zero_point(const ov::OutputVector& inputs) {
+namespace ov::frontend::onnx::ai_onnx {
+namespace opset_1::detail {
+// Returns the element type in which the dequantization arithmetic is performed and which
+// is produced by the operator. It is defined by the "output_dtype" attribute (since opset 21)
+// and, in its absence, by the scale element type. FLOAT8E8M0 scales (used by MX formats since
+// opset 24) can't be an output type, so f32 is used in that case.
+ov::element::Type get_dequantization_precision(const ov::frontend::onnx::Node& node,
+                                               const ov::Output<ov::Node>& scale) {
+    const auto output_dtype = node.get_attribute_value<int64_t>("output_dtype", 0);
+    if (output_dtype != 0) {
+        const auto& precision = common::get_ov_element_type(output_dtype);
+        // T3 of the ONNX spec. An unsupported type here wouldn't fail later - it would silently
+        // produce a graph doing the dequantization arithmetic in a wrong precision.
+        CHECK_VALID_NODE(
+            node,
+            precision == ov::element::f32 || precision == ov::element::f16 || precision == ov::element::bf16,
+            "The \"output_dtype\" attribute of DequantizeLinear must be one of the supported types: "
+            "f32, f16 or bf16. Got: ",
+            precision);
+        return precision;
+    }
+    const auto& scale_et = scale.get_element_type();
+    return scale_et == ov::element::f8e8m0 ? ov::element::f32 : scale_et;
+}
+
+std::shared_ptr<ov::Node> get_zero_point(const ov::OutputVector& inputs, const ov::element::Type& precision) {
     if (inputs.size() == 3 && !ov::op::util::is_null(inputs[2])) {
-        const auto& scale = inputs[1];
         const auto& zero_point = inputs[2];
 
-        if (zero_point.get_element_type() != scale.get_element_type()) {
-            return std::make_shared<v0::Convert>(zero_point, scale.get_element_type());
+        if (zero_point.get_element_type() != precision) {
+            return std::make_shared<v0::Convert>(zero_point, precision);
         }
 
         return zero_point.get_node_shared_ptr();
@@ -48,27 +67,31 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node, int64_t
 
     const auto& x = inputs[0];
     const auto& scale = inputs[1];
-    const auto zero_point = detail::get_zero_point(inputs);
+    const auto precision = get_dequantization_precision(node, scale);
+    const auto zero_point = detail::get_zero_point(inputs, precision);
 
     std::set<ov::element::Type> valid_types = {ov::element::f32};
     if (opset >= 13) {
         valid_types.emplace(ov::element::f16);
         valid_types.emplace(ov::element::bf16);
+        // MX block scales (formally added to DequantizeLinear in opset 24) are grouped here
+        // with f16/bf16 rather than gated behind opset >= 24, consistent with bf16 above
+        // (only valid as a scale type since opset 19) already being accepted under opset >= 13.
+        valid_types.emplace(ov::element::f8e8m0);
     }
 
     common::validate_scalar_input("Dequantization scale", scale.get_node_shared_ptr(), valid_types);
 
-    const auto converted_x = std::make_shared<v0::Convert>(x, scale.get_element_type());
-
     if (zero_point) {
         common::validate_scalar_input("Zero point", zero_point);
-        return {std::make_shared<v1::Multiply>(std::make_shared<v1::Subtract>(converted_x, zero_point), scale)};
-    } else {
-        return {std::make_shared<v1::Multiply>(converted_x, scale)};
     }
-}
-}  // namespace detail
 
+    auto result = ov::decomposition::low_precision_dequantize(x, scale, zero_point, {}, precision);
+    return {result};
+}
+}  // namespace opset_1::detail
+
+namespace opset_1 {
 ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
     common::default_op_checks(node, 2);
 
@@ -78,8 +101,7 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
 ONNX_OP("DequantizeLinear", {1, 12}, ai_onnx::opset_1::dequantize_linear);
 }  // namespace opset_1
 
-namespace opset_13 {
-namespace detail {
+namespace opset_13::detail {
 void validate_scale(const ov::Output<ov::Node> scale, const ov::Output<ov::Node> x, const int64_t axis) {
     const auto& scale_shape = scale.get_partial_shape();
     FRONT_END_GENERAL_CHECK(scale_shape.rank().get_length() == 0 || scale_shape.rank().get_length() == 1,
@@ -156,7 +178,8 @@ ov::OutputVector dequantize_linear(const ov::Output<ov::Node>& x,
                                    const ov::Output<ov::Node>& scale,
                                    const std::shared_ptr<ov::Node>& zero_point,
                                    int64_t axis,
-                                   const Node& node) {
+                                   const Node& node,
+                                   const ov::element::Type& precision) {
     const auto& x_shape = x.get_partial_shape();
 
     FRONT_END_GENERAL_CHECK(x_shape.rank().is_static(), "Rank of the input data tensor has to be known (static).");
@@ -165,19 +188,19 @@ ov::OutputVector dequantize_linear(const ov::Output<ov::Node>& x,
 
     validate_scale(scale, x, axis);
     const auto scale_reshaped = reshape_input(scale, axis, x_shape);
-    const auto converted_x = std::make_shared<v0::Convert>(x, scale.get_element_type());
 
+    ov::Output<ov::Node> zp;
     if (zero_point) {
         validate_zero_point(zero_point, x, axis);
-        return {std::make_shared<v1::Multiply>(
-            std::make_shared<v1::Subtract>(converted_x, reshape_input(zero_point, axis, x_shape)),
-            scale_reshaped)};
-    } else {
-        return {std::make_shared<v1::Multiply>(converted_x, scale_reshaped)};
+        zp = reshape_input(zero_point, axis, x_shape);
     }
-}
-}  // namespace detail
 
+    auto result = ov::decomposition::low_precision_dequantize(x, scale_reshaped, zp, {}, precision);
+    return {result};
+}
+}  // namespace opset_13::detail
+
+namespace opset_13 {
 ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
     const ov::OutputVector inputs{node.get_ov_inputs()};
 
@@ -187,23 +210,32 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
                             inputs.size());
     const auto& x = inputs[0];
     const auto& scale = inputs[1];
-    const auto zero_point = ai_onnx::opset_1::detail::get_zero_point(inputs);
 
     const auto& scale_shape = scale.get_partial_shape();
-    // per-tensor quantization, axis attribute ignored
-    if ((scale_shape.rank().is_static() && scale_shape.size() == 0) ||
-        (scale_shape.is_static() && shape_size(scale_shape.get_shape()) == 1)) {
-        if (!zero_point) {
-            return ai_onnx::opset_1::detail::dequantize_linear(node, 13);
-        }
-        const auto& zero_point_shape = zero_point->get_output_partial_shape(0);
-        if ((zero_point_shape.rank().is_static() && zero_point_shape.size() == 0) ||
-            (zero_point_shape.is_static() && shape_size(zero_point_shape.get_shape()) == 1)) {
-            return ai_onnx::opset_1::detail::dequantize_linear(node, 13);
-        }
+    // per-tensor quantization, axis attribute ignored. The zero point's shape (if present) is
+    // checked directly on the raw input so that get_dequantization_precision()/get_zero_point()
+    // (which perform output_dtype validation and may build a Convert node) run only once, on
+    // whichever path below actually needs their result.
+    bool is_per_tensor = (scale_shape.rank().is_static() && scale_shape.size() == 0) ||
+                         (scale_shape.is_static() && shape_size(scale_shape.get_shape()) == 1);
+    if (is_per_tensor && inputs.size() == 3 && !ov::op::util::is_null(inputs[2])) {
+        const auto& zero_point_shape = inputs[2].get_partial_shape();
+        is_per_tensor = (zero_point_shape.rank().is_static() && zero_point_shape.size() == 0) ||
+                        (zero_point_shape.is_static() && shape_size(zero_point_shape.get_shape()) == 1);
     }
+    if (is_per_tensor) {
+        return ai_onnx::opset_1::detail::dequantize_linear(node, 13);
+    }
+
+    const auto precision = ai_onnx::opset_1::detail::get_dequantization_precision(node, scale);
+    const auto zero_point = ai_onnx::opset_1::detail::get_zero_point(inputs, precision);
     // these reshapes make sure that dequantization happens over the specified axis
-    return detail::dequantize_linear(x, scale, zero_point, node.get_attribute_value<int64_t>("axis", 1), node);
+    return detail::dequantize_linear(x,
+                                     scale,
+                                     zero_point,
+                                     node.get_attribute_value<int64_t>("axis", 1),
+                                     node,
+                                     precision);
 }
 ONNX_OP("DequantizeLinear", {13, 18}, ai_onnx::opset_13::dequantize_linear);
 }  // namespace opset_13
@@ -222,88 +254,103 @@ ov::OutputVector dequantize_linear(const ov::frontend::onnx::Node& node) {
     const auto& scale_shape = scale.get_partial_shape();
     ov::Output<ov::Node> zp;
 
+    const auto block_size = static_cast<size_t>(node.get_attribute_value<int64_t>("block_size", 0));
+
     // When no blocking dequantization is required - use regular DequantizeLinear
-    if (scale_shape.rank().is_static() && scale_shape.rank().get_length() <= 1) {
+    if (block_size == 0 && scale_shape.rank().is_static() && scale_shape.rank().get_length() <= 1) {
         return ai_onnx::opset_13::dequantize_linear(node);
     }
 
+    const auto precision = ai_onnx::opset_1::detail::get_dequantization_precision(node, scale);
+
     FRONT_END_GENERAL_CHECK(scale_shape.rank().is_static(), "Rank of the input data tensor has to be known (static).");
-    FRONT_END_GENERAL_CHECK(scale_shape.rank().get_length() == 2,
-                            "DequantizeLinear cannot operate with more than 2D scales");
     FRONT_END_GENERAL_CHECK(src_x.get_partial_shape().is_static(),
                             "DequantizeLinear cannot operate with dynamic shapes of input X");
 
-    const auto axis = node.get_attribute_value<int64_t>("axis", 1);
-    const auto block_size = static_cast<size_t>(node.get_attribute_value<int64_t>("block_size", 0));
+    auto axis = node.get_attribute_value<int64_t>("axis", 1);
 
-    FRONT_END_GENERAL_CHECK(axis <= 1, "Axis > 1 isn't supported");
     FRONT_END_GENERAL_CHECK(block_size > 0, "block_size must be greater than zero");
-    FRONT_END_GENERAL_CHECK(
-        (axis == 0 && src_x.get_shape()[0] % block_size == 0) || (axis == 1 && src_x.get_shape()[1] % block_size == 0),
-        "DequantizeLinear doesn't support case when dimension of X cannot be divided by block_size");
 
-    bool is_cw_quantize =
-        (axis == 0 && src_x.get_shape()[0] == block_size) || (axis == 1 && src_x.get_shape()[1] == block_size);
+    // Normalize axis to handle negative values
+    axis = common::normalize_axis(node.get_description(), axis, src_x.get_partial_shape().rank());
+
+    // Check that dimension at axis is divisible by block_size
+    FRONT_END_GENERAL_CHECK(src_x.get_shape()[axis] % block_size == 0,
+                            "DequantizeLinear doesn't support case when dimension of X at axis ",
+                            axis,
+                            " (",
+                            src_x.get_shape()[axis],
+                            ") cannot be divided by block_size (",
+                            block_size,
+                            ")");
+
+    const auto& input_shape = src_x.get_partial_shape();
+    FRONT_END_GENERAL_CHECK(scale_shape.rank().get_length() == input_shape.rank().get_length(),
+                            "DequantizeLinear x_scale shape ",
+                            scale_shape,
+                            " is incompatible with the rank of X ",
+                            input_shape);
+    for (int64_t i = 0; i < input_shape.rank().get_length(); ++i) {
+        const int64_t expected_dim = i == axis ? static_cast<int64_t>(input_shape[i].get_length() / block_size)
+                                               : static_cast<int64_t>(input_shape[i].get_length());
+        FRONT_END_GENERAL_CHECK(scale_shape[i].compatible(expected_dim),
+                                "DequantizeLinear x_scale shape ",
+                                scale_shape,
+                                " is incompatible with the declared axis ",
+                                axis,
+                                " for X shape ",
+                                input_shape);
+    }
+
+    // Check if this is channel-wise quantization (block_size equals dimension size at axis)
+    bool is_cw_quantize = (src_x.get_shape()[axis] == block_size);
     if (is_cw_quantize) {
-        ov::Output<ov::Node> converted_x = std::make_shared<v0::Convert>(src_x, scale.get_element_type());
         if (inputs.size() > 2) {
             zp = inputs[2];
-            zp = std::make_shared<v0::Convert>(zp, scale.get_element_type());
-            converted_x = std::make_shared<v1::Subtract>(converted_x, zp);
         }
-        auto scaled_x = std::make_shared<v1::Multiply>(converted_x, scale);
+        auto scaled_x = ov::decomposition::low_precision_dequantize(src_x, scale, zp, {}, precision);
         return {scaled_x};
     }
 
-    // For further broadcasting scales and zp - reshape input to a shape
-    // axis == 0, [x.shape[0]/block_size, block_size, x.shape[1]]
-    // axis == 1, [x.shape[0], block_size, x.shape[1]/block_size]
-    ov::Output<ov::Node> broadcastable_x;
-    if (axis == 0) {
-        broadcastable_x = op::util::reshape(
-            src_x,
-            Shape{static_cast<size_t>(src_x.get_shape()[0]) / block_size, block_size, src_x.get_shape()[1]});
-    } else {
-        broadcastable_x = op::util::reshape(
-            src_x,
-            Shape{src_x.get_shape()[0], block_size, static_cast<size_t>(src_x.get_shape()[1]) / block_size});
-    }
-    const auto& unsqueezed_axes = std::make_shared<v0::Constant>(ov::element::i64, Shape{1}, std::vector<int64_t>{1});
-
-    const auto scale_type = scale.get_element_type();
-    if (inputs.size() > 2) {
-        zp = inputs[2];
-        zp = std::make_shared<v0::Unsqueeze>(zp, unsqueezed_axes);
-        if (zp.get_element_type() != scale.get_element_type()) {
-            zp = std::make_shared<v0::Convert>(zp, scale_type);
+    // Build target shape for blocked quantization
+    // For all axes: [..., num_blocks, block_size, ...]
+    // - axis=0: [num_blocks, block_size, ...] with block_size at position 1
+    // - axis>0: [..., num_blocks, block_size, ...] with block_size at position axis+1
+    std::vector<size_t> target_shape_vector;
+    for (int64_t i = 0; i < input_shape.rank().get_length(); i++) {
+        if (i == axis) {
+            // Always num_blocks first, then block_size
+            target_shape_vector.push_back(static_cast<size_t>(input_shape[i].get_length()) / block_size);
+            target_shape_vector.push_back(block_size);
+        } else {
+            // Other axes remain unchanged
+            target_shape_vector.push_back(static_cast<size_t>(input_shape[i].get_length()));
         }
     }
+    ov::Output<ov::Node> broadcastable_x = op::util::reshape(src_x, ov::Shape(target_shape_vector));
 
-    const auto& x = src_x.get_element_type() == scale_type ? broadcastable_x
-                                                           : std::make_shared<v0::Convert>(broadcastable_x, scale_type);
+    // Unsqueeze position for scale/zero_point:
+    // block_size is always at position axis+1, so unsqueeze at axis+1
+    const auto unsqueeze_axis = axis + 1;
+    const auto& unsqueezed_axes =
+        std::make_shared<v0::Constant>(ov::element::i64, Shape{1}, std::vector<int64_t>{unsqueeze_axis});
+
+    if (inputs.size() > 2) {
+        zp = std::make_shared<v0::Unsqueeze>(inputs[2], unsqueezed_axes);
+    }
 
     // Adding additional dimension for broadcasting
     scale = std::make_shared<v0::Unsqueeze>(scale, unsqueezed_axes);
 
-    if (zp.get_node_shared_ptr()) {
-        broadcastable_x = std::make_shared<v1::Subtract>(x, zp);
-    } else {
-        broadcastable_x = x;
-    }
+    auto out_shape = std::make_shared<v0::ShapeOf>(src_x);
 
-    const auto& scaled_x = std::make_shared<v1::Multiply>(broadcastable_x, scale);
+    auto reshaped_scaled_x =
+        ov::decomposition::low_precision_dequantize(broadcastable_x, scale, zp, out_shape, precision);
 
-    // Returning back a shape
-    const auto& reshaped_scaled_x =
-        std::make_shared<v1::Reshape>(scaled_x, std::make_shared<v0::ShapeOf>(src_x), false);
-
-    reshaped_scaled_x->set_friendly_name(node.get_name());
+    reshaped_scaled_x.get_node_shared_ptr()->set_friendly_name(node.get_name());
 
     return {reshaped_scaled_x};
 }
 ONNX_OP("DequantizeLinear", OPSET_SINCE(21), ai_onnx::opset_21::dequantize_linear);
 }  // namespace opset_21
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx

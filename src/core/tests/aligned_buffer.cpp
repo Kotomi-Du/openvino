@@ -1,15 +1,27 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/runtime/aligned_buffer.hpp"
 
+#include <limits>
+
+#include "common_test_utils/test_assertions.hpp"
 #include "gtest/gtest.h"
 
-using namespace ov;
+namespace ov::test {
+
+TEST(aligned_buffer, alloc_failure_throws) {
+    constexpr size_t huge = std::numeric_limits<size_t>::max() / 2;
+    OV_EXPECT_THROW(
+        { ov::AlignedBuffer buffer(huge, 64); },
+        ov::AssertFailure,
+        testing::HasSubstr("Failed to allocate"));
+}
 
 TEST(aligned_buffer, alignment) {
     AlignedBuffer buffer(100, 64);
+    ASSERT_NE(buffer.get_ptr(), nullptr);
     size_t addr = reinterpret_cast<size_t>(buffer.get_ptr()) % 64;
     EXPECT_EQ(addr, 0);
 }
@@ -33,3 +45,4 @@ TEST(aligned_buffer, move) {
         EXPECT_NE(buffer2.get_ptr(), nullptr);
     }
 }
+}  // namespace ov::test

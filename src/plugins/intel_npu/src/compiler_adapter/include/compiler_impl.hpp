@@ -1,0 +1,135 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "intel_npu/common/npu.hpp"
+#include "intel_npu/common/option_support_cache.hpp"
+#include "intel_npu/config/config.hpp"
+#include "intel_npu/utils/vcl/vcl_api.hpp"
+#include "ivcl_compiler.hpp"
+#include "openvino/core/except.hpp"
+#include "openvino/core/model.hpp"
+#include "openvino/runtime/common.hpp"
+#include "openvino/runtime/tensor.hpp"
+
+namespace intel_npu {
+
+class VCLCompilerImpl final : public IVCLCompiler, public std::enable_shared_from_this<VCLCompilerImpl> {
+public:
+    /**
+     * @param functions A shared pointer to the VCL function table
+     * @param deviceProperties The properties of the device the compilation targets, if known
+     * @param optionSupportCache The cache used for storing the compiler's option support answers, already bound to
+     *        this compiler's cache key. May be disabled, in which case the compiler is queried every time.
+     */
+    VCLCompilerImpl(const std::shared_ptr<const VCLFunctionTable>& functions,
+                    const std::optional<IDevice::DeviceProperties>& deviceProperties = std::nullopt,
+                    ScopedOptionSupportCache optionSupportCache = {});
+    ~VCLCompilerImpl() override;
+
+    /**
+     * @brief Transforms a network from the OpenVINO model representation to a format executable
+     * by a NPU device
+     * @param model a shared pointer to the OpenVINO model to be compiled
+     * @param config a reference to NPUConfig containing plugin config options
+     *        including config options related to compilation
+     * @return a pair containing an ov::Tensor object with the compiled model (blob) and an optional
+     *         string with runtime requirements for the blob
+     */
+    std::pair<ov::Tensor, std::optional<std::string>> compile(const std::shared_ptr<const ov::Model>& model,
+                                                              const Config& config) const override;
+
+    /**
+     * @brief Compiles the model, weights separation enabled. All init schedules along with the main one are compiled in
+     * the same scope.
+     * @return A pair containing one ov::Tensor for each init schedule, followed by another one corresponding to the
+     * main part, and an optional compatibility string for the compiled blobs.
+     */
+    std::pair<std::vector<ov::Tensor>, std::optional<std::string>> compileWsOneShot(
+        const std::shared_ptr<ov::Model>& model,
+        const Config& config) const override;
+    /**
+     * @brief Sequential compilation of Init(s) and Main
+     *
+     * "Stateless compiler" approach
+     * We want to get multiple Inits in the case of a large number of weights.
+     * This allows us to build pipeline:
+     * Allocate W1 -> Init1
+     *             Allocate W2 -> Init2
+     *                          Allocate W3 -> Init2
+     *
+     * This is why there is an additional parameter callNumber:
+     * Compiler should somehow understand which Init (or Main) to return
+     * Plugin does not know total numbers of Init schedules
+     */
+    std::pair<ov::Tensor, std::optional<std::string>> compileWsIterative(const std::shared_ptr<ov::Model>& model,
+                                                                         const Config& config,
+                                                                         size_t callNumber) const override;
+    /**
+     * @brief Returns information about supported layers of the network passed
+     * @param model The model to be queried
+     * @param config A reference to NPUConfig containing plugin config options
+     *        including config options related to compilation
+     * @returns SupportedOpsMap structure with information about supported layers
+     */
+    ov::SupportedOpsMap query(const std::shared_ptr<const ov::Model>& model, const Config& config) const override;
+
+    /**
+     * @brief Returns the compiler version
+     * @return composite uint32_t value of compiler version.
+     *         MSB 16 bits = Major version
+     *         LSB 16bits = Minor version
+     */
+    uint32_t get_version() const override;
+
+    /**
+     * @brief Returns the compiler supported options list
+     * @note The result is stored in the option support cache, if one was provided, so that subsequent
+     *       "is_option_supported" calls for these options can be answered without querying the compiler.
+     */
+    std::vector<std::string> get_supported_options() const override;
+
+    /**
+     * @brief Checks whether the given option and value are supported by the compiler
+     * @param option The option name to check
+     * @param optValue The option value to validate
+     * @return true if the option and value are supported, false otherwise
+     * @note Queries without a value are served from and recorded in the option support cache, if one was
+     *       provided. Queries carrying a value always reach the compiler, since the cache is keyed by option
+     *       name alone and cannot tell whether a specific value is accepted.
+     */
+    bool is_option_supported(const std::string& option,
+                             const std::optional<std::string>& optValue = std::nullopt) const override;
+
+private:
+    /**
+     * @brief Compiles the given model according to the given configuration. During the model serialization step,
+     * the "WeightlessCacheAttribute" may be stored within the serialized model if requested.
+     * @note Storing the "WeightlessCacheAttribute" is necessary if the "weights separation" flow is being used.
+     */
+    std::pair<ov::Tensor, std::optional<std::string>> compile(const std::shared_ptr<const ov::Model>& model,
+                                                              const Config& config,
+                                                              const bool storeWeightlessCacheAttributeFlag) const;
+
+    std::shared_ptr<const VCLFunctionTable> _functions;
+    vcl_log_handle_t _logHandle = nullptr;
+    vcl_compiler_handle_t _compilerHandle = nullptr;
+    vcl_compiler_properties_t _compilerProperties;
+    vcl_version_info_t _vclVersion;
+    vcl_version_info_t _vclProfilingVersion;
+
+    ScopedOptionSupportCache _optionSupportCache;
+
+    Logger _logger;
+};
+
+}  // namespace intel_npu

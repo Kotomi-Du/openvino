@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2024 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -17,26 +17,29 @@
 # define NOMINMAX
 #endif
 
-#include "gpu/intel/microkernels/package.hpp"
-#include "gpu/intel/jit/gemm/include/gemmstone/microkernel_provider.hpp"
-#include "gpu/intel/microkernels/shim.hpp"
+#include "gpu/intel/gemm/jit/include/gemmstone/microkernel/package.hpp"
+#include "gpu/intel/gemm/jit/include/gemmstone/kernel_selector.hpp"
+#include "gpu/intel/gemm/jit/include/gemmstone/microkernel_selector.hpp"
+#include "gpu/intel/gemm/jit/include/gemmstone/microkernel/shim.hpp"
 #include "common/utils.hpp"
 
 namespace micro {
 
-using Package = dnnl::impl::gpu::intel::micro::Package;
-using HWInformation = gemmstone::HWInformation;
+using Package = gemmstone::microkernel::Package;
+using HWInformation = gemmstone::microkernel::HWInformation;
+using HostPayload = gemmstone::microkernel::HostPayload;
 using GEMMProblem = gemmstone::GEMMProblem;
 using ABOffset = gemmstone::ABOffset;
 using GEMMStrategy = gemmstone::GEMMStrategy;
-using GEMMProtocol = dnnl::impl::gpu::intel::micro::GEMMProtocol;
+using GEMMProtocol = gemmstone::microkernel::Protocol;
+using GEMMOptions = gemmstone::microkernel::GEMMOptions;
 using MatrixLayout = gemmstone::MatrixLayout;
 using Type = gemmstone::Type;
 using SizeParams = gemmstone::SizeParams;
 using StrategyRequirement = gemmstone::StrategyRequirement;
-using ShimOptions = dnnl::impl::gpu::intel::micro::ShimOptions;
-using HostLanguage = dnnl::impl::gpu::intel::micro::HostLanguage;
-using Setting = dnnl::impl::gpu::intel::micro::Setting;
+using ShimOptions = gemmstone::microkernel::ShimOptions;
+using HostLanguage = gemmstone::microkernel::HostLanguage;
+using Setting = gemmstone::microkernel::Package::Setting;
 
 using dnnl::impl::utils::rnd_up_pow2;
 
@@ -52,7 +55,7 @@ struct MicroKernelPackage {
     // other struct fields are not initializer properly and can't be used
     void save(cldnn::BinaryOutputBuffer& ob) const {
         ob << p.settings.size();
-        for (auto& s : p.settings) {
+        for (const auto& s : p.settings) {
             ob << s.name;
             ob << s.value;
         }
@@ -71,14 +74,49 @@ struct MicroKernelPackage {
     }
 };
 
-inline Package select_gemm_microkernel(GEMMProtocol protocol, HWInformation hw_info, SizeParams sizes, const GEMMProblem &problem,
-                                        const std::vector<StrategyRequirement> &reqs = std::vector<StrategyRequirement>(),
-                                        void (*strategyAdjuster)(GEMMStrategy &strategy) = nullptr) {
-    return gemmstone::selectGEMMMicrokernel(protocol, hw_info, sizes, problem, reqs, strategyAdjuster);
+// `host` describes the host OpenCL kernel (SIMD width and cross-thread argument payload bytes). The microkernel
+// registers are placed above that payload, and fuse() validates them against the actual thread payload.
+inline Package select_gemm_microkernel(GEMMOptions& options,
+                                       HostPayload host,
+                                       HWInformation hw_info,
+                                       SizeParams sizes,
+                                       const GEMMProblem& problem,
+                                       const std::vector<StrategyRequirement>& reqs = std::vector<StrategyRequirement>(),
+                                       void (*strategyAdjuster)(GEMMStrategy& strategy) = nullptr,
+                                       gemmstone::SelectionObserver* observer = nullptr) {
+    return gemmstone::microkernel::selectGEMM(options, host, hw_info, sizes, problem, reqs, strategyAdjuster, observer);
+}
+inline Package select_gemm_microkernel(GEMMOptions& options,
+                                       HostPayload host,
+                                       HWInformation hw_info,
+                                       SizeParams sizes,
+                                       const GEMMProblem& problem,
+                                       gemmstone::SelectionObserver* observer) {
+    return gemmstone::microkernel::selectGEMM(options, host, hw_info, sizes, problem, {}, nullptr, observer);
 }
 
 static inline int alignment_for_ld(int ld) {
-    return  gemmstone::alignmentForLD(ld);
+    return  gemmstone::microkernel::alignmentForLD(ld);
+}
+
+// The shim prototypes use oneDNN custom type names for sub-byte / non-native element types (e.g. `const global s4* a`),
+// which oneDNN defines in its own custom_types.h. Only the pointer address reaches the microkernel, so they are
+// defined here as the storage types the plugin kernels pass (and the shim used before these names were introduced).
+inline std::string generate_shim(const Package& package, HostLanguage language, const ShimOptions& options) {
+    static constexpr const char* shim_types = R"(
+#ifndef OV_MICROKERNEL_SHIM_TYPES
+#define OV_MICROKERNEL_SHIM_TYPES
+typedef uchar u4;
+typedef uchar s4;
+typedef uchar u3;
+typedef ushort bf16;
+typedef uchar f8_e5m2;
+typedef uchar f8_e4m3;
+typedef uchar e8m0;
+typedef uchar f4_e2m1;
+#endif
+)";
+    return shim_types + gemmstone::microkernel::generateShim(package, language, options);
 }
 
 }  // namespace micro

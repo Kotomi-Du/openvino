@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,9 @@
 #include <sstream>
 #include <unordered_map>
 
+#include "../../../v1/subgraph_pipeline.hpp"
 #include "attribute_visitor.hpp"
+#include "intel_npu/config/config.hpp"
 #include "openvino/openvino.hpp"
 
 namespace ov {
@@ -32,12 +34,19 @@ struct Isolate {
 };
 
 struct PassContext {
+    PassContext() = default;
+    explicit PassContext(const ::intel_npu::Config& cfg);
+
     size_t min_graph_size = 10;
     size_t keep_blocks = 10;
     size_t keep_block_size = 10;
+    std::unordered_set<std::string> keep_block_tags;
     std::vector<Avoid> avoids;
     std::vector<Isolate> isolates;
     std::vector<std::string> nofolds;
+    bool fuse_unfolded = false;
+    std::vector<std::string> fold_only_tags;
+    const ov::npuw::v1::subgraphs::PatternRegistry* subgraph_patterns = nullptr;
 };
 
 // Forward declaration
@@ -45,6 +54,7 @@ class Group;
 struct Repeated;
 struct Interconnect;
 struct MetaInterconnect;
+struct MetaInterconnectIO;
 
 namespace detail {
 using OVNodePtr = std::shared_ptr<ov::Node>;
@@ -60,15 +70,46 @@ using Reptrack = std::vector<std::shared_ptr<Repeated>>;
 using ReptrackMap = std::unordered_map<OVNodePtr, Reptrack>;
 using Uniques = std::unordered_map<std::tuple<std::string, std::set<std::string>, std::string>, GPtrSet>;
 using Pass = std::function<void(void)>;
+using MICVec = std::vector<MetaInterconnect>;
+using MICSet = std::unordered_set<MetaInterconnect>;
+using PairMICVecIO = std::pair<MICVec, MetaInterconnectIO>;
+using PairMICSetIO = std::pair<MICSet, MetaInterconnectIO>;
 }  // namespace detail
 
 namespace util {
 // FIXME: metadesc should be hash of layer's meta, not string
 std::string getMetaDesc(const std::shared_ptr<ov::Node>& ov_node);
-std::string repeated_id(const std::shared_ptr<Repeated>& ptr);
 std::optional<Avoid> parseAvoid(const std::string& s);
 std::optional<Isolate> parseIsolate(const std::string& s);
 std::tuple<PatternType, std::string, std::string> parse(const std::string& s);
+std::vector<std::string> splitByComma(const std::string& s);
+
+size_t getMinGraphSize(const ::intel_npu::Config& cfg);
+size_t getMinRepBlocks(const ::intel_npu::Config& cfg);
+size_t getMinRepBlockSize(const ::intel_npu::Config& cfg);
+std::unordered_set<std::string> getKeepBlockTags(const ::intel_npu::Config& cfg);
+std::vector<Avoid> getAvoids(const ::intel_npu::Config& cfg);
+std::vector<Isolate> getIsolates(const ::intel_npu::Config& cfg);
+std::vector<Isolate> getIsolates(const std::string& isolates_unparsed);
+std::vector<std::string> getNoFolds(const ::intel_npu::Config& cfg);
+std::vector<std::string> getNoFolds(const std::string& nofolds_unparsed);
+
+static const std::map<std::string, std::string> ISOL_PRESETS = {
+    {"COMPUTE",
+     "P:DQMatMulGQu4/compute,P:DQMatMulCWu4/compute,"
+     "P:DQMatMulGQi4/compute,P:DQMatMulCWi4/compute,"
+     "P:DQMatMulConv/compute,"
+     "P:VocabMatMul/compute,"
+     "P:RMSNorm/compute,P:RMSNorm2/compute,"
+     "P:RMSNorm3/compute,P:RMSNorm4/compute,"
+     "P:VariadicSplit/compute"},
+    {"FAKE", "P:FakeConvert/fake,P:FakeQuantize/fake"},
+    {"ATTN",
+     "P:SDPA/attn,P:SDPADecomposed/attn,"
+     "P:QuantizedSDPAWithGlobalMask/attn,P:GQA/attn,P:SDPACompressed/attn"},
+    {"MOE",
+     "P:BatchedExpert/expert,P:GPTOSSExpert/expert,P:GPTOSSRouter/router,"
+     "P:Qwen3Expert/expert,P:Qwen3Router/router,P:Gemma4Expert/expert,P:Gemma4Router/router"}};
 }  // namespace util
 
 }  // namespace online

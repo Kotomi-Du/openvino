@@ -1,12 +1,14 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "lstm_kernel_base.h"
-#include "kernel_selector_utils.h"
-#include "common_tools.h"
-#include <string>
+
 #include <algorithm>
+#include <string>
+
+#include "common_tools.h"
+#include "kernel_selector_utils.h"
 
 namespace kernel_selector {
 

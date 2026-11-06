@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -79,8 +79,9 @@ struct generate_proposals
     }
 
     bool operator==(const primitive& rhs) const override {
-        if (!compare_common_params(rhs))
+        if (!compare_common_params(rhs)) {
             return false;
+        }
 
         auto rhs_casted = downcast<const generate_proposals>(rhs);
 
@@ -128,11 +129,13 @@ protected:
         auto ret = std::map<size_t, const input_info*>{};
         auto idx = input.size();
 
-        if (output_rois_scores.is_valid())
+        if (output_rois_scores.is_valid()) {
             ret[idx++] = &output_rois_scores;
+        }
 
-        if (output_rois_num.is_valid())
+        if (output_rois_num.is_valid()) {
             ret[idx++] = &output_rois_num;
+        }
 
         return ret;
     }

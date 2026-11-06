@@ -1,29 +1,20 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "region_yolo.h"
 
-#include <cpu/x64/xbyak/xbyak.h>
-
 #include <algorithm>
 #include <cassert>
 #include <cmath>
-#include <common/c_types_map.hpp>
-#include <common/utils.hpp>
-#include <cpu/x64/cpu_isa_traits.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <string>
-#include <vector>
 
 #include "common/cpu_convert.h"
-#include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
-#include "cpu/x64/jit_generator.hpp"
 #include "cpu_types.h"
-#include "emitters/plugin/x64/jit_bf16_emitters.hpp"
 #include "graph_context.h"
 #include "memory_desc/cpu_memory_desc.h"
 #include "node.h"
@@ -31,17 +22,33 @@
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node.hpp"
-#include "openvino/core/parallel.hpp"
 #include "openvino/core/type.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/op/region_yolo.hpp"
+#include "openvino/runtime/system_conf.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/bfloat16.hpp"
+#include "utils/cpp/bit_cast.hpp"
 #include "utils/general_utils.h"
+
+#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
+#    include <xbyak/xbyak.h>
+
+#    include <common/c_types_map.hpp>
+#    include <common/utils.hpp>
+
+#    include "cpu/x64/cpu_isa_traits.hpp"
+#    include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
+#    include "cpu/x64/jit_generator.hpp"
+#    include "emitters/plugin/x64/jit_bf16_emitters.hpp"
+#    include "utils/cpu_utils.hpp"
+#endif
 
 using namespace dnnl::impl;
 using namespace dnnl::impl::cpu;
+#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
 using namespace dnnl::impl::cpu::x64;
+#endif
 using namespace dnnl::impl::utils;
 
 #if defined(OPENVINO_ARCH_X86_64)
@@ -51,22 +58,26 @@ using namespace dnnl::impl::utils;
 namespace ov::intel_cpu::node {
 #if defined(OPENVINO_ARCH_X86_64)
 template <cpu_isa_t isa>
-struct jit_uni_logistic_kernel_f32 : public jit_uni_logistic_kernel, public jit_generator {
+struct jit_uni_logistic_kernel_f32 : public jit_uni_logistic_kernel, public jit_generator_t {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_logistic_kernel_f32)
 
-    jit_uni_logistic_kernel_f32(jit_logistic_config_params jcp)
+    explicit jit_uni_logistic_kernel_f32(jit_logistic_config_params jcp)
         : jit_uni_logistic_kernel(),
-          jit_generator(jit_name()),
+          jit_generator_t(jit_name()),
           jcp_(jcp) {}
 
     void create_ker() override {
-        jit_generator::create_kernel();
-        ker_ = (decltype(ker_))jit_ker();
+        jit_generator_t::create_kernel();
+        ker_ = jit_kernel_cast<decltype(ker_)>(jit_ker());
     }
 
     void generate() override {
-        exp_injector.reset(
-            new jit_uni_eltwise_injector<isa>(this, dnnl::impl::alg_kind::eltwise_exp, 0.F, 0.F, 1.F, data_type::f32));
+        exp_injector.reset(new jit_uni_eltwise_injector_t<isa>(this,
+                                                               dnnl::impl::alg_kind::eltwise_exp,
+                                                               0.F,
+                                                               0.F,
+                                                               1.F,
+                                                               data_type::f32));
 
         if (mayiuse(avx512_core)) {
             uni_vcvtneps2bf16 = std::make_unique<jit_uni_vcvtneps2bf16>(this, isa);
@@ -132,7 +143,7 @@ struct jit_uni_logistic_kernel_f32 : public jit_uni_logistic_kernel, public jit_
 
 private:
     using Vmm = typename conditional3<isa == x64::sse41, Xbyak::Xmm, isa == x64::avx2, Xbyak::Ymm, Xbyak::Zmm>::type;
-    size_t vlen = cpu_isa_traits<isa>::vlen;
+    size_t vlen = cpu_isa_traits_t<isa>::vlen;
 
     Xbyak::Address table_val(int index) {
         return ptr[reg_table + index * vlen];
@@ -156,7 +167,7 @@ private:
 
     Xbyak::Label l_table;
 
-    std::shared_ptr<jit_uni_eltwise_injector<isa>> exp_injector;
+    std::shared_ptr<jit_uni_eltwise_injector_t<isa>> exp_injector;
 
     jit_logistic_config_params jcp_;
 
@@ -286,9 +297,8 @@ RegionYolo::RegionYolo(const std::shared_ptr<ov::Node>& op, const GraphContext::
         OPENVINO_THROW_NOT_IMPLEMENTED(errorMessage);
     }
 
-    if (op->get_input_size() != 1 || op->get_output_size() != 1) {
-        THROW_CPU_NODE_ERR("has incorrect number of input/output edges!");
-    }
+    CPU_NODE_ASSERT(op->get_input_size() == 1 && op->get_output_size() == 1,
+                    "has incorrect number of input/output edges!");
 
     const auto regionYolo = ov::as_type_ptr<const ov::op::v0::RegionYolo>(op);
     classes = regionYolo->get_num_classes();
@@ -316,19 +326,19 @@ void RegionYolo::initSupportedPrimitiveDescriptors() {
     }
 
     if (ov::element::bf16 == output_prec) {
-        if (!mayiuse(avx512_core)) {
+        if (!ov::with_cpu_x86_avx512_core()) {
             output_prec = ov::element::f32;
         }
     }
 
     impl_desc_type impl_type = [&] {
-        if (mayiuse(x64::avx512_core)) {
+        if (ov::with_cpu_x86_avx512_core()) {
             return impl_desc_type::jit_avx512;
         }
-        if (mayiuse(x64::avx2)) {
+        if (ov::with_cpu_x86_avx2()) {
             return impl_desc_type::jit_avx2;
         }
-        if (mayiuse(x64::sse41)) {
+        if (ov::with_cpu_x86_sse42()) {
             return impl_desc_type::jit_sse42;
         }
         return impl_desc_type::ref;
@@ -348,13 +358,13 @@ void RegionYolo::createPrimitive() {
     jcp.src_data_size = jcp.dst_data_size = output_prec.size();
 
     block_size = 1;
-    if (mayiuse(x64::avx512_core)) {
+    if (ov::with_cpu_x86_avx512_core()) {
         logistic_kernel = std::make_shared<jit_uni_logistic_kernel_f32<x64::avx512_core>>(jcp);
         block_size = 16;
-    } else if (mayiuse(x64::avx2)) {
+    } else if (ov::with_cpu_x86_avx2()) {
         logistic_kernel = std::make_shared<jit_uni_logistic_kernel_f32<x64::avx2>>(jcp);
         block_size = 8;
-    } else if (mayiuse(x64::sse41)) {
+    } else if (ov::with_cpu_x86_sse42()) {
         logistic_kernel = std::make_shared<jit_uni_logistic_kernel_f32<x64::sse41>>(jcp);
         block_size = 4;
     }
@@ -367,9 +377,7 @@ void RegionYolo::createPrimitive() {
 }
 
 inline float RegionYolo::logistic_scalar(float src) {
-    U aux2;
-    aux2.as_float_value = src;
-    int sign = aux2.as_int_value >> 31;
+    int sign = ov::intel_cpu::bit_cast<int>(src) >> 31;
     if (sign == 0) {
         src *= -1;
     }
@@ -385,10 +393,11 @@ inline float RegionYolo::logistic_scalar(float src) {
 }
 
 inline void RegionYolo::calculate_logistic(size_t start_index, int count, uint8_t* dst_data) {
+    const auto& cpu_parallel = context->getCpuParallel();
     auto dst_data_size = output_prec.size();
     if (logistic_kernel) {
         int blocks_num = div_up(count, block_size);
-        parallel_for(blocks_num, [&](int ib) {
+        cpu_parallel->parallel_for(blocks_num, [&](int ib) {
             int idx = ib * block_size;
             int work_amount = std::min(count - idx, block_size);
 
@@ -410,7 +419,7 @@ inline void RegionYolo::calculate_logistic(size_t start_index, int count, uint8_
                 bf16_dst_data[i + start_index] = logistic_scalar(bf16_dst_data[i + start_index]);
             }
         } else {
-            THROW_CPU_NODE_ERR("Unsupported precision configuration outPrc=", output_prec.get_type_name());
+            CPU_NODE_THROW("Unsupported precision configuration outPrc=", output_prec.get_type_name());
         }
     }
 }
@@ -439,12 +448,11 @@ void RegionYolo::execute([[maybe_unused]] const dnnl::stream& strm) {
         output_size = B * IH * IW * mask_size * (classes + coords + 1);
     }
 
-    if (output_size != getDstMemoryAtPort(0)->getShape().getElementsCount()) {
-        THROW_CPU_NODE_ERR("Incorrect layer configuration or output dimensions. ",
-                           output_size,
-                           " != ",
-                           getDstMemoryAtPort(0)->getShape().getElementsCount());
-    }
+    CPU_NODE_ASSERT(output_size == getDstMemoryAtPort(0)->getShape().getElementsCount(),
+                    "Incorrect layer configuration or output dimensions. ",
+                    output_size,
+                    " != ",
+                    getDstMemoryAtPort(0)->getShape().getElementsCount());
 
     size_t inputs_size = IH * IW * num_ * (classes + coords + 1);
     size_t total_size = 2 * IH * IW;
@@ -452,11 +460,11 @@ void RegionYolo::execute([[maybe_unused]] const dnnl::stream& strm) {
     const auto* src_data = getSrcDataAtPortAs<const uint8_t>(0);
     auto* dst_data = getDstDataAtPortAs<uint8_t>(0);
 
-    cpu_convert(src_data,
-                dst_data,
-                getParentEdgeAt(0)->getMemory().getDesc().getPrecision(),
-                getChildEdgeAt(0)->getMemory().getDesc().getPrecision(),
-                output_size);
+    cpu_parallel_convert(src_data,
+                         dst_data,
+                         getParentEdgeAt(0)->getMemory().getDesc().getPrecision(),
+                         getChildEdgeAt(0)->getMemory().getDesc().getPrecision(),
+                         output_size);
 
     for (size_t b = 0; b < B; b++) {
         for (int n = 0; n < num_; n++) {
@@ -477,7 +485,8 @@ void RegionYolo::execute([[maybe_unused]] const dnnl::stream& strm) {
                                     1,
                                     classes,
                                     IH,
-                                    IW);
+                                    IW,
+                                    context->getCpuParallel());
         }
     }
 }

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,8 +16,10 @@ ParamsKey QuantizeKernelScaleShift::GetSupportedKey() const {
     k.EnableInputDataType(Datatype::UINT8);
     k.EnableInputDataType(Datatype::INT8);
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::UINT8);
     k.EnableOutputDataType(Datatype::INT8);
@@ -69,7 +71,7 @@ CommonDispatchData QuantizeKernelScaleShift::SetDefault(const quantize_params& p
 JitConstants QuantizeKernelScaleShift::GetJitConstants(const quantize_params& params, const CommonDispatchData& dispatchData) const {
     JitConstants jit = Parent::GetJitConstants(params, dispatchData);
 
-    if (params.outputs[0].GetLayout() == DataLayout::b_fs_yx_fsv16 || params.outputs[0].GetLayout() == DataLayout::b_fs_yx_fsv16 ||
+    if (params.outputs[0].GetLayout() == DataLayout::b_fs_yx_fsv16 || params.outputs[0].GetLayout() == DataLayout::b_fs_yx_fsv32 ||
         params.outputs[0].GetLayout() == DataLayout::b_fs_zyx_fsv32 ||
         params.outputs[0].GetLayout() == DataLayout::bs_fs_yx_bsv16_fsv16 || params.outputs[0].GetLayout() == DataLayout::bs_fs_yx_bsv16_fsv32 ||
         params.outputs[0].GetLayout() == DataLayout::bs_fs_yx_bsv32_fsv16 || params.outputs[0].GetLayout() == DataLayout::bs_fs_yx_bsv32_fsv32 ||
@@ -86,7 +88,7 @@ JitConstants QuantizeKernelScaleShift::GetJitConstants(const quantize_params& pa
     }
 
     auto can_use_output_range = params.per_tensor_output_range && params.out_lo < params.out_hi;
-    auto has_output_range_round = !(params.outputs[0].GetDType() == Datatype::INT8 || params.outputs[0].GetDType() == Datatype::UINT8);
+    auto has_output_range_round = params.outputs[0].GetDType() != Datatype::INT8 && params.outputs[0].GetDType() != Datatype::UINT8;
 
     jit.AddConstant(MakeJitConstant("HAS_POST_SCALE", params.has_post_scale));
     jit.AddConstant(MakeJitConstant("HAS_POST_SHIFT", params.has_post_shift));
@@ -116,8 +118,9 @@ JitConstants QuantizeKernelScaleShift::GetJitConstants(const quantize_params& pa
 
 bool QuantizeKernelScaleShift::Validate(const Params& p) const {
     const quantize_params& params = static_cast<const quantize_params&>(p);
-    if (params.inputs.size() != 9)
-        return false;
+    if (params.inputs.size() != 9) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -28,15 +28,32 @@ KernelsPriority GridSampleKernelOpt_BilinearZeros::GetKernelsPriority(const Para
 }
 
 bool GridSampleKernelOpt_BilinearZeros::Validate(const Params& params) const {
-    if (!TBase::Validate(params))
-        return false;
+    if (!TBase::Validate(params)) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
+
+    auto PaddedSpatial = [](const MultiDataTensor& tensors) -> bool {
+        bool is_padded = false;
+        for (const auto& tensor : tensors) {
+            is_padded |= tensor.X().pad.Total() != 0;
+            is_padded |= tensor.Y().pad.Total() != 0;
+        }
+        return is_padded;
+    };
 
     const auto& kernel_params = static_cast<const grid_sample_params&>(params);
-    if (kernel_params.interpolation_mode != grid_sample_params::InterpolationMode::BILINEAR)
-        return false;
+    if (kernel_params.interpolation_mode != grid_sample_params::InterpolationMode::BILINEAR) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
 
-    if (kernel_params.padding_mode != grid_sample_params::PaddingMode::ZEROS)
-        return false;
+    if (kernel_params.padding_mode != grid_sample_params::PaddingMode::ZEROS) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
+
+    if (kernel_params.inputs[0].GetDims().size() != 4 || kernel_params.outputs[0].GetDims().size() != 4 ||
+        PaddedSpatial(kernel_params.inputs) || PaddedSpatial(kernel_params.outputs)) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
 
     return true;
 }
@@ -58,6 +75,8 @@ ParamsKey GridSampleKernelOpt_BilinearZeros::GetSupportedKey() const {
     key.EnableDifferentTypes();
     key.EnableInputLayout(DataLayout::bfyx);
     key.EnableOutputLayout(DataLayout::bfyx);
+    key.EnableInputLayout(DataLayout::b_fs_yx_fsv16);
+    key.EnableOutputLayout(DataLayout::b_fs_yx_fsv16);
     key.EnableTensorOffset();
     key.EnableTensorPitches();
     key.EnableBatching();

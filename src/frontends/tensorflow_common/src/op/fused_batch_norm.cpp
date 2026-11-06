@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,10 +23,7 @@ using namespace std;
 using namespace ov;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 namespace {
 void generate_axes_range_except_c(const Output<Node>& x_rank, bool is_nhwc, Output<Node>& axes_no_c) {
     auto const_one = make_shared<v0::Constant>(element::i32, Shape{}, 1);
@@ -265,7 +262,7 @@ NamedOutputVector translate_fused_batch_norm_op(const NodeContext& node) {
         compute_fused_batch_norm_inference(node, fused_batch_norm, batch_mean, batch_variance);
     }
 
-    // create fictious output for reserved outputs of FusedBatchNorm operation
+    // create fictitious output for reserved outputs of FusedBatchNorm operation
     auto zero_const = create_same_type_const_scalar<float>(scale, 0);
     auto zero_const2 = create_same_type_const_scalar<float>(scale, 0);
 
@@ -289,7 +286,4 @@ NamedOutputVector translate_fused_batch_norm_op(const NodeContext& node) {
 
     return results;
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

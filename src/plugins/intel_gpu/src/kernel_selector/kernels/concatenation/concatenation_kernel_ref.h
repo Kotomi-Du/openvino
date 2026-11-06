@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@ namespace kernel_selector {
 class ConcatenationKernelRef : public ConcatenationKernelBase {
 public:
     ConcatenationKernelRef() : ConcatenationKernelBase("concatenation_gpu_ref") {}
-    virtual ~ConcatenationKernelRef() {}
+    ~ConcatenationKernelRef() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

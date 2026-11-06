@@ -1,22 +1,15 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
-
 #include <onnx/onnx_pb.h>
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace transform {
+namespace ov::frontend::onnx::transform {
 
 using ::ONNX_NAMESPACE::ModelProto;
 
-static const std::vector<std::string> onnx_functions_to_expand = {"AffineGrid",
-                                                                  "Bernoulli",
-                                                                  "CenterCropPad",
-                                                                  "SoftmaxCrossEntropyLoss"};
+static const std::vector<std::string> onnx_functions_to_expand = {"Bernoulli"};
 
 /// \brief Replace nodes with expanded body of ONNX functions
 ///
@@ -41,8 +34,7 @@ static const std::vector<std::string> legacy_ops_to_fixup = {"DeformableConv2D",
                                                              "GroupNorm",
                                                              "Normalize",
                                                              "PriorBox",
-                                                             "PriorBoxClustered",
-                                                             "Swish"};
+                                                             "PriorBoxClustered"};
 
 /// \brief Add support for models with custom operators mistakenly registered in
 ///        "ai.onnx" domain.
@@ -55,7 +47,4 @@ static const std::vector<std::string> legacy_ops_to_fixup = {"DeformableConv2D",
 /// \param model_proto Protobuf message with ONNX model to transform.
 void fixup_legacy_operators(ModelProto& model_proto);
 
-}  // namespace transform
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::transform

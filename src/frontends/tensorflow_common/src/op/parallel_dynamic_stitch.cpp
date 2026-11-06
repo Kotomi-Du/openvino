@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,10 +18,7 @@
 using namespace std;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 OutputVector translate_parallel_dynamic_stitch_op(const NodeContext& node) {
     // format for inputs: [indices1, indices2, ..., indicesN, data1, data2, ..., dataN]
@@ -80,7 +77,4 @@ OutputVector translate_parallel_dynamic_stitch_op(const NodeContext& node) {
     return result->outputs();
 }
 
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

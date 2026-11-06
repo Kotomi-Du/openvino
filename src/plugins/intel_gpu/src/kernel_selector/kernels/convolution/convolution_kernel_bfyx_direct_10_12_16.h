@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class ConvolutionKernel_bfyx_Direct_10_10_12 : public ConvolutionKernelBase {
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_bfyx_Direct_10_10_12() : ConvolutionKernelBase("convolution_gpu_bfyx_direct_10_12_16") {}
-    virtual ~ConvolutionKernel_bfyx_Direct_10_10_12() {}
+    ~ConvolutionKernel_bfyx_Direct_10_10_12() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

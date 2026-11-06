@@ -1,5 +1,11 @@
 name: Linux (Ubuntu 24.04, Python 3.12)
+run-name: ${{ github.event_name == 'schedule' && (github.event.schedule == '0 2 * * *' && 'Linux (Ubuntu 24.04, Python 3.12) - Nightly (C++20 build only)' || 'Linux (Ubuntu 24.04, Python 3.12) - Nightly') || 'Linux (Ubuntu 24.04, Python 3.12)' }}
 on:
+  schedule:
+    # at 00:00 on Wednesday and Saturday (with latest OneDNN)
+    - cron: '0 0 * * 3,6'
+    # at 02:00 every day: C++20 build without the regular build and tests
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       target-branch:
@@ -7,6 +13,11 @@ on:
         type: string
         required: false
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   merge_group:
   push:
     branches:
@@ -20,19 +31,17 @@ concurrency:
 
 permissions: read-all
 
-env:
-  PIP_CACHE_PATH: /mount/caches/pip/linux
-
 jobs:
   Smart_CI:
     runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false || github.run_attempt > 1
     outputs:
       affected_components: "${{ steps.smart_ci.outputs.affected_components }}"
       changed_components: "${{ steps.smart_ci.outputs.changed_components }}"
       skip_workflow: "${{ steps.smart_ci.outputs.skip_workflow }}"
     steps:
       - name: checkout action
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: ababushk/checkout@dd591a6a2ac25618db4eda86e7e0d938f88cf01b # cherry_pick_retries
         timeout-minutes: 15
         with:
           sparse-checkout: .github/actions/smart-ci
@@ -68,11 +77,11 @@ jobs:
       - name: Set mock output images if pipeline should be skipped
         if: ${{ needs.smart_ci.outputs.skip_workflow == 'True' }}
         id: mock_image
-        run: echo "images={\"ov_test\":{\"ubuntu_24_04_x64\":\"mock\"},\"ov_build\":{\"ubuntu_24_04_x64\":\"mock\"}}" >> "$GITHUB_OUTPUT"
+        run: echo "images={\"ov_test\":{\"ubuntu_24_04_x64\":\"mock\",\"ubuntu_24_04_x64_dgpu\":\"mock\"},\"ov_build\":{\"ubuntu_24_04_x64\":\"mock\"}}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         if: ${{ needs.smart_ci.outputs.skip_workflow != 'True' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: ababushk/checkout@dd591a6a2ac25618db4eda86e7e0d938f88cf01b # cherry_pick_retries
         timeout-minutes: 15
 
       - uses: ./.github/actions/handle_docker
@@ -82,17 +91,20 @@ jobs:
           images: |
             ov_build/ubuntu_24_04_x64
             ov_test/ubuntu_24_04_x64
+            ov_test/ubuntu_24_04_x64_dgpu
           registry: 'openvinogithubactions.azurecr.io'
           dockerfiles_root_dir: '.github/dockerfiles'
           changed_components: ${{ needs.smart_ci.outputs.changed_components }}
 
   Build:
     needs: [Docker, Smart_CI]
-    if: "!needs.smart_ci.outputs.skip_workflow"
+    # Skip the regular build and its dependent build/test jobs on the daily C++20 schedule.
+    if: ${{ !needs.smart_ci.outputs.skip_workflow && github.event.schedule != '0 2 * * *' }}
     uses: ./.github/workflows/job_build_linux.yml
     with:
       runner: 'aks-linux-16-cores-32gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_build.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"], "options": "-e SCCACHE_AZURE_BLOB_CONTAINER -e SCCACHE_AZURE_CONNECTION_STRING"}'
+      cmake-build-parallel-level: '15'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_build.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       event-name: ${{ github.event_name }}
       os: 'ubuntu_24_04'
@@ -101,22 +113,51 @@ jobs:
       build-debian-packages: true
       build-contrib: true
       build-additional-python-packages: true
+      build-samples: true
+      generate-gguf-fixtures: true
       target-branch: ${{ inputs.target-branch }}
-      cmake-options: >- 
+      cmake-options: >-
             -G 'Ninja Multi-Config'
-            -DENABLE_CPPLINT=OFF
             -DENABLE_NCC_STYLE=OFF
             -DENABLE_TESTS=ON
+            -DENABLE_OV_GGUF_FRONTEND=ON
             -DENABLE_STRICT_DEPENDENCIES=OFF
             -DENABLE_SYSTEM_OPENCL=ON
-            -DCMAKE_VERBOSE_MAKEFILE=ON
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
             -DCPACK_GENERATOR=TGZ
             -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
-            -DENABLE_FASTER_BUILD=ON
+
+  # Non-blocking C++20 compile check (CVS-189849): daily, dispatched, or re-run workflows.
+  # Promote to a required pre-commit check once stable.
+  Build_CPP20:
+    name: Build (C++20, non-blocking)
+    needs: [Docker, Smart_CI]
+    if: >-
+      ${{
+        !needs.smart_ci.outputs.skip_workflow &&
+        (github.event.schedule == '0 2 * * *' || github.event_name == 'workflow_dispatch' || github.run_attempt > 1)
+      }}
+    uses: ./.github/workflows/job_build_linux_cpp20.yml
+    with:
+      runner: 'aks-linux-16-cores-32gb'
+      cmake-build-parallel-level: '15'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_build.ubuntu_24_04_x64 }}
+      os: 'ubuntu_24_04'
+      cmake-options: >-
+            -G 'Ninja Multi-Config'
+            -DENABLE_NCC_STYLE=OFF
+            -DENABLE_TESTS=ON
+            -DENABLE_OV_GGUF_FRONTEND=ON
+            -DENABLE_STRICT_DEPENDENCIES=OFF
+            -DENABLE_SYSTEM_OPENCL=ON
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+            -DCMAKE_CXX_STANDARD=20
 
   CXX_Unit_Tests:
     name: C++ unit tests
     needs: [ Docker, Build, Smart_CI ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_cxx_unit_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
@@ -127,6 +168,7 @@ jobs:
   Debian_Packages:
     name: Debian Packages
     needs: [ Docker, Build ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_debian_packages.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
@@ -134,60 +176,132 @@ jobs:
 
   Samples:
     needs: [ Docker, Build, Smart_CI ]
-    if: fromJSON(needs.smart_ci.outputs.affected_components).samples
+    if: fromJSON(needs.smart_ci.outputs.affected_components).samples && github.event_name != 'schedule'
     uses: ./.github/workflows/job_samples_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"]}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
 
   Python_Unit_Tests:
     name: Python unit tests
     needs: [ Docker, Build, Smart_CI ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_python_unit_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"]}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       python-version: '3.12'
 
   Python_API_Tests:
     name: Python API tests
     needs: [ Docker, Build, Smart_CI ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_python_api_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"]}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       python-version: '3.12'
+
+  LLM_Accuracy_CPU:
+    name: LLM accuracy CPU tests
+    needs: [ Docker, Build, Smart_CI, Openvino_tokenizers ]
+    if: |
+      github.event_name != 'schedule' && (
+        fromJSON(needs.smart_ci.outputs.affected_components).CPU ||
+        fromJSON(needs.smart_ci.outputs.affected_components).transformations ||
+        fromJSON(needs.smart_ci.outputs.affected_components).Core
+      )
+    uses: ./.github/workflows/job_llm_accuracy_tests.yml
+    with:
+      runner: '["aks-linux-4-cores-16gb"]'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
+      device: 'CPU'
+      test-suffix: 'CPU'
+      use-pip-proxy: true
+      timeout-minutes: 30
+
+  LLM_Accuracy_iGPU:
+    name: LLM accuracy iGPU tests
+    needs: [ Docker, Build, Smart_CI, Openvino_tokenizers ]
+    if: |
+      github.event_name != 'schedule' && (
+        fromJSON(needs.smart_ci.outputs.affected_components).GPU ||
+        fromJSON(needs.smart_ci.outputs.affected_components).transformations ||
+        fromJSON(needs.smart_ci.outputs.affected_components).Core
+      )
+    uses: ./.github/workflows/job_llm_accuracy_tests.yml
+    with:
+      runner: '{"group": "Intel-GPU", "labels": ["self-hosted", "igpu", "Linux"]}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64_dgpu }}
+      container-options: '--group-add 44 --group-add 993 --device /dev/dri/renderD128:/dev/dri/renderD128'
+      device: 'GPU'
+      test-suffix: 'iGPU'
+      use-pip-proxy: false
+      timeout-minutes: 60
+
+  LLM_Accuracy_dGPU:
+    name: LLM accuracy dGPU tests
+    needs: [ Docker, Build, Smart_CI, Openvino_tokenizers ]
+    if: |
+      github.event_name == 'push' && (
+        fromJSON(needs.smart_ci.outputs.affected_components).GPU ||
+        fromJSON(needs.smart_ci.outputs.affected_components).transformations ||
+        fromJSON(needs.smart_ci.outputs.affected_components).Core
+      )
+    uses: ./.github/workflows/job_llm_accuracy_tests.yml
+    with:
+      runner: '{"group": "Intel-GPU", "labels": ["self-hosted", "dgpu", "BMG-precommit", "Linux"]}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64_dgpu }}
+      container-options: '--group-add 44 --group-add 993 --device /dev/dri/renderD129:/dev/dri/renderD129'
+      device: 'GPU'
+      test-suffix: 'dGPU'
+      use-pip-proxy: false
+      timeout-minutes: 60
 
   Pytorch_Layer_Tests:
     name: Pytorch Layer Tests
     needs: [ Docker, Build, Smart_CI ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_pytorch_layer_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"], "options": "-e HF_TOKEN"}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
+      affected-components: ${{ needs.smart_ci.outputs.affected_components }}
+      python-version: '3.12'
+
+  Pytorch_FX_Layer_Tests:
+    name: Pytorch FX Layer Tests
+    needs: [ Docker, Build, Smart_CI ]
+    if: ${{ github.event_name != 'schedule' }}
+    uses: ./.github/workflows/job_pytorch_fx_layer_tests.yml
+    with:
+      runner: 'aks-linux-4-cores-16gb'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       python-version: '3.12'
 
   JAX_Layer_Tests:
     name: JAX Layer Tests
     needs: [ Docker, Build, Smart_CI ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_jax_layer_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"], "options": "-e HF_TOKEN"}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       python-version: '3.12'
 
   TensorFlow_Layer_Tests:
     name: TensorFlow Layer Tests
     needs: [ Docker, Build, Smart_CI, Openvino_tokenizers ]
+    if: ${{ github.event_name != 'schedule' }}
     uses: ./.github/workflows/job_tensorflow_layer_tests.yml
     with:
       runner: 'aks-linux-4-cores-16gb'
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"], "options": "-e HF_TOKEN"}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       python-version: '3.12'
 
@@ -198,15 +312,40 @@ jobs:
     with:
       runner: 'aks-linux-4-cores-16gb'
       shell: bash
-      container: '{"image": "${{ fromJSON(needs.docker.outputs.images).ov_build.ubuntu_24_04_x64 }}", "volumes": ["/mount:/mount"]}'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_build.ubuntu_24_04_x64 }}
       affected-components: ${{ needs.smart_ci.outputs.affected_components }}
       python-version: '3.12'
       target-branch: ${{ inputs.target-branch }}
-    if: fromJSON(needs.smart_ci.outputs.affected_components).TOKENIZERS
+    if: |
+      github.event_name != 'schedule' && (
+        fromJSON(needs.smart_ci.outputs.affected_components).TOKENIZERS ||
+        fromJSON(needs.smart_ci.outputs.affected_components).CPU ||
+        fromJSON(needs.smart_ci.outputs.affected_components).GPU ||
+        fromJSON(needs.smart_ci.outputs.affected_components).transformations ||
+        fromJSON(needs.smart_ci.outputs.affected_components).Core
+      )
+
+  dGPU_BMG_Nightly:
+    name: dGPU Arc-BMG Tests Nightly
+    needs: [ Build, Smart_CI, Docker ]
+    uses: ./.github/workflows/job_gpu_tests.yml
+    strategy:
+      max-parallel: 2
+      fail-fast: false
+      matrix:
+        TEST_TYPE: ['unit', 'func']
+    with:
+      device: 'dgpu'
+      test_type: ${{ matrix.TEST_TYPE }}
+      runner: "[ 'self-hosted', 'dgpu', 'BMG-precommit', 'Linux' ]"
+      runner-group: 'Intel-GPU'
+      image: ${{ fromJSON(needs.docker.outputs.images).ov_test.ubuntu_24_04_x64_dgpu }}
+      options: "--group-add 44 --group-add 993 --device /dev/dri/renderD129:/dev/dri/renderD129"
+    if: ${{ github.event_name == 'schedule' }}
 
   Overall_Status:
     name: ci/gha_overall_status_ubuntu_24
-    needs: [Smart_CI, Build, Debian_Packages, Samples, Python_Unit_Tests, Pytorch_Layer_Tests, TensorFlow_Layer_Tests, Openvino_tokenizers]
+    needs: [Smart_CI, Build, Debian_Packages, Samples, Python_Unit_Tests, Pytorch_Layer_Tests, TensorFlow_Layer_Tests, Openvino_tokenizers, LLM_Accuracy_CPU, LLM_Accuracy_iGPU]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:

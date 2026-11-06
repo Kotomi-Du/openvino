@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -24,7 +24,7 @@ struct embedding_bag_params : public base_params {
 class EmbeddingBagKernelRef : public KernelBaseOpenCL {
 public:
     EmbeddingBagKernelRef() : KernelBaseOpenCL("embedding_bag_ref") {}
-    virtual ~EmbeddingBagKernelRef() = default;
+    ~EmbeddingBagKernelRef() override = default;
 
 protected:
     KernelsData GetKernelsData(const Params& params) const override;

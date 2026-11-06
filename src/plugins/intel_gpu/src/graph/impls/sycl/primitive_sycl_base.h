@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,10 +8,10 @@
 #include "intel_gpu/runtime/memory.hpp"
 #include "registry/registry.hpp"
 #include "runtime/ocl/ocl_event.hpp"
+#include "sycl/sycl_base_event.hpp"
+#include "sycl/sycl_wrapper.hpp"
 
 #include <vector>
-
-#include "sycl/sycl.hpp"
 
 namespace cldnn {
 namespace sycl {
@@ -31,6 +31,7 @@ struct typed_primitive_sycl_impl : public typed_primitive_impl<PType> {
 
     bool is_cpu() const override { return false; }
     bool is_onednn() const override { return false; }
+    bool supports_replay() const override { return false; }
 
 protected:
     void init_kernels(const kernels_cache&, const kernel_impl_params&) override { }
@@ -49,6 +50,16 @@ protected:
         } else {
             return nullptr;
         }
+    }
+
+    static std::vector<::sycl::event> to_sycl_events(std::vector<event::ptr> const& deps) {
+        std::vector<::sycl::event> events;
+        for (auto& dep : deps) {
+            if (auto sycl_base_ev = std::dynamic_pointer_cast<sycl::sycl_base_event>(dep)) {
+                events.push_back(sycl_base_ev->get());
+            }
+        }
+        return events;
     }
 
     std::vector<BufferDescriptor> get_internal_buffer_descs(const kernel_impl_params&) const override {

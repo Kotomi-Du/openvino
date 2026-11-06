@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -61,7 +61,7 @@ KernelsPriority ConvolutionKernel_bfyx_1x1::GetKernelsPriority(const Params& /*p
 
 bool ConvolutionKernel_bfyx_1x1::Validate(const Params& p) const {
     if (!ConvolutionKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const auto& params = static_cast<const convolution_params&>(p);
@@ -76,7 +76,7 @@ bool ConvolutionKernel_bfyx_1x1::Validate(const Params& p) const {
     const bool bInputSizes = input.GetLayout() == DataLayout::bfyx && (input.X().v * input.Y().v != 16 || (input.Feature().v % 8) != 0);
 
     if (bOutputSizes || bPad || bFilterSize || bStride || bInputSizes) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     return true;
@@ -85,8 +85,9 @@ bool ConvolutionKernel_bfyx_1x1::Validate(const Params& p) const {
 JitConstants ConvolutionKernel_bfyx_1x1::GetJitConstants(const convolution_params& params, const DispatchData& dispatchData) const {
     auto jit = Parent::GetJitConstants(params, dispatchData);
 
-    if (params.outputs[0].Feature().v % 16)
+    if ((params.outputs[0].Feature().v % 16) != 0u) {
         jit.AddConstant(MakeJitConstant("LEFTOVERS", 1));
+    }
 
     return jit;
 }

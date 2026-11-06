@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,9 +12,7 @@
 #include "openvino/op/transpose.hpp"
 #include "openvino/pass/graph_rewrite.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
+namespace ov::frontend::tensorflow {
 using NameTensorMap = std::unordered_map<std::string, NamedOutputVector>;
 using NameTensorMapPtr = std::shared_ptr<NameTensorMap>;
 
@@ -177,6 +175,4 @@ std::pair<ov::Output<ov::Node>, ov::Output<ov::Node>> complex_polar_to_rectangul
 
 ov::OutputVector pre_translate_string_tensor_input(const ov::Output<ov::Node>& input);
 
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow

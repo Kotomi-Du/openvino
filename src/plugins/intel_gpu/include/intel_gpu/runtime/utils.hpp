@@ -1,4 +1,4 @@
-// Copyright (C) 2017-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "openvino/core/except.hpp"
+#include "openvino/util/common_util.hpp"
 
 namespace cldnn {
 
@@ -136,10 +137,15 @@ template <typename derived_type, typename base_type, std::enable_if_t<std::is_ba
 inline derived_type& downcast(base_type& base) {
     try {
         return dynamic_cast<derived_type&>(base);
-    } catch (std::bad_cast& /* ex */) {
-        throw std::runtime_error("Unable to cast reference from base to derived type");
+    } catch (std::bad_cast&) {
+        OPENVINO_THROW("Unable to cast reference from base (",
+                        typeid(base_type).name(),
+                        ") actual dynamic type (",
+                        typeid(base).name(),
+                        ") to derived (",
+                        typeid(derived_type).name(),
+                        ") type");
     }
-    throw std::runtime_error("downcast failed with unhandled exception");
 }
 
 template <typename T>
@@ -227,6 +233,26 @@ inline std::string to_string(const T& v) {
     s << v;
     return s.str();
 }
+
+// Overload << operator for vectors
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec) {
+    os << "[" << ov::util::join<std::ostream>(vec) << "]";
+    return os;
+}
+
+// vector type static casting function
+template <typename To, typename From, typename Alloc = std::allocator<From>,
+          typename = std::enable_if_t<std::is_convertible<From, To>::value>>
+inline std::vector<To> convert_vector(const std::vector<From, Alloc>& v) {
+    std::vector<To> out;
+    out.reserve(v.size());
+    std::transform(v.begin(), v.end(), std::back_inserter(out),
+                [](From x){ return static_cast<To>(x); });
+
+    return out;
+}
+
 
 // The following code is derived from Boost C++ library
 // Copyright 2005-2014 Daniel James.

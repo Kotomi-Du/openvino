@@ -1,0 +1,528 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+
+import platform
+import argparse
+import glob
+import os
+import re
+import subprocess
+import json
+import time
+import sys
+import csv
+
+from typing import Any
+from pathlib import Path
+from dataclasses import dataclass, asdict
+from collections import defaultdict
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+INTEL_FAMILIES = {
+    (0x06, 0x5E): "skylake",
+    (0x06, 0x55): "skylake",
+    (0x06, 0x8E): "kabylake",
+    (0x06, 0x9E): "kabylake",
+    (0x06, 0xA5): "cometlake",
+    (0x06, 0xA6): "cometlake",
+    (0x06, 0x66): "cannonlake",
+    (0x06, 0x6A): "icelake",
+    (0x06, 0x6C): "icelake",
+    (0x06, 0x7D): "icelake",
+    (0x06, 0x7E): "icelake",
+    (0x06, 0x9D): "icelake",
+    (0x06, 0xA7): "rocketlake",
+    (0x06, 0x8C): "tigerlake",
+    (0x06, 0x8D): "tigerlake",
+    (0x06, 0x8F): "sapphirerapids-server",
+    (0x06, 0xCF): "emeraldrapids-server",
+    (0x06, 0xAD): "graniterapids",
+    (0x06, 0xAE): "graniterapids",
+    (0x13, 0x01): "diamondrapids",
+    (0x06, 0xD7): "bartlettlake",
+    (0x06, 0x8A): "lakefield",
+    (0x06, 0x97): "alderlake",
+    (0x06, 0x9A): "alderlake",
+    (0x06, 0xB7): "raptorlake",
+    (0x06, 0xBA): "raptorlake",
+    (0x06, 0xBF): "raptorlake",
+    (0x06, 0xAC): "meteorlake",
+    (0x06, 0xAA): "meteorlake",
+    (0x06, 0xC5): "arrowlake",
+    (0x06, 0xC6): "arrowlake",
+    (0x06, 0xB5): "arrowlake",
+    (0x06, 0xBD): "lunarlake",
+    (0x06, 0xCC): "pantherlake",
+    (0x06, 0xD5): "wildcatlake",
+    (0x12, 0x01): "novalake",
+    (0x12, 0x03): "novalake"
+}
+
+
+def get_cpu_family():
+    arch = platform.machine().lower()
+    system = platform.system()
+    if arch in ("arm64", "aarch64"):
+        if system == "Darwin":
+            return subprocess.check_output(
+                ["sysctl", "machdep.cpu.brand_string"]).decode().strip()
+        else:
+            # not implemented
+            return "Unknown arm64"
+    elif arch in ("x86_64", "amd64"):
+        if system == "Windows":
+            cpuinfo = subprocess.check_output(
+                ["powershell", "(Get-WmiObject -Class Win32_Processor).Caption"]).decode().strip()
+            infomatch = re.match(r".* Family (\d+) Model (\d+) .*",
+                cpuinfo.splitlines()[-1])
+            if not infomatch:
+                return "Unknown x86_64"
+            try:
+                family, model = map(int, infomatch.groups())
+            except ValueError:
+                return "Unknown x86_64"
+        elif system == "Linux":
+            with open("/proc/cpuinfo") as cpuinfofile:
+                cpuinfo = cpuinfofile.read().strip().split("\n\n")[0]
+            cpuinfo = (
+                map(str.strip, line.split(":", 1))
+                for line in cpuinfo.split("\n")
+            )
+            cpuinfo = {k: v for k, v in cpuinfo}
+            try:
+                family = int(cpuinfo.get("cpu family", ""))
+                model = int(cpuinfo.get("model", ""))
+            except ValueError:
+                return "Unknown x86_64"
+        elif system == "Darwin":
+            family = subprocess.check_output(
+                ["sysctl", "machdep.cpu.family"]).decode().strip()
+            model = subprocess.check_output(
+                ["sysctl", "machdep.cpu.model"]).decode().strip()
+            try:
+                family = int(family)
+                model = int(model)
+            except ValueError:
+                return "Unknown x86_64"
+        else:
+            return "Unknown x86_64"
+        return INTEL_FAMILIES.get((family, model), "Unknown x86_64")
+    else:
+        return "Unknown"
+
+
+CPU_FAMILY = get_cpu_family()
+
+
+def value_diff(value, reference):
+    difference = value - reference
+    diff_ratio = difference / reference
+    return (value, reference, difference, diff_ratio)
+
+
+def attempt(func, *args, **kwargs):
+    tries = 3
+    while tries:
+        tries -= 1
+        try:
+            return func(*args, **kwargs)
+        except Exception as ex:
+            print(f"Error: {ex}; tries left: {tries}")
+        time.sleep(5)
+    print("No more attempts will be made")
+
+
+def aggregate_results(results: list[dict]):
+    if len(results) == 0:
+        raise ValueError("Aggregation of 0 values")
+    check_keys = set(results[0].keys()) - {"samples"}
+    check_values = {k: results[0][k] for k in check_keys}
+    sample_names = results[0]["samples"].keys()
+    samples = defaultdict(list)
+    for result in results:
+        assert check_values == {k: result[k] for k in check_keys}
+        for sname in sample_names:
+            samples[sname].append(result["samples"][sname])
+    check_values.update({
+        "samples": {
+            sname: MemSample.aggregate(svalues)
+            for sname, svalues in samples.items()
+        }
+    })
+    return check_values
+
+
+def aggregate_numbers(numbers: list):
+    if len(numbers) == 0:
+        raise ValueError("Aggregation of 0 values")
+    return sum(numbers) / len(numbers)
+
+
+@dataclass
+class MemSample:
+    system_size: int
+    system_peak: int
+    system_rss: int
+    system_hwm: int
+    threads: int
+    gpu_local_used: int = -1
+    gpu_local_total: int = -1
+    gpu_nonlocal_used: int = -1
+    gpu_nonlocal_total: int = -1
+
+    def as_dict(self):
+        def to_camel_case(s: str):
+            first, *others = s.split("_")
+            return "".join([first, *[x.capitalize() for x in others]])
+
+        return {
+            to_camel_case(k): v
+            for k, v in asdict(self).items()
+        }
+
+    @classmethod
+    def from_dict(cls, values: dict):
+        class_fields = cls.__dataclass_fields__.keys()
+        selected_values = {
+            k: int(values[k])
+            for k in class_fields
+        }
+        return cls(**selected_values)
+
+    @classmethod
+    def aggregate(cls, items: list["MemSample"]):
+        class_fields = cls.__dataclass_fields__.keys()
+        result = {}
+        for field_name in class_fields:
+            numbers = [
+                getattr(item, field_name, None)
+                for item in items
+            ]
+            result[field_name] = int(aggregate_numbers(numbers))
+        return cls.from_dict(result)
+
+    def __repr__(self):
+        return "; ".join(f"{k} {v:>10}" for k, v in self.as_dict().items())
+
+
+def run_test_executable_extract_result(command):
+    proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    run_out = proc.stdout.decode()
+    if run_out.startswith("TEST_RESULTS: "):
+        results_json = run_out.splitlines()[0].removeprefix("TEST_RESULTS: ")
+        results = json.loads(results_json)
+        if "samples" in results:
+            results["samples"] = {
+                sname: MemSample.from_dict(sample)
+                for sname, sample in results["samples"].items()
+            }
+        return results
+    elif run_out.startswith("TEST_INFO: "):
+        return json.loads(run_out.splitlines()[0].removeprefix("TEST_INFO: "))
+    return {
+        "error": "Test did not run correctly",
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode(),
+        "stderr": proc.stderr.decode()
+    }
+
+
+MODELID_RE = re.compile(r"\/?([^\/]+)\/(\w+)\/?[^\/]*\/((OV_)?(FP|INT)\d+(\/INT\d+)?[^\/]*)(\/\d+\/ov)?\/(.+).xml")
+
+
+@dataclass
+class TestCase:
+    _main_fields = ["model_id", "model_path", "device"]
+
+    model_id: str
+    model_path: Path
+    device: str
+
+    # metadata
+    description: dict[str, str]
+    weights_size: int
+
+    @property
+    def original_model(self) -> str | None:
+        return self.description.get("src_model_path")
+
+    @property
+    def model_name(self) -> str | None:
+        return self.description.get("topology_name")
+
+    @property
+    def framework(self) -> str | None:
+        return self.description.get("base_framework")
+
+    @property
+    def precision(self) -> str | None:
+        return self.description.get("weight_precision")
+
+    @staticmethod
+    def _read_description(model_path: Path) -> dict[str, str] | None:
+        description_path = model_path.parent / "description.txt"
+        description_text = None
+        try:
+            description_text = description_path.read_text()
+        except OSError:
+            pass
+        if not description_text:
+            description_path = model_path.parent.parent / "description.txt"
+            try:
+                description_text = description_path.read_text()
+            except OSError:
+                return None
+        return dict([
+            line.split(":", 1)
+            for line in description_text.splitlines()
+            if ":" in line
+        ])
+
+    @classmethod
+    def from_model_path(cls, model_id: str, model_path: Path, device: str) -> "TestCase":
+        model_descr = cls._read_description(model_path) or {}
+        weights_path = model_path.with_suffix(".bin")
+        if not weights_path.is_file():
+            print(f"Warning: Test case {model_id} invalid: can't find weights file at {str(weights_path)}")
+            raise Exception(f"No weights file was found")
+        weights_size = weights_path.stat().st_size
+        return cls(
+            model_id=model_id,
+            model_path=model_path,
+            device=device,
+            description=model_descr,
+            weights_size=weights_size
+        )
+
+    def to_main_json(self):
+        return {
+            key: getattr(self, key)
+            for key in self._main_fields
+        }
+
+
+class TestSession:
+    def __init__(self, executable: Path, ir_cache_dirs: list[Path], devices: list[str], api=None, report_reference=False, log_dir=None):
+        self.executable = executable
+        self.test_name = executable.stem.removeprefix("test_")
+        self.ir_cache_dirs = ir_cache_dirs
+        self.devices = devices
+        self.report_api = api
+        self.report_reference = report_reference
+        self.test_info = self.get_test_info()
+
+        self.report_metadata = None
+        if self.report_api:
+            self.detect_report_metadata()
+
+        # logging setup
+        self.log_dir: Path | None = log_dir
+        self.test_case_log = None
+        if self.log_dir:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            self.test_case_log_file = (self.log_dir / "test_cases.csv").open("w", newline="")
+            self.test_case_log = csv.DictWriter(
+                self.test_case_log_file, TestCase._main_fields)
+            self.test_case_log.writeheader()
+
+    def get_test_info(self):
+        result = run_test_executable_extract_result([str(self.executable), "--info"])
+        if "error" in result:
+            raise Exception(f"Test executable does not behave correctly: {result}")
+        if "samples" not in result:
+            raise Exception(f"Unexpected test info: {result}")
+        return result
+
+    def api(self, method, data=None, **kwargs):
+        extra_args: dict[str, Any] = {"timeout": 30}
+        extra_args.update(kwargs)
+        if self.report_api is None:
+            raise Exception("Report API was not specified")
+        if requests is None:
+            raise Exception("`requests` need to be installed to contact Report API")
+        endpoint = f"{self.report_api}/api/{method}"
+        response = requests.post(endpoint, json=data, **extra_args)
+        if not response.ok:
+            print(f"API Error: {response.text}")
+        return response.json()
+
+    def api_push_test_result(self, test: TestCase, result):
+        if not self.report_metadata:
+            print("No job metadata found, no report will be made.")
+            return
+        test_report = []
+        sample_names = result.get("samples", {}).keys() or self.test_info["samples"]
+        for sname in sample_names:
+            sample = result.get("samples", {}).get(sname, MemSample(-1, -1, -1, -1, -1))
+            sample_report = self.report_metadata.copy()
+            sample_report.update({
+                "test_name": f"{result.get('test', self.test_name)}:{sname}",
+                "status": "failed" if "error" in result else "passed",
+                "source": str(test.model_path),
+                "log": result.get("stderr", ""),
+                "model_name": test.model_name,
+                "model": test.model_id,
+                "device": result.get("device") or test.device,
+                "framework": test.framework,
+                "precision": test.precision,
+                "metrics": sample.as_dict(),
+                "cpu_family": CPU_FAMILY,
+                "model_size": test.weights_size,
+                "ext": {"originalSource": test.original_model}
+            })
+            test_report.append(sample_report)
+        response = attempt(self.api, "v2/memory/push-2-db-facade", {"data": test_report})
+        if response:
+            print(f"Push result to API: {response}")
+
+    def detect_report_metadata(self):
+        try:
+            build_number = os.environ["TT_PRODUCT_BUILD_NUMBER"]
+            self.report_metadata = {
+                "build_url": os.environ["BUILD_URL"],
+                "os": os.environ.get("os", "unknown"),
+                "commit_date": os.environ["commitDate"],
+                "branch": os.environ.get("sourceBranch", "unknown"),
+                "target_branch": os.environ.get("targetBranch", "unknown"),
+                "log_path": os.environ.get("SHARED_LOG_PATH", ""),
+                "version": build_number,
+                "ext": {}
+            }
+        except KeyError as err:
+            if self.report_api:
+                print(f"Environment lacks {err} to upload results to API")
+
+    def scan_directory(self, directory: Path):
+        matching_dirs = sorted(
+            glob.glob(str(directory)),
+            key=lambda item: os.lstat(item).st_ctime
+        )
+        if not matching_dirs:
+            raise Exception(f"{directory} not found")
+        cache_dir = os.path.abspath(os.path.normpath(matching_dirs[-1]))
+        print(f"Scanning requested {directory} -> {cache_dir}")
+
+        found_models = set()
+
+        while True:
+            fileset = set(glob.glob(f"{cache_dir}/**/*.xml", recursive=True))
+            new_files = fileset - found_models
+            if not new_files:
+                # no new tests found, we're finished here
+                return
+            found_models.update(new_files)
+            new_files = sorted(new_files)
+            yield from (
+                (path.removeprefix(cache_dir).replace("\\", "/"), Path(path))
+                for path in new_files
+            )
+
+    def generate_test_cases(self):
+        for ir_cache_dir in self.ir_cache_dirs:
+            for (model_id, model_path) in self.scan_directory(ir_cache_dir):
+                for device in self.devices:
+                    try:
+                        yield TestCase.from_model_path(model_id, model_path, device)
+                    except Exception as ex:
+                        print(f"Warning: TestCase is not correct: {repr(ex)}")
+
+    def run_test_case(self, test_case: TestCase):
+        try:
+            run_num = 3 if self.report_reference else 1
+            results = [
+                run_test_executable_extract_result([
+                    str(self.executable), test_case.model_path, test_case.device])
+                for _ in range(run_num)
+            ]
+            errors = ["error" in r for r in results]
+            if all(errors):
+                return results[0]
+            if run_num > 1 and any(errors):
+                print("Some attempts failed:", repr([r for r in results if "error" in r]))
+            return aggregate_results([r for r in results if "error" not in r])
+        except Exception as ex:
+            print(f"  When running test an unexpected error happened: {ex}")
+            return {"error": "unexpected error", "exception": ex}
+
+    def log_test_result(self, test: TestCase, result):
+        base2_suffixes = ["bytes", "KiB", "MiB", "GiB", "TiB", "PiB"]
+
+        def _base2_human_readable(number):
+            order_of_magnitude = 0
+            one_order_higher = 1 << 10
+            while number > one_order_higher and order_of_magnitude < len(base2_suffixes) - 1:
+                number >>= 10
+                order_of_magnitude += 1
+            suffix = base2_suffixes[order_of_magnitude]
+            return f"{number} {suffix}"
+
+        status = "error" if "error" in result else "ok"
+        weights_size_human_read = _base2_human_readable(test.weights_size)
+        print(f"TEST {test.model_id} ({weights_size_human_read}) x {test.device}: {status}")
+        if status == "error":
+            error = result.get("error")
+            stdout = result.get("stdout")
+            stderr = result.get("stderr")
+            exception = result.get("exception")
+            print(f"  Error: {error}")
+            if stdout:
+                print(f"  stdout: {stdout.strip()}\n  === END OF STDOUT ===")
+            if stderr:
+                print(f"  stderr: {stderr.strip()}\n  === END OF STDERR ===")
+            if exception:
+                print(f"  {repr(exception)}")
+        else:
+            for sname, sample in result["samples"].items():
+                print(f"  {sname:>15}: {sample}")
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+    def log_test_case(self, test: TestCase):
+        if self.test_case_log is None:
+            return
+        self.test_case_log.writerow(test.to_main_json())
+        self.test_case_log_file.flush()
+
+    def run(self):
+        for test in self.generate_test_cases():
+            self.log_test_case(test)
+            result = self.run_test_case(test)
+            if self.report_api:
+                self.api_push_test_result(test, result)
+            self.log_test_result(test, result)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("test_executable", type=Path)
+    parser.add_argument("--ir-cache", "--ir_cache", type=Path, nargs='*', required=True,
+                        help='Path to directory with *.xml model files; '
+                        'can be a wildcard expression, among all directories '
+                        'that match the expression the newest is taken; '
+                        'inside the directory all *.xml files are listed;'
+                        'can be used more than once, but directories content'
+                        'must not intersect')
+    parser.add_argument("--devices", default="CPU")
+
+    parser.add_argument("--api", help="API endpoint for results to upload")
+    parser.add_argument("--upload-reference", "--reference", action="store_true",
+                        help="This run will make new reference values")
+    parser.add_argument("--log-dir", type=Path, default=None,
+                        help="Path to directory to write logs to")
+
+    args = parser.parse_args()
+
+    TestSession(
+        args.test_executable,
+        args.ir_cache,
+        [device.upper() for device in args.devices.split(",")],
+        args.api,
+        args.upload_reference,
+        args.log_dir
+    ).run()

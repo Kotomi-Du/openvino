@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -31,7 +31,7 @@ public:
                            const MemoryDescPtr& dstDesc,
                            const ExecutorContext::CPtr& context)
         : ExecutorFactoryLegacy(context) {
-        for (auto& desc : getConvertExecutorsList()) {
+        for (const auto& desc : getConvertExecutorsList()) {
             if (desc.builder->isSupported(convertParams, srcDesc, dstDesc)) {
                 supportedDescs.push_back(desc);
             }

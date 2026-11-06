@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -74,13 +74,10 @@ else()
     set(STYLE_CHECKS_DEFAULT ON)
 endif()
 
-ov_option (ENABLE_CPPLINT "Enable cpplint checks during the build" ${STYLE_CHECKS_DEFAULT})
-
-ov_dependent_option (ENABLE_CPPLINT_REPORT "Build cpplint report instead of failing the build" OFF "ENABLE_CPPLINT" OFF)
-
 ov_option (ENABLE_CLANG_FORMAT "Enable clang-format checks during the build" ${STYLE_CHECKS_DEFAULT})
 
 ov_option (ENABLE_CLANG_TIDY "Enable clang-tidy checks during the build" OFF)
+ov_dependent_option (ENABLE_CLANG_TIDY_FIX "Enable clang-tidy automatic fixes during the build" OFF "ENABLE_CLANG_TIDY" OFF)
 
 ov_option (ENABLE_NCC_STYLE "Enable ncc style check" ${STYLE_CHECKS_DEFAULT})
 

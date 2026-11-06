@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,7 @@ namespace kernel_selector {
 class ReorderWeightsKernelInt4 : public ReorderKernelBase {
 public:
     ReorderWeightsKernelInt4() : ReorderKernelBase("reorder_weights_int4") {}
-    virtual ~ReorderWeightsKernelInt4() {}
+    ~ReorderWeightsKernelInt4() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

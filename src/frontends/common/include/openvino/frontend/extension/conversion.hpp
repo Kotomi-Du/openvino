@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,8 +8,7 @@
 #include "openvino/frontend/node_context.hpp"
 #include "openvino/frontend/visibility.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 
 class FRONTEND_API ConversionExtensionBase : public Extension {
 public:
@@ -65,5 +64,4 @@ private:
     CreatorFunctionNamedAndIndexed m_converter_named_and_indexed;
 };
 
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -37,8 +37,8 @@ private:
     static void TransposeSingleAxisOutwards(const MemoryCPtr& input, const MemoryPtr& output, size_t from, size_t to);
     static void TransposeSingleAxisInwards(const MemoryCPtr& input, const MemoryPtr& output, size_t from, size_t to);
 
-    size_t from;
-    size_t to;
+    size_t from = 0UL;
+    size_t to = 0UL;
 };
 
 class MlasTransposeExecutorBuilder : public TransposeExecutorBuilder {
@@ -47,7 +47,7 @@ public:
                                    const std::vector<MemoryDescPtr>& srcDescs,
                                    const std::vector<MemoryDescPtr>& dstDescs) const override;
 
-    [[nodiscard]] TransposeExecutorPtr makeExecutor(const ExecutorContext::CPtr context) const override;
+    [[nodiscard]] TransposeExecutorPtr makeExecutor(ExecutorContext::CPtr context) const override;
 };
 
 }  // namespace ov::intel_cpu

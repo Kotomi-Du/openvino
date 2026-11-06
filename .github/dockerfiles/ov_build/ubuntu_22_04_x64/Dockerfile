@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 ARG REGISTRY="docker.io"
 FROM ${REGISTRY}/library/ubuntu:22.04
 
@@ -18,40 +21,37 @@ RUN apt-get update && \
     add-apt-repository --yes --no-update ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install \
-        curl \
-        git \
-        gpg-agent \
-        tzdata \
-        libtbb2 \
-        # parallel gzip
-        pigz \
-        # Pythons
-        python3.9-dev \
-        python3.9-venv \
-        python3.9-distutils \
-        python3.10-dev \
-        python3.10-venv \
-        python3.10-distutils \
-        python3.11-dev \
-        python3.11-venv \
-        python3.11-distutils \
-        python3.12-dev \
-        python3.12-venv \
-        python3.13-dev \
-        python3.13-venv \
-        # For Java API
-        default-jdk \
-        # To build documentation
-        graphviz \
-        texlive \
-        liblua5.2-0 \
-        # JS API
-        xvfb \
-        libgtk-3-0 \
-        libgbm1 \
-        # ONNX Runtime
-        language-pack-en \
-        && \
+    curl \
+    git \
+    gpg-agent \
+    tzdata \
+    libtbb2 \
+    # parallel gzip
+    pigz \
+    # Pythons
+    python3.11-dev \
+    python3.11-venv \
+    python3.11-distutils \
+    python3.12-dev \
+    python3.12-venv \
+    python3.13-dev \
+    python3.13-venv \
+    python3.14-nogil \
+    python3.14-venv \
+    python3.14-dev \
+    # For Java API
+    default-jdk \
+    # To build documentation
+    graphviz \
+    texlive \
+    liblua5.2-0 \
+    # JS API
+    xvfb \
+    libgtk-3-0 \
+    libgbm1 \
+    # ONNX Runtime
+    language-pack-en \
+    && \
     rm -rf /var/lib/apt/lists/*
 
 # Install build dependencies
@@ -61,7 +61,7 @@ RUN chmod +x /install_build_dependencies.sh && \
     rm -rf /var/lib/apt/lists/*
 
 # Install sscache
-ARG SCCACHE_VERSION="v0.7.5"
+ARG SCCACHE_VERSION="v0.18.0"
 ENV SCCACHE_HOME="/opt/sccache" \
     SCCACHE_PATH="/opt/sccache/sccache"
 
@@ -70,16 +70,22 @@ RUN mkdir ${SCCACHE_HOME} && cd ${SCCACHE_HOME} && \
     curl -SLO https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/${SCCACHE_ARCHIVE} && \
     tar -xzf ${SCCACHE_ARCHIVE} --strip-components=1 && rm ${SCCACHE_ARCHIVE}
 
+# Install custom cmake (4.0+)
+RUN wget https://cmake.org/files/v4.1/cmake-4.1.1-linux-x86_64.sh && \
+    sh cmake-4.1.1-linux-x86_64.sh --skip-license --prefix=/usr/local && \
+    rm cmake-4.1.1-linux-x86_64.sh
+
 ENV PATH="$SCCACHE_HOME:$PATH"
+
 # Setup pip
 ENV PIP_VERSION="24.0"
 RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     python3 get-pip.py  --no-cache-dir pip==${PIP_VERSION} && \
-    python3.9 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
-    python3.10 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
     python3.11 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
     python3.12 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
     python3.13 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
+    python3.14 get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
+    python3.14t get-pip.py --no-cache-dir pip==${PIP_VERSION} && \
     rm -f get-pip.py
 
 # Use Python 3.11 as default
@@ -87,13 +93,15 @@ RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
 RUN python3.11 -m venv venv
 ENV PATH="/venv/bin:$SCCACHE_HOME:$PATH"
 
-ENV PIP_CACHE_DIR=/mount/caches/pip/linux/${PIP_VERSION}
+# Install newer ninja (apt ships 1.10.1 on 22.04 which lacks --quiet)
+RUN python3 -m pip install --no-cache-dir ninja==1.13.0
+
 
 # ONNX Runtime, see https://github.com/microsoft/onnxruntime/issues/13197#issuecomment-1264542497
 RUN locale-gen en_US.UTF-8 && update-locale LANG=en_US.UTF-8
 
 # Install Node
-ENV NODE_VERSION=21.7.3
+ENV NODE_VERSION=22.23.2
 ENV NVM_DIR=/.nvm
 RUN mkdir -p $NVM_DIR
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
@@ -102,9 +110,8 @@ ENV PATH="$NVM_DIR/versions/node/v${NODE_VERSION}/bin/:${PATH}"
 
 # Install doxygen
 ENV DOXYGEN_HOME="/opt/doxygen"
-ENV DOXYGEN_VERSION='1.9.6'
+ENV DOXYGEN_VERSION='1.18.0'
 RUN mkdir -p ${DOXYGEN_HOME} && cd ${DOXYGEN_HOME} && wget https://www.doxygen.nl/files/doxygen-$DOXYGEN_VERSION.linux.bin.tar.gz && \
     tar -I pigz -xf doxygen-$DOXYGEN_VERSION.linux.bin.tar.gz && \
     rm -f doxygen-$DOXYGEN_VERSION.linux.bin.tar.gz
 ENV PATH="${DOXYGEN_HOME}/doxygen-$DOXYGEN_VERSION/bin:$PATH"
-

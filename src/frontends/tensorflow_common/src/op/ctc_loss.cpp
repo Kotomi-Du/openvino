@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -21,10 +21,7 @@ using namespace ov::frontend;
 using namespace ov::frontend::tensorflow;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 OutputVector translate_ctc_loss_op(const NodeContext& node) {
     // this is a translator for CTCLoss v1 aka tf.compat.v1.nn.ctc_loss
@@ -65,7 +62,7 @@ OutputVector translate_ctc_loss_op(const NodeContext& node) {
     auto labels = make_shared<v3::Broadcast>(minus_one, dense_shape)->output(0);
     labels = make_shared<v3::ScatterNDUpdate>(labels, decoded_indices, decoded_values);
 
-    // compute label_lenght for each batch
+    // compute label_length for each batch
     auto minus_one_mask = make_shared<v1::Equal>(labels, minus_one);
     auto mask01 = make_shared<v1::Select>(minus_one_mask,
                                           make_shared<v0::Constant>(element::i64, Shape{}, 0),
@@ -82,7 +79,4 @@ OutputVector translate_ctc_loss_op(const NodeContext& node) {
     set_node_name(node.get_name(), ctc_loss);
     return {ctc_loss};
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import nullcontext as does_not_raise
@@ -226,6 +226,10 @@ def test_batched_tensors(device):
         for idx in range(0, batch):
             assert np.array_equal(actual[idx], _tmp)
 
+    with does_not_raise():
+        req.set_tensors("tensor_input0", tensors)
+        req.set_tensors(req.model_inputs[0], tensors)
+
 
 def test_inputs_outputs_property_and_method(device):
     num_inputs = 10
@@ -308,11 +312,41 @@ def test_infer_mixed_keys(device, share_inputs):
 ])
 @pytest.mark.parametrize("share_inputs", [True, False])
 def test_infer_mixed_values(device, ov_type, numpy_dtype, share_inputs):
-    request, tensor1, array1 = generate_concat_compiled_model_with_data(device=device, ov_type=ov_type, numpy_dtype=numpy_dtype)
+    request, tensor1, array1 = generate_concat_compiled_model_with_data(
+        device=device, ov_type=ov_type, numpy_dtype=numpy_dtype
+    )
 
     request.infer([tensor1, array1], share_inputs=share_inputs)
 
     assert np.array_equal(request.output_tensors[0].data, np.concatenate((tensor1.data, array1)))
+
+
+@pytest.mark.parametrize("numpy_dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("share_inputs", [True, False])
+@pytest.mark.parametrize("as_dict", [True, False])
+def test_infer_bf16_input_from_float_array(device, numpy_dtype, share_inputs, as_dict):
+    param = ops.parameter([4], Type.bf16)
+    model = Model([ops.convert(param, Type.f32)], [param])
+    request = Core().compile_model(model, device).create_infer_request()
+    # The values are exact in bf16, so the model must return them unchanged
+    data = np.array([1.5, 3.0, -2.0, 0.15625], dtype=numpy_dtype)
+
+    result = request.infer({0: data} if as_dict else [data], share_inputs=share_inputs)
+
+    assert np.array_equal(result[0], data.astype(np.float32))
+
+
+@pytest.mark.parametrize("share_inputs", [True, False])
+def test_infer_bf16_input_rounds_like_constant(device, share_inputs):
+    # Values that need rounding must get the same bf16 bits as OpenVINO's own f32 -> bf16 conversion
+    data = np.array([0x3F818000, 0x3F80C000, 0x3F808000, 0x3F80FFFF], dtype=np.uint32).view(np.float32)
+    param = ops.parameter(list(data.shape), Type.bf16)
+    request = Core().compile_model(Model([param], [param]), device).create_infer_request()
+
+    request.infer([data], share_inputs=share_inputs)
+
+    expected = ops.constant(data, dtype=Type.bf16).data.view(np.uint16)
+    assert np.array_equal(request.get_input_tensor(0).data.view(np.uint16), expected)
 
 
 @pytest.mark.parametrize(("ov_type", "numpy_dtype"), [
@@ -816,3 +850,20 @@ def test_output_result_to_input():
     with does_not_raise():
         result_2 = compiled_2(result_1, share_inputs=False)
     assert np.array_equal(result_2[0], [[8]])
+
+
+def test_infer_request_tensors_prop(device):
+    compiled_model = generate_add_compiled_model(device, input_shape=[2, 2])
+    request = compiled_model.create_infer_request()
+    inputs = request.input_tensors
+    outputs = request.output_tensors
+
+    assert len(inputs) == 2
+    for input_tensor in inputs:
+        assert input_tensor.get_shape() == Shape([2, 2])
+        assert input_tensor.get_element_type() == Type.f32
+    assert inputs[0].shape == Shape([2, 2])
+    assert isinstance(inputs, list)
+    assert isinstance(outputs, list)
+    assert str(inputs) == "[<Tensor: shape[2,2] type: f32>, <Tensor: shape[2,2] type: f32>]"
+    assert str(outputs) == "[<Tensor: shape[2,2] type: f32>]"  # Check representation

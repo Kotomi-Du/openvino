@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -251,7 +251,7 @@ template <class T> T    get_value(T* ptr, uint32_t index) { return ptr[index]; }
 
 template<typename T>
 void set_values(cldnn::memory::ptr mem, std::initializer_list<T> args) {
-    cldnn::mem_lock<T> ptr(mem, get_test_stream());
+    cldnn::mem_lock<T, cldnn::mem_lock_type::write> ptr(mem, get_test_stream());
 
     auto it = ptr.begin();
     for(auto x : args)
@@ -260,7 +260,7 @@ void set_values(cldnn::memory::ptr mem, std::initializer_list<T> args) {
 
 template<typename T>
 void set_values(cldnn::memory::ptr mem, std::vector<T> args) {
-    cldnn::mem_lock<T> ptr(mem, get_test_stream());
+    cldnn::mem_lock<T, cldnn::mem_lock_type::write> ptr(mem, get_test_stream());
 
     auto it = ptr.begin();
     for (auto x : args)
@@ -269,7 +269,7 @@ void set_values(cldnn::memory::ptr mem, std::vector<T> args) {
 
 template<typename T>
 void set_values_per_batch_and_feature(cldnn::memory::ptr mem, std::vector<T> args) {
-    cldnn::mem_lock<T> mem_ptr(mem, get_test_stream());
+    cldnn::mem_lock<T, cldnn::mem_lock_type::write> mem_ptr(mem, get_test_stream());
     auto&& pitches = mem->get_layout().get_pitches();
     auto&& l = mem->get_layout();
     for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
@@ -286,10 +286,11 @@ void set_values_per_batch_and_feature(cldnn::memory::ptr mem, std::vector<T> arg
 }
 
 template<typename T, typename std::enable_if<std::is_floating_point<T>::value ||
-                                             std::is_same<T, ov::float16>::value>::type* = nullptr>
+                                             std::is_same<T, ov::float16>::value ||
+                                             std::is_same<T, ov::bfloat16>::value>::type* = nullptr>
 void set_random_values(cldnn::memory::ptr mem, bool sign = false, unsigned significand_bit = 8, unsigned scale = 1)
 {
-    cldnn::mem_lock<T> ptr(mem, get_test_stream());
+    cldnn::mem_lock<T, cldnn::mem_lock_type::write> ptr(mem, get_test_stream());
 
     std::mt19937 gen;
     for (auto it = ptr.begin(); it != ptr.end(); ++it) {
@@ -303,7 +304,7 @@ void set_random_values(cldnn::memory::ptr mem)
     using T1 = typename std::conditional<std::is_same<int8_t, T>::value, int, T>::type;
     using T2 = typename std::conditional<std::is_same<uint8_t, T1>::value, unsigned int, T1>::type;
 
-    cldnn::mem_lock<T> ptr(mem, get_test_stream());
+    cldnn::mem_lock<T, cldnn::mem_lock_type::write> ptr(mem, get_test_stream());
 
     std::mt19937 gen;
     static std::uniform_int_distribution<T2> uid(std::numeric_limits<T>::min(), std::numeric_limits<T>::max());
@@ -369,6 +370,19 @@ inline bool floating_point_equal(ov::float16 x, ov::float16 y, int max_ulps_diff
     }
 }
 
+inline bool floating_point_equal(ov::bfloat16 x, ov::bfloat16 y, int max_ulps_diff = 4) {
+    int16_t sign_bit_mask = 1;
+    sign_bit_mask <<= 15;
+    int16_t a = reinterpret_cast<int16_t&>(x), b = reinterpret_cast<int16_t&>(y);
+    if ((a & sign_bit_mask) != (b & sign_bit_mask)) {
+        a &= ~sign_bit_mask;
+        b &= ~sign_bit_mask;
+        return a == 0 && b == 0;
+    } else {
+        return std::abs(a - b) < (1 << (max_ulps_diff));
+    }
+}
+
 inline bool floating_point_equal(float x, float y, int max_ulps_diff = 4) {
     int32_t sign_bit_mask = 1;
     sign_bit_mask <<= 31;
@@ -381,6 +395,36 @@ inline bool floating_point_equal(float x, float y, int max_ulps_diff = 4) {
     else {
         return std::abs(a - b) < (1 << (max_ulps_diff));
     }
+}
+
+template <typename vecElementType>
+std::string vec2str(const std::vector<vecElementType>& vec) {
+    if (!vec.empty()) {
+        std::ostringstream result;
+        result << "(";
+        std::copy(vec.begin(), vec.end() - 1, std::ostream_iterator<vecElementType>(result, "."));
+        result << vec.back() << ")";
+        return result.str();
+    }
+    return "()";
+}
+
+template <typename T>
+inline float cosineSimilarity(cldnn::mem_lock<T, cldnn::mem_lock_type::read>& vec1, cldnn::mem_lock<T, cldnn::mem_lock_type::read>& memLockVec2) {
+    if (vec1.size() != memLockVec2.size()) {
+        return -1.0f;
+    }
+
+    float dotProduct = std::inner_product(vec1.begin(), vec1.end(), memLockVec2.begin(), 0.0f);
+
+    float magnitude1 = std::sqrt(std::inner_product(vec1.begin(), vec1.end(), vec1.begin(), 0.0f));
+    float magnitude2 = std::sqrt(std::inner_product(memLockVec2.begin(), memLockVec2.end(), memLockVec2.begin(), 0.0f));
+
+    if (magnitude1 == 0.0f || magnitude2 == 0.0f) {
+        return -1.0f;
+    }
+
+    return dotProduct / (magnitude1 * magnitude2);
 }
 
 class test_params {
@@ -574,6 +618,8 @@ inline std::vector<float> get_output_values_to_float(cldnn::network& net, const 
     switch(output.get_layout().data_type){
         case cldnn::data_types::f16:
             return get_output_values_to_float<ov::float16>(net, output, max_cnt);
+        case cldnn::data_types::bf16:
+            return get_output_values_to_float<ov::bfloat16>(net, output, max_cnt);
         case cldnn::data_types::f32:
             return get_output_values_to_float<float>(net, output, max_cnt);
         case cldnn::data_types::i8:

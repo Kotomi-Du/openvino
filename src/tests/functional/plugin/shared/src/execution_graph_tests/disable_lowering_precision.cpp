@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,20 +15,17 @@
 #include "common_test_utils/ov_plugin_cache.hpp"
 #include "functional_test_utils/skip_tests_config.hpp"
 #include "execution_graph_tests/disable_lowering_precision.hpp"
-#include "transformations/rt_info/disable_fp16_compression.hpp"
+#include "transformations/rt_info/disable_precision_conversion.hpp"
 #include "openvino/op/matmul.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/constant.hpp"
 
 namespace ExecutionGraphTests {
 
-std::string ExecGraphDisableLoweringPrecision::getTestCaseName(testing::TestParamInfo<ExecGraphDisableLoweringPrecisionSpecificParams> obj) {
+std::string ExecGraphDisableLoweringPrecision::getTestCaseName(const testing::TestParamInfo<ExecGraphDisableLoweringPrecisionSpecificParams>& obj) {
     std::ostringstream result;
-    bool disableLoweringPrecision;
-    std::string targetDevice;
-    ov::element::Type loweringPrecision;
 
-    std::tie(disableLoweringPrecision, targetDevice, loweringPrecision) = obj.param;
+    const auto& [disableLoweringPrecision, targetDevice, loweringPrecision] = obj.param;
     result << "matmul_disable_lowingprecision=" << disableLoweringPrecision << "_";
     result << "device=" << targetDevice << "_";
     result << "loweringPrecision=" << loweringPrecision.to_string();
@@ -65,7 +62,7 @@ void ExecGraphDisableLoweringPrecision::create_model() {
     auto matmul = std::make_shared<ov::op::v0::MatMul>(A, weightConvert);
     matmul->set_friendly_name("Matmul0");
     if (disableLoweringPrecision)
-        ov::disable_fp16_compression(matmul);
+        ov::disable_conversion(matmul, ov::element::f16);
     funcPtr = std::make_shared<ov::Model>(matmul->outputs(), ov::ParameterVector{A}, "testModel");
 }
 

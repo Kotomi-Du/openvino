@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,10 +7,7 @@
 #include "pt_framework_node.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 OutputVector translate_get_attr(const NodeContext& context) {
     auto decoder = context.get_decoder();
@@ -24,7 +21,7 @@ OutputVector translate_get_attr(const NodeContext& context) {
             res[0].add_names({node->get_friendly_name()});
         }
         auto dtype = decoder->get_output_type(0);
-        if (dtype.is<type::Complex>()) {
+        if (simplified_type_interpret(dtype).is<type::Complex>()) {
             // Add complex mark to complex constant
             res = {context.mark_node(std::make_shared<ComplexTypeMark>(res[0], res[0].get_element_type()))};
         }
@@ -40,7 +37,4 @@ OutputVector translate_get_attr(const NodeContext& context) {
     }
 }
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,5 +26,5 @@ bool ov::util::reduce_and(const ov::Tensor& t) {
     std::iota(axes.data<int64_t>(), axes.data<int64_t>() + t.get_shape().size(), 0);
     if (!ov::op::v1::ReduceLogicalAnd().evaluate(outputs, {t, std::move(axes)}))
         return false;
-    return outputs[0].data<char>();
+    return *outputs[0].data<char>();
 }

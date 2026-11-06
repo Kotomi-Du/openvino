@@ -56,7 +56,7 @@ distilbert,distilbert/distilbert-base-uncased-finetuned-sst-2-english
 donut-swin,pasusarla/donut_encoder
 dpr,facebook/dpr-question_encoder-single-nq-base
 dpt,Intel/dpt-large
-efficientformer,DunnBC22/efficientformer-l3-300-Brain_Tumors_Image_Classification
+efficientformer,snap-research/efficientformer-l1-300
 efficientnet,google/efficientnet-b7,xfail,Compile error: AvgPool: Kernel after dilation has size (dim: 2560) larger than the data shape after padding (dim: 19) at axis 0.
 electra,google/electra-base-discriminator
 encodec,facebook/encodec_24khz
@@ -87,7 +87,7 @@ hiera,namangarg110/hiera_base_224
 hifigan,microsoft/speecht5_hifigan,xfail,Load error: The size of tensor a (100) must match the size of tensor b (80) at non-singleton dimension 1
 hubert,facebook/hubert-large-ls960-ft
 hybridbert,gokuls/bert_12_layer_model_v1
-ibert,DunnBC22/ibert-roberta-base-Abusive_Or_Threatening_Speech
+ibert,kssteven/ibert-roberta-base
 idefics,HuggingFaceM4/tiny-random-idefics
 imagegpt,openai/imagegpt-small
 informer,huggingface/informer-tourism-monthly,xfail,Load error: mat1 and mat2 shapes cannot be multiplied

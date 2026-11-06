@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -69,7 +69,6 @@ public:
                                                                    testValues.inputShape,
                                                                    testValues.expected.inputPrecision,
                                                                    testValues.expected.dequantizationBefore,
-                                                                   testValues.expected.precisionAfterOperation,
                                                                    testValues.expected.dequantizationAfter,
                                                                    testValues.splitedAxis,
                                                                    testValues.numSplits);

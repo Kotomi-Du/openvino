@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -22,15 +22,16 @@ void handle_reshape::run(program& p) {
     // Remove reshapes that don't change the layout of output
     auto node_itr = p.get_processing_order().begin();
     while (node_itr != p.get_processing_order().end()) {
-        auto node = (*node_itr++);
+        auto* node = (*node_itr++);
         program_helpers::do_for_types<reshape>(*node, [&p](reshape_node& node) {
             auto& input_node = node.input();
             auto input_lay = input_node.get_output_layout();
             auto output_lay = node.get_output_layout();
 
             if (!node.is_in_place() ||
-                node.has_fused_primitives())
+                node.has_fused_primitives()) {
                 return;
+            }
 
             if (input_lay.identical(output_lay)) {
                 p.add_optimized_primitive_info(node.id());
@@ -50,15 +51,17 @@ void handle_reshape::run(program& p) {
     // permute+reshape+reshape in cldnn and can be simplified to permute+reshape.
     node_itr = p.get_processing_order().begin();
     while (node_itr != p.get_processing_order().end()) {
-        auto& node = (*node_itr++);
+        const auto& node = (*node_itr++);
         program_helpers::do_for_types<reshape>(*node, [&p](reshape_node& node) {
-            if (node.is_output() || node.get_users().size() > 1 || node.has_fused_primitives() || node.is_dynamic())
+            if (node.is_output() || node.get_users().size() > 1 || node.has_fused_primitives() || node.is_dynamic()) {
                 return;
+            }
 
-            auto& out_node = node.get_users().front();
+            const auto& out_node = node.get_users().front();
 
-            if (!out_node->is_type<reshape>())
+            if (!out_node->is_type<reshape>()) {
                 return;
+            }
 
             const auto& out_reshape = out_node->as<reshape>();
             // In case of new shape infer we should not shrink reshapes chain if first reshape changes input rank, e.g.
@@ -66,8 +69,9 @@ void handle_reshape::run(program& p) {
             // Configuration above will fail if we remove reshape1 node as attempt to handle special zero will fail due to small rank of input
             if (p.is_new_shape_infer() &&
                 out_node->get_output_pshape().size() != node.get_input_pshape().size() &&
-                (out_reshape.get_primitive()->special_zero || node.get_primitive()->special_zero))
+                (out_reshape.get_primitive()->special_zero || node.get_primitive()->special_zero)) {
                 return;
+            }
 
             p.extract_and_remove(node);
         });
@@ -77,10 +81,11 @@ void handle_reshape::run(program& p) {
         if (node->is_type<reshape>()) {
             const auto& dep = node->get_dependency_with_port(0);
             auto& input_node = *dep.first;
-            auto& input_port = dep.second;
+            const auto& input_port = dep.second;
 
-            if (input_node.is_type<reorder>())
+            if (input_node.is_type<reorder>()) {
                 continue;
+            }
 
             node->get_output_layout();
 
@@ -93,10 +98,12 @@ void handle_reshape::run(program& p) {
             // find users who are onednn impl
             for (const auto& user : node->get_users()) {
                 if (user->is_type<reorder>() &&
-                    (*user).as<reorder>().get_primitive()->truncate == false)   // not to split conversion only reorder
+                    !(*user).as<reorder>().get_primitive()->truncate) {   // not to split conversion only reorder
                     reorder_node_to_split.push_back(user);
-                if (user->can_use(impl_types::onednn))
+                }
+                if (user->can_use(impl_types::onednn)) {
                     onednn_users.push_back(user);
+                }
             }
 
             // If onednn user doesn't support new input data type from future "reorder:_reshape_input_" reorder,
@@ -140,8 +147,9 @@ void handle_reshape::run(program& p) {
                     // reshape node for first user will be the orginal reshape from the graph
                     if (!found_one) {
                         if ((std::find(reorder_node_to_split.begin(), reorder_node_to_split.end(), user) !=
-                            reorder_node_to_split.end()) && (user->get_output_layout().get_rank() == node->get_output_layout().get_rank()))
+                            reorder_node_to_split.end()) && (user->get_output_layout().get_rank() == node->get_output_layout().get_rank())) {
                             reorder_reshape_nodes.push_back(node);
+                        }
                         found_one = true;
                         continue;
                     }
@@ -172,8 +180,9 @@ void handle_reshape::run(program& p) {
                     }
                 }
 
-                if (reorder_reshape_nodes.size() == 0)
+                if (reorder_reshape_nodes.empty()) {
                     continue;
+                }
 
                 // add new reorder nodes to proper reshape node
                 auto reshape_reorder_id = 0;
@@ -201,22 +210,22 @@ void handle_reshape::run(program& p) {
                 }
             }
 
-            auto reshape_layout = node->get_output_layout();
-            auto target_format = format::get_default_format(reshape_layout.get_rank());
             auto input_layout = input_node.get_output_layout();
-            auto target_layout = layout({reshape_layout.get_partial_shape(), reshape_layout.data_type, target_format});
+            auto reshape_layout = node->get_output_layout();
+            auto expected_reshape_format = format::get_default_format(reshape_layout.get_rank());
+            auto expected_reshape_layout = layout({reshape_layout.get_partial_shape(), reshape_layout.data_type, expected_reshape_format});
 
             if (!(node->is_output()) &&
-                 (((reshape_layout.format != target_format) && !reshape_layout.compatible(target_layout)) ||
+                 (((reshape_layout.format != expected_reshape_format) && !reshape_layout.compatible(expected_reshape_layout)) ||
                  (reshape_layout.format != input_layout.format))) {
                 // when some primitive does an implicit reorder to some other format then we lose the info about pitches
                 // in reshape stage we assume user provides the input vector in bfyx
-
                 // Check whether input reorder is required for format change
                 if (!format::is_simple_data_format(input_layout.format)) {
+                    auto preferred_input_format = format::get_default_format(input_layout.get_rank());
                     auto reshape_input = std::make_shared<reorder>("reorder:_reshape_input_" + node->id(),
                                                                 cldnn::input_info(input_node.id(), input_port),
-                                                                target_format,
+                                                                preferred_input_format,
                                                                 reshape_layout.data_type);
                     GPU_DEBUG_LOG << "reshape_handler: " << reshape_input->id
                         << " input_info : " << reshape_input->dependencies().front().to_string() << std::endl;
@@ -227,7 +236,7 @@ void handle_reshape::run(program& p) {
                 }
 
                 // Check whether output reorder is required for format change
-                if (reshape_layout.format != target_format) {
+                if (reshape_layout.format != expected_reshape_format) {
                     auto reshape_users = node->get_users();
                     for (const auto& user : reshape_users) {
                         auto reshape_output = std::make_shared<reorder>("reorder:_reshape_output_" + node->id(),

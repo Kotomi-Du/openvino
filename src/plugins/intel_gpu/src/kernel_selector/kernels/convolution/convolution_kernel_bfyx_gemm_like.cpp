@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -37,9 +37,8 @@ DeviceFeaturesKey ConvolutionKernel_bfyx_GEMMLike::get_required_device_features_
 std::string ConvolutionKernel_bfyx_GEMMLike::GetKernelName(const convolution_params& params) const {
     if (params.inputs[0].GetDType() == Datatype::F32) {
         return kernelName + "_fp32";
-    } else {
-        return kernelName + "_fp16";
     }
+    return kernelName + "_fp16";
 }
 
 JitConstants ConvolutionKernel_bfyx_GEMMLike::GetJitConstants(const convolution_params& params,
@@ -58,8 +57,9 @@ JitConstants ConvolutionKernel_bfyx_GEMMLike::GetJitConstants(const convolution_
     if (CeilDiv(RoundUp(params.outputs[0].X().v * params.outputs[0].Y().v, dispatchData.gemmStyle.subBlockDimM),
                 dispatchData.gemmStyle.globalWorkSizeDY) %
             dispatchData.lws[1] !=
-        0)
+        0) {
         jit.AddConstant(MakeJitConstant("LEFTOVERS", 1));
+    }
 
     return jit;
 }
@@ -98,23 +98,24 @@ KernelsPriority ConvolutionKernel_bfyx_GEMMLike::GetKernelsPriority(const Params
 
 bool ConvolutionKernel_bfyx_GEMMLike::Validate(const Params& p) const {
     if (!Parent::Validate(p) || !ConvolutionCheckInput(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const auto& params = static_cast<const convolution_params&>(p);
 
-    if (!IsSIMDSizeSupported(p.engineInfo, 8) && params.inputs[0].GetDType() == Datatype::F32)
-        return false;
+    if (!IsSIMDSizeSupported(p.engineInfo, 8) && params.inputs[0].GetDType() == Datatype::F32) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     if (!params.engineInfo.supports_intel_subgroups_short && params.inputs[0].GetDType() == Datatype::F16) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     // Limit filter_x_size to 32 because convolution ref kernel is faster than GEMMLike kernel when filter size is bigger.
     // 32 is chosen from filter size of customer model. May need to more measurement to pick optimal value
     const size_t acceptable_filter_x_size = 32;
     if (params.filterSize.x > acceptable_filter_x_size) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     return true;
@@ -124,9 +125,8 @@ WeightsLayout ConvolutionKernel_bfyx_GEMMLike::GetPreferredWeightsLayout(
         const convolution_params &params) const {
     if (params.inputs[0].GetDType() == Datatype::F16) {
         return (params.groups > 1) ? WeightsLayout::giy_xs_os_xsv2_osv16__ao32 : WeightsLayout::iy_xs_os_xsv2_osv16__ao32;
-    } else {
-        return (params.groups > 1) ? WeightsLayout::giy_xs_os_xsv2_osv8__ao32 : WeightsLayout::iy_xs_os_xsv2_osv8__ao32;
     }
+    return (params.groups > 1) ? WeightsLayout::giy_xs_os_xsv2_osv8__ao32 : WeightsLayout::iy_xs_os_xsv2_osv8__ao32;
 }
 
 KernelsData ConvolutionKernel_bfyx_GEMMLike::GetKernelsData(const Params& params) const {

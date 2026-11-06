@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -93,19 +93,21 @@ def main() -> int:
     # - precision of tensor is supposed to be 'f32'
     ppp.output().tensor().set_element_type(ov.Type.f32)
 
-    # 4) Apply preprocessing modifing the original 'model'
+    # 4) Apply preprocessing modifying the original 'model'
     model = ppp.build()
 
     # --------------------------- Step 4. Set up input --------------------------------------------------------------------
-    # Read input images
-    images = (cv2.imread(image_path) for image_path in args.input)
-
-    # Resize images to model input dims
+    # Read input images and resize each one to the model input dims right away,
+    # so only the small resized copies stay in memory
     _, h, w, _ = model.input().shape
-    resized_images = (cv2.resize(image, (w, h)) for image in images)
-
-    # Add N dimension
-    input_tensors = (np.expand_dims(image, 0) for image in resized_images)
+    input_tensors = []
+    for image_path in args.input:
+        image = cv2.imread(image_path)
+        if image is None:
+            log.error(f'Failed to read the image: {image_path}')
+            return -1
+        # Add N dimension
+        input_tensors.append(np.expand_dims(cv2.resize(image, (w, h)), 0))
 
 # --------------------------- Step 5. Loading model to the device -----------------------------------------------------
     log.info('Loading the model to the plugin')

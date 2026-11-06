@@ -1,11 +1,24 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
 set(TARGET_NAME "benchmark_app")
 
-file (GLOB SRC ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-file (GLOB HDR ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
+set(SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_filling.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/remote_tensors_filling.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/statistics_report.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/utils.cpp
+)
+set(HDR
+    ${CMAKE_CURRENT_SOURCE_DIR}/benchmark_app.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/infer_request_wrap.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/inputs_filling.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/remote_tensors_filling.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/statistics_report.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/utils.hpp
+)
 
 ov_add_sample(NAME ${TARGET_NAME}
               SOURCES ${SRC}
@@ -101,7 +114,7 @@ if(SAMPLES_ENABLE_OPENCL)
 
         target_link_libraries(${TARGET_NAME} PRIVATE OpenCL::OpenCL)
     else()
-        message(WARNING "OpenCL CPP header is not found, ${TARGET_NAME} will be built without OpenCL support and you will not be able to use the '-use_device_mem' option. Please, install '<apt | yum> install opencl-headers' to enable the option")
+        message(WARNING "OpenCL CPP header is not found, ${TARGET_NAME} will be built without OpenCL support and you will not be able to use the '-use_device_mem' option. Please, install 'apt-get install ocl-icd-opencl-dev' or 'yum install ocl-icd-devel' to enable the option")
     endif()
 endif()
 

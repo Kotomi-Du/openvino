@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -60,7 +60,7 @@ public:
     [[nodiscard]] virtual bool isSupported(const DeconvAttrs& convAttrs,
                                            const std::vector<MemoryDescPtr>& srcDescs,
                                            const std::vector<MemoryDescPtr>& dstDescs) const = 0;
-    [[nodiscard]] virtual DeconvExecutorPtr makeExecutor(const ExecutorContext::CPtr context) const = 0;
+    [[nodiscard]] virtual DeconvExecutorPtr makeExecutor(ExecutorContext::CPtr context) const = 0;
 };
 
 using DeconvExecutorBuilderPtr = std::shared_ptr<DeconvExecutorBuilder>;

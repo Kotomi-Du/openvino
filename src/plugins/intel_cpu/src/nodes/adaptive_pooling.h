@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -17,9 +17,7 @@
 #include "openvino/core/node.hpp"
 #include "openvino/core/type/element_type.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class AdaptivePooling : public Node {
 public:
@@ -33,8 +31,8 @@ public:
     static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
 
 private:
-    int spatialDimsCount;
-    mutable std::vector<Dim> spatialDimsValue = {};
+    size_t spatialDimsCount;
+    mutable std::vector<Dim> spatialDimsValue;
     ov::element::Type precision = ov::element::f32;
     static inline void setBinBorders(size_t* startPtr,
                                      size_t* endPtr,
@@ -50,6 +48,4 @@ protected:
     void executeDynamicImpl(const dnnl::stream& strm) override;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

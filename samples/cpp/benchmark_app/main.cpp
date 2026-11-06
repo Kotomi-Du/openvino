@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -147,7 +147,7 @@ bool parse_and_check_command_line(int argc, char* argv[]) {
         throw std::logic_error("Incorrect API. Please set -api option to `sync` or `async` value.");
     }
     if (FLAGS_api == "sync") {
-        if ((FLAGS_t == 0) && (FLAGS_nireq > FLAGS_niter)) {
+        if ((FLAGS_t == 0) && FLAGS_niter != 0 && (FLAGS_nireq > FLAGS_niter)) {
             throw std::logic_error(
                 "Number of iterations should be greater than number of infer requests when using sync API.");
         }
@@ -159,7 +159,7 @@ bool parse_and_check_command_line(int argc, char* argv[]) {
     }
     if (FLAGS_hint != "none" && (FLAGS_nstreams != "" || FLAGS_nthreads != 0 || FLAGS_pin != "")) {
         throw std::logic_error("-nstreams, -nthreads and -pin options are fine tune options. To use them you "
-                               "should explicitely set -hint option to none. This is not OpenVINO limitation "
+                               "should explicitly set -hint option to none. This is not OpenVINO limitation "
                                "(those options can be used in OpenVINO together), but a benchmark_app UI rule.");
     }
     if (!FLAGS_report_type.empty() && FLAGS_report_type != noCntReport && FLAGS_report_type != averageCntReport &&
@@ -294,9 +294,8 @@ void warn_if_no_batch(const benchmark_app::InputsInfo& first_inputs) {
                      [](const std::pair<const std::string, benchmark_app::InputInfo>& info) {
                          return ov::layout::has_batch(info.second.layout);
                      })) {
-        slog::warn
-            << "No batch dimension was found, asssuming batch to be 1. Beware: this might affect FPS calculation."
-            << slog::endl;
+        slog::warn << "No batch dimension was found, assuming batch to be 1. Beware: this might affect FPS calculation."
+                   << slog::endl;
     }
 }
 
@@ -456,7 +455,7 @@ int main(int argc, char* argv[]) {
         // Remove the hardware devices if AUTO/MULTI/HETERO appears in the devices list.
         if (is_virtual) {
             devices.clear();
-            // Parse out the currect virtual device as the target device.
+            // Parse out the current virtual device as the target device.
             std::string virtual_device = split(device_name, ':').at(0);
             auto iter_virtual = std::find(hardware_devices.begin(), hardware_devices.end(), virtual_device);
             hardware_devices.erase(iter_virtual);
@@ -637,6 +636,11 @@ int main(int argc, char* argv[]) {
             });
         };
 
+        // When -niter 0 is explicitly passed, compile the model and exit without running inference.
+        // This is useful for validating compilation of models with dynamic shapes that would otherwise
+        // require -shape, -data_shape, or -i to be specified.
+        const bool compile_only = isFlagSetInCommandLine("niter") && FLAGS_niter == 0;
+
         if (FLAGS_load_from_file && !isNetworkCompiled) {
             if (!FLAGS_mean_values.empty() || !FLAGS_scale_values.empty()) {
                 throw std::runtime_error("--mean_values and --scale_values aren't supported with --load_from_file. "
@@ -676,7 +680,8 @@ int main(int argc, char* argv[]) {
                                               inputFiles,
                                               FLAGS_scale_values,
                                               FLAGS_mean_values,
-                                              compiledModel.inputs());
+                                              compiledModel.inputs(),
+                                              compile_only);
             if (batchSize == 0) {
                 batchSize = 1;
             }
@@ -724,7 +729,8 @@ int main(int argc, char* argv[]) {
                                               FLAGS_scale_values,
                                               FLAGS_mean_values,
                                               inputInfo,
-                                              reshape);
+                                              reshape,
+                                              compile_only);
             if (reshape) {
                 benchmark_app::PartialShapes shapes = {};
                 for (auto& item : app_inputs_info[0])
@@ -766,9 +772,13 @@ int main(int argc, char* argv[]) {
                     // Some tensors might have no names, get_any_name will throw exception in that case.
                     // -iop option will not work for those tensors.
                     name = item.get_any_name();
-                    iop_precision = getPrecision2(user_precisions_map.at(item.get_any_name()));
                 } catch (...) {
                 }
+                const auto& prc = user_precisions_map.find(name);
+                if (prc != user_precisions_map.end()) {
+                    iop_precision = getPrecision2(prc->second);
+                }
+
                 if (iop_precision != ov::element::dynamic) {
                     type_to_set = iop_precision;
                 } else if (input_precision != ov::element::dynamic) {
@@ -800,12 +810,18 @@ int main(int argc, char* argv[]) {
             for (size_t i = 0; i < outs.size(); i++) {
                 const auto& item = outs[i];
                 auto iop_precision = ov::element::dynamic;
+                std::string name;
                 try {
                     // Some tensors might have no names, get_any_name will throw exception in that case.
                     // -iop option will not work for those tensors.
-                    iop_precision = getPrecision2(user_precisions_map.at(item.get_any_name()));
+                    name = item.get_any_name();
                 } catch (...) {
                 }
+                const auto& prc = user_precisions_map.find(name);
+                if (prc != user_precisions_map.end()) {
+                    iop_precision = getPrecision2(prc->second);
+                }
+
                 if (iop_precision != ov::element::dynamic) {
                     preproc.output(i).tensor().set_element_type(iop_precision);
                 } else if (output_precision != ov::element::dynamic) {
@@ -820,9 +836,13 @@ int main(int argc, char* argv[]) {
 
             topology_name = model->get_friendly_name();
 
-            batchSize = get_batch_size(app_inputs_info.at(0));
-            warn_if_no_batch(app_inputs_info.at(0));
-            slog::info << "Model batch size: " << batchSize << slog::endl;
+            // In compile_only mode dataShape is left empty (no inference will run), so
+            // get_batch_size() would crash. batchSize is only needed for steps 8-10 anyway.
+            if (!compile_only) {
+                batchSize = get_batch_size(app_inputs_info.at(0));
+                warn_if_no_batch(app_inputs_info.at(0));
+                slog::info << "Model batch size: " << batchSize << slog::endl;
+            }
 
             printInputAndOutputsInfoShort(*model);
             // ----------------- 7. Loading the model to the device
@@ -894,16 +914,39 @@ int main(int argc, char* argv[]) {
                                               inputFiles,
                                               FLAGS_scale_values,
                                               FLAGS_mean_values,
-                                              compiledModel.inputs());
+                                              compiledModel.inputs(),
+                                              compile_only);
             isDynamicNetwork = areNetworkInputsDynamic(app_inputs_info.at(0));
 
-            batchSize = get_batch_size(app_inputs_info.at(0));
-            warn_if_no_batch(app_inputs_info.at(0));
-            slog::info << "Model batch size: " << batchSize << slog::endl;
+            // In compile_only mode dataShape is left empty (no inference will run), so
+            // get_batch_size() would crash. batchSize is only needed for steps 8-10 anyway.
+            if (!compile_only) {
+                batchSize = get_batch_size(app_inputs_info.at(0));
+                warn_if_no_batch(app_inputs_info.at(0));
+                slog::info << "Model batch size: " << batchSize << slog::endl;
+            }
 
             if (batchSize == 0) {
                 batchSize = 1;
             }
+        }
+
+        if (compile_only) {
+            slog::info << "Model compiled successfully. Skipping inference due to -niter 0." << slog::endl;
+            next_step("skipped");  // 8 - Querying optimal runtime parameters
+            next_step("skipped");  // 9 - Creating infer requests and preparing input tensors
+            next_step("skipped");  // 10 - Measuring performance
+            // ----------------- 11. Dumping statistics report
+            // -------------------------------------------------------------
+            next_step();
+            if (!FLAGS_dump_config.empty()) {
+                dump_config(FLAGS_dump_config, config);
+                slog::info << "OpenVINO Runtime configuration settings were dumped to " << FLAGS_dump_config
+                           << slog::endl;
+            }
+            if (statistics)
+                statistics->dump();
+            return 0;
         }
 
         bool allow_inference_only_or_sync = can_measure_as_static(app_inputs_info);
@@ -1165,47 +1208,53 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // warming up - out of scope
-        auto inferRequest = inferRequestsQueue.get_idle_request();
-        if (!inferRequest) {
-            OPENVINO_THROW("No idle Infer Requests!");
-        }
+        std::shared_ptr<InferReqWrap> inferRequest;
 
-        if (!inferenceOnly) {
-            auto inputs = app_inputs_info[0];
-
-            for (auto& item : inputs) {
-                auto inputName = item.first;
-                const auto& data = inputsData.at(inputName)[0];
-                inferRequest->set_tensor(inputName, data);
+        // conditional warmup based on FLAGS_no_warmup
+        if (!FLAGS_no_warmup) {
+            // warming up - out of scope
+            inferRequest = inferRequestsQueue.get_idle_request();
+            if (!inferRequest) {
+                OPENVINO_THROW("No idle Infer Requests!");
             }
+            if (!inferenceOnly) {
+                auto inputs = app_inputs_info[0];
 
-            if (useGpuMem) {
-                auto outputTensors =
-                    ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
-                for (auto& output : compiledModel.outputs()) {
-                    inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
+                for (auto& item : inputs) {
+                    auto inputName = item.first;
+                    const auto& data = inputsData.at(inputName)[0];
+                    inferRequest->set_tensor(inputName, data);
+                }
+
+                if (useGpuMem) {
+                    auto outputTensors =
+                        ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
+                    for (auto& output : compiledModel.outputs()) {
+                        inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
+                    }
                 }
             }
-        }
 
-        if (FLAGS_api == "sync") {
-            inferRequest->infer();
+            if (FLAGS_api == "sync") {
+                inferRequest->infer();
+            } else {
+                inferRequest->start_async();
+            }
+
+            inferRequestsQueue.wait_all();
+
+            auto duration_ms = inferRequestsQueue.get_latencies()[0];
+            slog::info << "First inference took " << double_to_string(duration_ms) << " ms" << slog::endl;
+
+            if (statistics) {
+                statistics->add_parameters(
+                    StatisticsReport::Category::EXECUTION_RESULTS,
+                    {StatisticsVariant("first inference time (ms)", "first_inference_time", duration_ms)});
+            }
+            inferRequestsQueue.reset_times();
         } else {
-            inferRequest->start_async();
+            slog::info << "Skipping warmup inference due to -no_warmup flag" << slog::endl;
         }
-
-        inferRequestsQueue.wait_all();
-
-        auto duration_ms = inferRequestsQueue.get_latencies()[0];
-        slog::info << "First inference took " << double_to_string(duration_ms) << " ms" << slog::endl;
-
-        if (statistics) {
-            statistics->add_parameters(
-                StatisticsReport::Category::EXECUTION_RESULTS,
-                {StatisticsVariant("first inference time (ms)", "first_inference_time", duration_ms)});
-        }
-        inferRequestsQueue.reset_times();
 
         size_t processedFramesN = 0;
         auto startTime = Time::now();
@@ -1374,7 +1423,7 @@ int main(int argc, char* argv[]) {
 
         if (device_name.find("MULTI") == std::string::npos) {
             slog::info << "Latency:" << slog::endl;
-            generalLatency.write_to_slog();
+            generalLatency.write_to_slog(true);
 
             if (FLAGS_pcseq && app_inputs_info.size() > 1) {
                 slog::info << "Latency for each data shape group:" << slog::endl;
@@ -1389,7 +1438,7 @@ int main(int argc, char* argv[]) {
                     }
                     slog::info << slog::endl;
 
-                    groupLatencies[i].write_to_slog();
+                    groupLatencies[i].write_to_slog(true);
                 }
             }
         }

@@ -1,4 +1,4 @@
-# Copyright (C) 2024 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import json
@@ -10,6 +10,9 @@ from zipfile import ZipFile
 
 from workflow_rerun.constants import LOGGER
 
+# Fallback category recorded when an error entry or pattern has no category.
+NO_CATEGORY = 'NO CATEGORY'
+
 
 class LogFile(TypedDict):
     file_name: str
@@ -19,19 +22,19 @@ class LogFile(TypedDict):
 class ErrorData(TypedDict):
     error_text: str
     ticket: int
+    category: str
 
 
 class LogAnalyzer:
     def __init__(self,
-                 path_to_log_archive: Path,
+                 path_to_logs: Path,
                  path_to_errors_file: Path) -> None:
-        self._path_to_log_archive = path_to_log_archive
         self._path_to_errors_file = path_to_errors_file
 
         self._errors_to_look_for: list[ErrorData] = []
         self._collect_errors_to_look_for()
 
-        self._log_dir = tempfile.TemporaryDirectory().name
+        self._log_dir = path_to_logs
 
         self._log_files: list[LogFile] = []
         self._collect_log_files()
@@ -40,6 +43,8 @@ class LogAnalyzer:
 
         self.found_matching_error = False
         self.found_error_ticket = None
+        self.matched_error_text = None
+        self.matched_category = None
 
     def _collect_errors_to_look_for(self) -> None:
         with open(file=self._path_to_errors_file,
@@ -48,8 +53,9 @@ class LogAnalyzer:
             errors_data = json.load(errors_file)
             for error_data in errors_data:
                 self._errors_to_look_for.append(
-                    ErrorData(error_text=error_data['error_text'], 
-                              ticket=error_data['ticket'])
+                    ErrorData(error_text=error_data['error_text'],
+                              ticket=error_data['ticket'],
+                              category=error_data.get('category', NO_CATEGORY))
                     )
 
     def _collect_log_files(self) -> None:
@@ -68,19 +74,18 @@ class LogAnalyzer:
             > Job_name_2
                 ...
             ...
-        
+
         We need to only analyze the `*.txt` files
         """
-
-        with ZipFile(file=self._path_to_log_archive,
-                     mode='r') as zip_file:
-            zip_file.extractall(self._log_dir)
 
         for _file in Path(self._log_dir).iterdir():
             if _file.is_dir():
                 for log_file in _file.iterdir():
                     self._log_files.append(LogFile(file_name=log_file.name,
                                                    path=log_file.resolve()))
+            elif _file.suffix == '.txt':
+                self._log_files.append(LogFile(file_name=_file.name,
+                                               path=_file.resolve()))
 
     def _is_error_in_log(self,
                          error_to_look_for: str,
@@ -104,9 +109,9 @@ class LogAnalyzer:
         """
         Replaces special characters with spaces in the string, strips it from leading and following spaces,
         and lowers it
-        
+
         for "Could not resolve host: github.com" returns "could not resolve host github com"
-        
+
         This cleanup is applied to both errors to look for and logs themselves for matching
         """
         return re.sub(r'[^A-Za-z0-9]+', ' ', string).lower().strip()
@@ -117,20 +122,23 @@ class LogAnalyzer:
         """
         for error in self._errors_to_look_for:
 
-            LOGGER.info(f'LOOKING FOR "{error["error_text"]}" ERROR...')
+            LOGGER.info(f'LOOKING FOR "{error["error_text"]}" ERROR (CATEGORY: {error["category"]})...')
 
             for log_file in self._log_files:
                 if self._is_error_in_log(error_to_look_for=error['error_text'],
                                          log_file_path=log_file['path']):
-                    LOGGER.info(f'FOUND "{error["error_text"]}" ERROR IN {log_file["path"]}. TICKET: {error["ticket"]}')
+                    LOGGER.info(f'FOUND "{error["error_text"]}" ERROR IN {log_file["path"]}. '
+                                f'TICKET: {error["ticket"]}. CATEGORY: {error["category"]}')
                     self.found_matching_error = True
                     self.found_error_ticket = error['ticket']
+                    self.matched_error_text = error['error_text']
+                    self.matched_category = error['category']
                     return
 
 
 if __name__ == '__main__':
     # Usage example
-    log_analyzer = LogAnalyzer(path_to_log_archive=Path('/tmp/logs/log.zip'),
+    log_analyzer = LogAnalyzer(path_to_logs=Path('/tmp/logs_dir'),
                                path_to_errors_file=Path('/tmp/errors_to_look_for.json'))
     log_analyzer.analyze()
     if log_analyzer.found_matching_error:

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,14 +9,10 @@
 #include "openvino/op/multiply.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
-namespace opset_1 {
+namespace ov::frontend::onnx::ai_onnx::opset_1 {
 ov::OutputVector image_scaler(const ov::frontend::onnx::Node& node) {
     const auto inputs = node.get_ov_inputs();
-    FRONT_END_GENERAL_CHECK(inputs.size() == 1, "ImageScaler 1 input tensor. Got: ", inputs.size());
+    FRONT_END_GENERAL_CHECK(inputs.size() == 1, "ImageScaler expects 1 input tensor. Got: ", inputs.size());
 
     const auto data = inputs[0];
     const auto& data_shape = data.get_partial_shape();
@@ -41,8 +37,4 @@ ov::OutputVector image_scaler(const ov::frontend::onnx::Node& node) {
     return {scaler};
 }
 ONNX_OP("ImageScaler", OPSET_SINCE(1), ai_onnx::opset_1::image_scaler);
-}  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx::opset_1

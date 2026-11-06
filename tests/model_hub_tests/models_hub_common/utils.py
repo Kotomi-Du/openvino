@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
@@ -41,12 +41,26 @@ def get_models_list(file_name: str):
             other = line_items[4:]
             transformations = [item[8:] for item in other if item.startswith('ts_name:')]
             layers = [item[6:] for item in other if item.startswith('layer:')]
-            models.append((model_name, model_link, mark, reason, transformations, layers))
+            model_type = None
+            for item in other:
+                if item.startswith('type:'):
+                    model_type = item[5:]
+                    break
+            models.append((model_name, model_link, mark, reason, transformations, layers, model_type))
         else:
             items = ','.join(line_items)
             assert False, \
                 f'Incorrect model info fields {items}. It must contain either 2 or 4 or more than 4 fields.'
     return models
+
+
+def model_list_path(models_dir: str, list_name: str):
+    if 'NPU' in os.environ.get("TEST_DEVICE", ""):
+        npu_list = os.path.join(models_dir, "npu_" + list_name)
+        if os.path.isfile(npu_list):
+            return npu_list
+    return os.path.join(models_dir, list_name)
+
 
 def get_skipped_model_links(file_name: str):
     return {line_items[1] for line_items in parse_list_file(file_name)}
@@ -155,7 +169,18 @@ def print_stat(s: str, value: float):
     print(s.format(round_num(value)))
 
 
-def retry(max_retries=3, exceptions=(Exception,), delay=None):
+def retry(max_retries=3, exceptions=(Exception,), delay=None, exponential_backoff=False, backoff_multiplier=2, max_delay=None):
+    """
+    Retry decorator with optional exponential backoff.
+
+    Args:
+        max_retries: Maximum number of retry attempts
+        exceptions: Tuple of exception types to catch and retry on
+        delay: Base delay in seconds between retries
+        exponential_backoff: If True, use exponential backoff instead of fixed delay
+        backoff_multiplier: Multiplier for exponential backoff (default: 2)
+        max_delay: Maximum delay cap for exponential backoff
+    """
     def retry_decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -165,7 +190,18 @@ def retry(max_retries=3, exceptions=(Exception,), delay=None):
                 except exceptions as e:
                     print(f"Attempt {attempt + 1} of {max_retries} failed: {e}")
                     if attempt < max_retries - 1 and delay is not None:
-                        time.sleep(delay)
+                        if exponential_backoff:
+                            # Calculate exponential backoff delay
+                            backoff_delay = delay * (backoff_multiplier ** attempt)
+                            # Apply max_delay cap if specified
+                            if max_delay is not None:
+                                backoff_delay = min(backoff_delay, max_delay)
+                            print(f"Waiting {backoff_delay:.2f} seconds before retry")
+                            time.sleep(backoff_delay)
+                        else:
+                            # Use fixed delay
+                            print(f"Waiting {delay} seconds before retry")
+                            time.sleep(delay)
                     else:
                         raise e
         return wrapper

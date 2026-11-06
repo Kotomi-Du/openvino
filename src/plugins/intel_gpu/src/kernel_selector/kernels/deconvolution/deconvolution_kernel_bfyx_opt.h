@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ class DeconvolutionKernel_bfyx_opt : public DeconvolutionKernelBase {
 public:
     using Parent = DeconvolutionKernelBase;
     DeconvolutionKernel_bfyx_opt() : DeconvolutionKernelBase("deconvolution_gpu_bfyx_opt") {}
-    virtual ~DeconvolutionKernel_bfyx_opt() {}
+    ~DeconvolutionKernel_bfyx_opt() override = default;
 
     ParamsKey GetSupportedKey() const override;
 

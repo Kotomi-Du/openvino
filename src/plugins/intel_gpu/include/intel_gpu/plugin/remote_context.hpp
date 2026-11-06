@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,6 +8,7 @@
 # define NOMINMAX
 #endif
 
+#include "intel_gpu/runtime/engine_configuration.hpp"
 #include "openvino/runtime/intel_gpu/remote_properties.hpp"
 #include "openvino/runtime/iremote_context.hpp"
 
@@ -17,6 +18,7 @@
 #include "intel_gpu/plugin/common_utils.hpp"
 
 #include <string>
+#include <filesystem>
 #include <map>
 #include <memory>
 
@@ -82,6 +84,9 @@ private:
     std::string get_device_name(const std::map<std::string, RemoteContextImpl::Ptr>& known_contexts, const cldnn::device::ptr current_device) const;
     std::shared_ptr<ov::IRemoteTensor> reuse_surface(const ov::element::Type type, const ov::Shape& shape, const ov::AnyMap& params);
     std::shared_ptr<ov::IRemoteTensor> reuse_memory(const ov::element::Type type, const ov::Shape& shape, cldnn::shared_handle mem, TensorType tensor_type);
+    std::shared_ptr<ov::IRemoteTensor> reuse_memory_from_cpu_va(const ov::element::Type type, const ov::Shape& shape, VirtualAddressMemory cpu_va, TensorType tensor_type);
+    std::shared_ptr<ov::IRemoteTensor> reuse_memory_from_handle(const ov::element::Type type, const ov::Shape& shape, SharedBufferHandle handle, TensorType tensor_type);
+    std::shared_ptr<ov::IRemoteTensor> reuse_memory_from_file(const ov::element::Type type, const ov::Shape& shape, const std::filesystem::path& file_path, size_t offset, ov::intel_gpu::AccessMode access);
     std::shared_ptr<ov::IRemoteTensor> create_buffer(const ov::element::Type type, const ov::Shape& shape);
     std::shared_ptr<ov::IRemoteTensor> create_usm(const ov::element::Type type, const ov::Shape& shape, TensorType alloc_type);
     void check_if_shared() const;
@@ -93,10 +98,12 @@ private:
     ov::intel_gpu::gpu_handle_param m_va_display = nullptr;
     ov::intel_gpu::gpu_handle_param m_external_queue = nullptr;
 
-    ContextType m_type = ContextType::OCL;
-    std::string m_device_name = "";
+
+    ContextType m_type;
+    std::string m_device_name;
     static const size_t cache_capacity = 100;
-    cldnn::LruCache<size_t, cldnn::memory::ptr> m_memory_cache = cldnn::LruCache<size_t, cldnn::memory::ptr>(cache_capacity);
+    cldnn::LruCache<size_t, std::weak_ptr<cldnn::memory>> m_memory_cache =
+        cldnn::LruCache<size_t, std::weak_ptr<cldnn::memory>>(cache_capacity);
     std::mutex m_cache_mutex;
 
     bool m_is_initialized = false;

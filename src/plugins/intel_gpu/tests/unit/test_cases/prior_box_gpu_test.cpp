@@ -1,5 +1,6 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
+//
 
 #include <algorithm>
 #include <intel_gpu/primitives/data.hpp>
@@ -45,14 +46,8 @@ public:
         const auto output_data_type = ov::element::from<OutputType>();
         const auto plain_format = format::bfyx;
 
-        format::type target_format;
-        std::vector<InputType> output_size;
-        std::vector<InputType> image_size;
-        prior_box_attributes attrs;
-        std::vector<OutputType> expected_values;
-
         auto &engine = get_test_engine();
-        std::tie(target_format, output_size, image_size, attrs, expected_values) = this->GetParam();
+        const auto& [target_format, output_size, image_size, attrs, expected_values] = this->GetParam();
 
         auto layout_output_size_input = layout{input_data_type, plain_format, tensor{2}};
         auto layout_image_size_input = layout{input_data_type, plain_format, tensor{2}};
@@ -104,7 +99,7 @@ public:
         const auto outputs = network->execute();
         const auto output = outputs.at("prior_box").get_memory();
 
-        cldnn::mem_lock<OutputType> output_ptr(output, get_test_stream());
+        cldnn::mem_lock<OutputType, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(output_ptr.size(), expected_values.size());
         for (size_t i = 0; i < output_ptr.size(); ++i) {

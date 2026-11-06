@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -6,17 +6,28 @@ set(TARGET_NAME "openvino_offline_transformations")
 
 set(PUBLIC_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-file(GLOB_RECURSE LIBRARY_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
-file(GLOB_RECURSE PUBLIC_HEADERS ${PUBLIC_HEADERS_DIR}/*.hpp)
+set(LIBRARY_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/compress_quantize_weigths.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/pruning/init_const_mask.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/pruning/init_masks.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/pruning/mask_attribute.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/pruning/propagate_masks.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/pruning/pruning.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/pruning/shrink_weights.cpp
+)
+
+set(PUBLIC_HEADERS
+        ${PUBLIC_HEADERS_DIR}/compress_quantize_weights.hpp
+        ${PUBLIC_HEADERS_DIR}/mask_attribute.hpp
+        ${PUBLIC_HEADERS_DIR}/pruning.hpp
+)
 
 # Create named folders for the sources within the .vcproj
 # Empty name lists them directly under the .vcproj
-
 source_group("src" FILES ${LIBRARY_SRC})
 source_group("include" FILES ${PUBLIC_HEADERS})
 
 # Create static library
-
 add_library(${TARGET_NAME} STATIC ${LIBRARY_SRC} ${PUBLIC_HEADERS})
 
 add_library(openvino::offline_transformations ALIAS ${TARGET_NAME})
@@ -28,12 +39,9 @@ target_include_directories(${TARGET_NAME} PUBLIC $<BUILD_INTERFACE:${PUBLIC_HEAD
                                           PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
                                                   $<TARGET_PROPERTY:openvino::pugixml,INTERFACE_INCLUDE_DIRECTORIES>)
 
-add_cpplint_target(${TARGET_NAME}_cpplint FOR_TARGETS ${TARGET_NAME})
-
 ov_add_clang_format_target(${TARGET_NAME}_clang FOR_TARGETS ${TARGET_NAME})
 
 ov_build_target_faster(${TARGET_NAME} PCH)
-
 # install & export
 
 ov_developer_package_export_targets(TARGET ${TARGET_NAME}

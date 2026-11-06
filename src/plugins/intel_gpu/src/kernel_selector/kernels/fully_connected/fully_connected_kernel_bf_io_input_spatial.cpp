@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -52,16 +52,18 @@ KernelsPriority FullyConnected_bf_io_input_spatial::GetKernelsPriority(const Par
     const auto& input = p.inputs[0];
     const auto& output = p.outputs[0];
 
-    if (input.Batch().v == 1 && output.Batch().v == 1)
-        if ((input.LogicalSize() / output.Batch().v >= 4096) && (output.Feature().v >= 4096))
+    if (input.Batch().v == 1 && output.Batch().v == 1) {
+        if ((input.LogicalSize() / output.Batch().v >= 4096) && (output.Feature().v >= 4096)) {
             return FORCE_PRIORITY_1;
+        }
+    }
 
     return DONT_USE_IF_HAVE_SOMETHING_ELSE;
 }
 
 bool FullyConnected_bf_io_input_spatial::Validate(const Params& p) const {
     if (!FullyConnectedKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const auto& params = static_cast<const fully_connected_params&>(p);
@@ -70,11 +72,11 @@ bool FullyConnected_bf_io_input_spatial::Validate(const Params& p) const {
     const auto& output = params.outputs[0];
     if ((input.GetLayout() != DataLayout::bfyx && input.GetLayout() != DataLayout::bf) ||
         (output.GetLayout() != DataLayout::bf)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
     if (!params.bias.empty()) {
         if (params.inputs[0].GetDType() != params.bias[0].GetDType()) {
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 

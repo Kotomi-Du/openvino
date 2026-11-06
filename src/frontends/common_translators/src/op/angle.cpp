@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,9 +9,7 @@
 #include "openvino/op/select.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace common_translators {
+namespace ov::frontend::common_translators {
 
 using namespace ov::op;
 using namespace std;
@@ -50,6 +48,4 @@ OutputVector translate_angle(const NodeContext& context) {
     return {angle};
 }
 
-}  // namespace common_translators
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::common_translators

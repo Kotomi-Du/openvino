@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "prim_list_tuple_construct_replacer.hpp"
@@ -6,14 +6,12 @@
 #include <deque>
 
 #include "openvino/frontend/pytorch/decoder.hpp"
+#include "openvino/frontend/sequence_mark.hpp"
 #include "openvino/op/result.hpp"
 #include "openvino/op/util/framework_node.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace pass {
+namespace ov::frontend::pytorch::pass {
 
 namespace {
 bool is_index(const std::string& s) {
@@ -31,9 +29,11 @@ bool DecomposeListTupleResults::run_on_model(const std::shared_ptr<Model>& model
         auto result = results.front();
         results.pop_front();
         auto input_node = result->get_input_node_shared_ptr(0);
-        auto tuple_construct = cast_fw_node(input_node, "prim::TupleConstruct");
-        auto list_construct = cast_fw_node(input_node, "prim::ListConstruct");
-        if (!tuple_construct && !list_construct) {
+
+        // Check for SequenceMark
+        auto sequence_mark = ov::as_type_ptr<SequenceMark>(input_node);
+
+        if (!sequence_mark) {
             updated_results.push_back(result);
             continue;
         }
@@ -75,7 +75,4 @@ bool DecomposeListTupleResults::run_on_model(const std::shared_ptr<Model>& model
 
     return at_least_one_decomposed;
 };
-}  // namespace pass
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::pass

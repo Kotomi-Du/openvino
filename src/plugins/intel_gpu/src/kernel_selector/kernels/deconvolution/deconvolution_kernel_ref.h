@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@ namespace kernel_selector {
 class DeconvolutionKernelRef : public DeconvolutionKernelBase {
 public:
     DeconvolutionKernelRef() : DeconvolutionKernelBase("deconvolution_gpu_ref") {}
-    virtual ~DeconvolutionKernelRef() {}
+    ~DeconvolutionKernelRef() override = default;
 
     ParamsKey GetSupportedKey() const override;
 

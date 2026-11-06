@@ -1,19 +1,38 @@
-// Copyright (C) 2023-2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "util.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <intel_npu/config/config.hpp>
 #include <iomanip>
 #include <openvino/core/parallel.hpp>
 #include <openvino/core/type/bfloat16.hpp>
 #include <openvino/core/type/float16.hpp>
 #include <openvino/core/type/nf4.hpp>
+#include <regex>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
+#include "llm_lora_states.hpp"
 #include "logging.hpp"
+#include "openvino/op/add.hpp"
+#include "openvino/op/broadcast.hpp"
+#include "openvino/op/concat.hpp"
+#include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
+#include "openvino/op/matmul.hpp"
+#include "openvino/op/multiply.hpp"
+#include "openvino/op/parameter.hpp"
+#include "openvino/op/reshape.hpp"
+#include "openvino/op/softmax.hpp"
 #include "openvino/op/transpose.hpp"
+#include "openvino/op/unsqueeze.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/runtime/make_tensor.hpp"  // get_tensor_impl
 #include "util_xarch.hpp"
@@ -48,6 +67,25 @@ bool ov::npuw::util::is_set(const std::size_t sub_idx,
         return true;
     }
     return false;
+}
+
+ov::npuw::util::DynamicQuantStorageTypes ov::npuw::util::resolve_dynamic_quant_storage_types(
+    DynamicQuantDecomposeMode decompose_mode,
+    bool is_symmetric,
+    const ov::element::Type& quant_dt,
+    const ov::element::Type& scale_dt) {
+    DynamicQuantStorageTypes resolved;
+    resolved.quantized_data_type = quant_dt;
+    resolved.zero_point_type = is_symmetric ? ov::element::dynamic : quant_dt;
+    resolved.scale_type = scale_dt;
+
+    if (!is_symmetric && decompose_mode == DynamicQuantDecomposeMode::CompilerPatternI8 &&
+        quant_dt == ov::element::i8) {
+        resolved.quantized_data_type = ov::element::u8;
+        resolved.zero_point_type = ov::element::u8;
+    }
+
+    return resolved;
 }
 
 namespace {
@@ -111,10 +149,10 @@ void unpack_nf4f16(const ov::SoPtr<ov::ITensor>& from,
     }
 }
 
-void unpack_f8f16(const ov::SoPtr<ov::ITensor>& from,
-                  const ov::SoPtr<ov::ITensor>& scale,
-                  const ov::SoPtr<ov::ITensor>& to,
-                  const ov::npuw::util::UnpackOptions& unpack_options) {
+void unpack_f16f16(const ov::SoPtr<ov::ITensor>& from,
+                   const ov::SoPtr<ov::ITensor>& scale,
+                   const ov::SoPtr<ov::ITensor>& to,
+                   const ov::npuw::util::UnpackOptions& unpack_options) {
     auto from_shape = from->get_shape();
     auto scale_shape = scale->get_shape();
 
@@ -124,33 +162,18 @@ void unpack_f8f16(const ov::SoPtr<ov::ITensor>& from,
     NPUW_ASSERT(from->get_size() == to->get_size());
     NPUW_ASSERT(from_shape[0] == scale_shape[0]);
     NPUW_ASSERT(scale_shape[1] == 1);
-    NPUW_ASSERT(from->get_element_type() == ov::element::f8e4m3 || from->get_element_type() == ov::element::f8e5m2 ||
-                from->get_element_type() == ov::element::f8e8m0);
-    NPUW_ASSERT(scale->get_element_type() == ov::element::f32);
+    NPUW_ASSERT(from->get_element_type() == ov::element::f16);
+    NPUW_ASSERT(scale->get_element_type() == ov::element::f16);
     NPUW_ASSERT(to->get_element_type() == ov::element::f16);
 
-    const auto* scale_ptr = scale->data<float>();
+    const auto* from_ptr = from->data<ov::float16>();
+    const auto* scale_ptr = scale->data<ov::float16>();
     auto* to_ptr = to->data<ov::float16>();
+    const auto size = to->get_size();
 
-    const auto size = from->get_size();
-
-    // FIXME: copypaste with a different type
-    if (from->get_element_type() == ov::element::f8e4m3) {
-        const auto* from_ptr = from->data<ov::float8_e4m3>();
-        ov::parallel_for(size, [&](size_t idx) {
-            to_ptr[idx] = static_cast<float>(from_ptr[idx]) * scale_ptr[idx / from_shape[1]];
-        });
-    } else if (from->get_element_type() == ov::element::f8e5m2) {
-        const auto* from_ptr = from->data<ov::float8_e5m2>();
-        ov::parallel_for(size, [&](size_t idx) {
-            to_ptr[idx] = static_cast<float>(from_ptr[idx]) * scale_ptr[idx / from_shape[1]];
-        });
-    } else {
-        const auto* from_ptr = from->data<ov::float8_e8m0>();
-        ov::parallel_for(size, [&](size_t idx) {
-            to_ptr[idx] = static_cast<float>(from_ptr[idx]) * scale_ptr[idx / from_shape[1]];
-        });
-    }
+    ov::parallel_for(size, [&](size_t idx) {
+        to_ptr[idx] = from_ptr[idx] * scale_ptr[idx / from_shape[1]];
+    });
 }
 
 }  // namespace
@@ -177,6 +200,123 @@ bool ov::npuw::util::starts_with(const std::string& str, const std::string& pref
     return str.substr(0, prefix.size()) == prefix;
 }
 
+bool ov::npuw::util::contains_ignore_case(const std::string& str, const std::string& substr) {
+    auto it = std::search(str.begin(), str.end(), substr.begin(), substr.end(), [](unsigned char a, unsigned char b) {
+        return std::tolower(a) == std::tolower(b);
+    });
+    return it != str.end();
+}
+
+std::optional<int64_t> ov::npuw::util::parse_positive_int_env_var(const std::string& str) {
+    if (str.empty()) {
+        return std::nullopt;
+    }
+    int64_t parsed = 0;
+    const auto* begin = str.data();
+    const auto* end = str.data() + str.size();
+    const auto result = std::from_chars(begin, end, parsed);
+    if (result.ec != std::errc() || result.ptr != end || parsed <= 0) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+std::shared_ptr<ov::op::v0::Parameter> ov::npuw::util::trace_back_to_parameter(std::shared_ptr<ov::Node> node) {
+    while (node && !ov::is_type<ov::op::v0::Parameter>(node)) {
+        if (node->get_input_size() != 1) {
+            return nullptr;
+        }
+        node = node->input_value(0).get_node_shared_ptr();
+    }
+    return ov::as_type_ptr<ov::op::v0::Parameter>(node);
+}
+
+std::shared_ptr<ov::op::v0::Result> ov::npuw::util::trace_forward_to_result(const ov::Output<ov::Node>& output) {
+    ov::Output<ov::Node> current = output;
+    while (true) {
+        const auto& targets = current.get_target_inputs();
+        if (targets.size() != 1) {
+            return nullptr;
+        }
+        auto node = targets.begin()->get_node()->shared_from_this();
+        if (auto result = ov::as_type_ptr<ov::op::v0::Result>(node)) {
+            return result;
+        }
+        if (node->get_output_size() != 1) {
+            return nullptr;
+        }
+        current = node->output(0);
+    }
+}
+
+bool ov::npuw::util::reaches(const ov::Node* start, const ov::Node* target) {
+    std::unordered_set<const ov::Node*> visited;
+    std::vector<const ov::Node*> stack{start};
+    while (!stack.empty()) {
+        const auto* node = stack.back();
+        stack.pop_back();
+        if (node == target) {
+            return true;
+        }
+        if (!visited.insert(node).second) {
+            continue;
+        }
+        for (const auto& output : node->outputs()) {
+            for (const auto& input : output.get_target_inputs()) {
+                stack.push_back(input.get_node());
+            }
+        }
+    }
+    return false;
+}
+
+std::unordered_set<int64_t> ov::npuw::util::parse_layer_index_list(const std::string& text) {
+    std::unordered_set<int64_t> result;
+    static const std::regex kNumberRe(R"(-?\d+)");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), kNumberRe), end = std::sregex_iterator(); it != end;
+         ++it) {
+        result.insert(std::stoll(it->str()));
+    }
+    return result;
+}
+
+std::unordered_set<std::string> ov::npuw::util::mutable_properties(
+    const std::vector<ov::PropertyName>& supported_properties) {
+    std::unordered_set<std::string> result;
+    for (const auto& p : supported_properties) {
+        if (p.is_mutable()) {
+            result.insert(p);
+        }
+    }
+    return result;
+}
+
+std::optional<size_t> ov::npuw::util::find_single_dynamic_axis(const ov::PartialShape& shape) {
+    if (shape.rank().is_dynamic()) {
+        return std::nullopt;
+    }
+    std::optional<size_t> dynamic_axis;
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (shape[i].is_dynamic()) {
+            if (dynamic_axis.has_value()) {
+                return std::nullopt;  // more than one dynamic axis -- ambiguous
+            }
+            dynamic_axis = i;
+        }
+    }
+    return dynamic_axis;
+}
+
+bool ov::npuw::util::is_supported_kv_cache_capacity_axis(size_t axis, size_t rank) {
+    return rank == 4 && (axis == 2 || axis == 3);
+}
+
+bool ov::npuw::util::is_supported_position_ids_input(const ov::Output<const ov::Node>& p) {
+    const auto& shape = p.get_shape();
+    return p.get_node()->get_friendly_name() == "position_ids" &&
+           (shape.size() == 1 || (shape.size() == 2 && shape[0] == 1) || (shape.size() == 3 && shape[1] == 1));
+}
+
 std::string ov::npuw::util::fmt(std::size_t number, std::size_t total) {
     std::size_t regs = 1;
     while (total /= 10) {
@@ -185,6 +325,60 @@ std::string ov::npuw::util::fmt(std::size_t number, std::size_t total) {
     std::stringstream ss;
     ss << std::setfill('0') << std::setw(regs) << number;
     return ss.str();
+}
+
+std::string ov::npuw::util::merge_compilation_mode_params(const std::string& defaults, const std::string& overrides) {
+    // Keys whose value is a comma-separated list that must be extended rather than replaced.
+    static const std::unordered_set<std::string> list_keys = {"compute-layers-with-higher-precision"};
+
+    const auto append_list_values = [](std::string& param, const std::string& extra_values) {
+        std::unordered_set<std::string> existing;
+        std::istringstream current(param.substr(param.find('=') + 1));
+        for (std::string item; std::getline(current, item, ',');) {
+            existing.insert(item);
+        }
+        std::istringstream extra(extra_values);
+        for (std::string item; std::getline(extra, item, ',');) {
+            if (!item.empty() && existing.insert(item).second) {
+                param += (param.back() == '=' ? "" : ",") + item;
+            }
+        }
+    };
+
+    std::vector<std::string> params;
+    std::unordered_map<std::string, size_t> param_indices;
+
+    const auto add_params = [&](const std::string& value, bool replace_existing) {
+        std::istringstream stream(value);
+        std::string param;
+        while (stream >> param) {
+            const auto separator = param.find('=');
+            const auto key = param.substr(0, separator);
+            const auto [it, inserted] = param_indices.emplace(key, params.size());
+            if (inserted) {
+                params.push_back(std::move(param));
+            } else if (replace_existing) {
+                if (separator != std::string::npos && list_keys.count(key) &&
+                    params[it->second].find('=') != std::string::npos) {
+                    append_list_values(params[it->second], param.substr(separator + 1));
+                } else {
+                    params[it->second] = std::move(param);
+                }
+            }
+        }
+    };
+
+    add_params(defaults, false);
+    add_params(overrides, true);
+
+    std::ostringstream result;
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i != 0) {
+            result << ' ';
+        }
+        result << params[i];
+    }
+    return result.str();
 }
 
 void ov::npuw::util::unpack(const ov::SoPtr<ov::ITensor>& from,
@@ -251,8 +445,10 @@ void ov::npuw::util::unpack(const ov::SoPtr<ov::ITensor>& from,
         unpack_nf4f16(from, scale, to, unpack_options);
     } else if (type_from == ov::element::f8e4m3 || type_from == ov::element::f8e5m2 ||
                type_from == ov::element::f8e8m0) {
+        ov::npuw::util::XARCH::unpack_f8f16_scale(from, scale, to, unpack_options);
+    } else if (type_from == ov::element::f16) {
         // FIXME: Implement XARCH::unpack
-        unpack_f8f16(from, scale, to, unpack_options);
+        unpack_f16f16(from, scale, to, unpack_options);
     } else {
         NPUW_ASSERT(false && "Unsupported combination");
     }
@@ -273,8 +469,12 @@ void ov::npuw::util::unpack(const ov::SoPtr<ov::ITensor>& from,
         NPUW_ASSERT(type_scale == ov::element::f16 || type_scale == ov::element::f32);
         NPUW_ASSERT(type_to == ov::element::f16);
     } else if (type_from == ov::element::u8) {
-        NPUW_ASSERT(type_zerop == ov::element::u8);
+        NPUW_ASSERT(type_zerop == type_from);
         NPUW_ASSERT(type_scale == ov::element::f16);
+        NPUW_ASSERT(type_to == ov::element::f16);
+    } else if (type_from == ov::element::i8) {
+        NPUW_ASSERT(type_zerop == type_from);
+        NPUW_ASSERT(type_scale == ov::element::f16 || type_scale == ov::element::f32);
         NPUW_ASSERT(type_to == ov::element::f16);
     } else {
         NPUW_ASSERT(false && "Unsupported combination");
@@ -319,7 +519,7 @@ void ov::npuw::util::unpack(const ov::SoPtr<ov::ITensor>& from,
         } else {
             NPUW_ASSERT(false);
         }
-    } else if (type_from == ov::element::u8) {
+    } else if (type_from == ov::element::u8 || type_from == ov::element::i8) {
         if (scale_shape.size() == 3 && scale_shape[1] == 1 && scale_shape[2] == 1) {
             // Special case for broadcasting vocab by 2 dimensions
             // FIXME: all this logic probably should be in some specific unpack or another util function
@@ -339,17 +539,57 @@ void ov::npuw::util::unpack(const ov::SoPtr<ov::ITensor>& from,
                                     scale->data(),
                                     ov::Strides{scale_strides[0], scale_strides[2]});
 
-            ov::npuw::util::XARCH::unpack_u8f16(ov::get_tensor_impl(wraped_from),
-                                                ov::get_tensor_impl(wraped_zerop),
-                                                ov::get_tensor_impl(wraped_scale),
-                                                to,
-                                                unpack_options);
+            if (type_from == ov::element::u8) {
+                ov::npuw::util::XARCH::unpack_u8f16(ov::get_tensor_impl(wraped_from),
+                                                    ov::get_tensor_impl(wraped_zerop),
+                                                    ov::get_tensor_impl(wraped_scale),
+                                                    to,
+                                                    unpack_options);
+            } else {
+                ov::npuw::util::XARCH::unpack_i8f16_zp(ov::get_tensor_impl(wraped_from),
+                                                       ov::get_tensor_impl(wraped_zerop),
+                                                       ov::get_tensor_impl(wraped_scale),
+                                                       to,
+                                                       unpack_options);
+            }
+        } else if (scale_shape.size() == 3 && scale_shape[0] == 1 && scale_shape[2] == 1) {
+            // Special case for broadcasting vocab by 2 dimensions
+            // FIXME: all this logic probably should be in some specific unpack or another util function
+            ov::Tensor wraped_from(from->get_element_type(), ov::Shape{from_shape[1], from_shape[2]}, from->data());
+            ov::Tensor wraped_zerop(zerop->get_element_type(),
+                                    ov::Shape{zerop_shape[1], zerop_shape[2]},
+                                    zerop->data());
+            ov::Tensor wraped_scale(scale->get_element_type(),
+                                    ov::Shape{scale_shape[1], scale_shape[2]},
+                                    scale->data());
+
+            if (type_from == ov::element::u8) {
+                ov::npuw::util::XARCH::unpack_u8f16(ov::get_tensor_impl(wraped_from),
+                                                    ov::get_tensor_impl(wraped_zerop),
+                                                    ov::get_tensor_impl(wraped_scale),
+                                                    to,
+                                                    unpack_options);
+            } else {
+                ov::npuw::util::XARCH::unpack_i8f16_zp(ov::get_tensor_impl(wraped_from),
+                                                       ov::get_tensor_impl(wraped_zerop),
+                                                       ov::get_tensor_impl(wraped_scale),
+                                                       to,
+                                                       unpack_options);
+            }
         } else if (scale_shape.size() == 2 && scale_shape[0] == from_shape[0] && scale_shape[1] == 1) {
-            ov::npuw::util::XARCH::unpack_u8f16(from, zerop, scale, to, unpack_options);
+            if (type_from == ov::element::u8) {
+                ov::npuw::util::XARCH::unpack_u8f16(from, zerop, scale, to, unpack_options);
+            } else {
+                ov::npuw::util::XARCH::unpack_i8f16_zp(from, zerop, scale, to, unpack_options);
+            }
         } else {
             NPUW_ASSERT(false);
         }
     }
+}
+
+void ov::npuw::util::subtract_128(const ov::SoPtr<ov::ITensor>& from, const ov::SoPtr<ov::ITensor>& to) {
+    ov::npuw::util::XARCH::subtract_128(from, to);
 }
 
 void ov::npuw::util::gather(const ov::SoPtr<ov::ITensor>& src,
@@ -358,7 +598,9 @@ void ov::npuw::util::gather(const ov::SoPtr<ov::ITensor>& src,
     const auto src_type = src->get_element_type();
     const auto dst_type = dst->get_element_type();
     NPUW_ASSERT(idx->get_element_type() == ov::element::i64);
-    NPUW_ASSERT(src_type == ov::element::f16 || src_type == ov::element::f32);
+    NPUW_ASSERT(src_type == ov::element::f16 || src_type == ov::element::f32 || src_type == ov::element::f8e4m3 ||
+                src_type == ov::element::f8e5m2 || src_type == ov::element::f8e8m0 || src_type == ov::element::i8 ||
+                src_type == ov::element::u8);
     NPUW_ASSERT(src_type == dst_type);
 
     const auto& idx_shape = idx->get_shape();
@@ -376,11 +618,64 @@ void ov::npuw::util::gather(const ov::SoPtr<ov::ITensor>& src,
     const uint8_t* pSrc = static_cast<uint8_t*>(src->data());
     uint8_t* pDst = static_cast<uint8_t*>(dst->data());
 
+    const auto num_rows = static_cast<int64_t>(src_shape[0]);
+    NPUW_ASSERT(num_rows > 0);
+
     for (std::size_t r = 0; r < idx_shape[1]; r++) {
-        auto srcRowIdx = pIdx[r];
+        // HostGather (see partitioning/patterns/opt.cpp) folds away both the Gather and
+        // the Minimum(N-1, Maximum(-N, ids)) clamp guarding it, so reproduce both here:
+        // saturate first, then apply Gather's negative-index semantics. The copy below
+        // is raw pointer arithmetic, so no index may escape [0, N).
+        auto srcRowIdx = std::clamp(pIdx[r], -num_rows, num_rows - 1);
+        if (srcRowIdx < 0) {
+            srcRowIdx += num_rows;
+        }
         auto pSrcRow = pSrc + src_shape[1] * srcRowIdx * src_type.size();
         std::copy_n(pSrcRow, src_shape[1] * src_type.size(), pDst);
         pDst += dst_shape[2] * dst_type.size();
+    }
+}
+
+void ov::npuw::util::gather_cb4(const ov::SoPtr<ov::ITensor>& src,
+                                const ov::SoPtr<ov::ITensor>& idx,
+                                const ov::SoPtr<ov::ITensor>& dst) {
+    const auto src_type = src->get_element_type();
+    const auto dst_type = dst->get_element_type();
+    NPUW_ASSERT(idx->get_element_type() == ov::element::u4);
+    NPUW_ASSERT(src_type == ov::element::f8e4m3 || src_type == ov::element::f8e5m2 || src_type == ov::element::f8e8m0);
+    NPUW_ASSERT(dst_type == ov::element::f16);
+
+    NPUW_ASSERT(idx->get_shape().size() == 2);
+    NPUW_ASSERT(src->get_shape().size() == 1);
+    NPUW_ASSERT(dst->get_shape().size() == 2);
+
+    NPUW_ASSERT(dst->get_size() % 2 == 0);
+
+    const uint8_t* pIdx = static_cast<uint8_t*>(idx->data());  // u4
+    ov::float16* pDst = dst->data<ov::float16>();
+
+    // FIXME: copypaste with a different type
+    if (src_type == ov::element::f8e4m3) {
+        const auto* pSrc = src->data<ov::float8_e4m3>();
+        for (std::size_t i = 0; i < dst->get_size(); i += 2) {
+            *(pDst + i) = static_cast<float>(pSrc[lo4(*pIdx)]);
+            *(pDst + i + 1) = static_cast<float>(pSrc[hi4(*pIdx)]);
+            pIdx++;
+        }
+    } else if (src_type == ov::element::f8e5m2) {
+        const auto* pSrc = src->data<ov::float8_e5m2>();
+        for (std::size_t i = 0; i < dst->get_size(); i += 2) {
+            *(pDst + i) = static_cast<float>(pSrc[lo4(*pIdx)]);
+            *(pDst + i + 1) = static_cast<float>(pSrc[hi4(*pIdx)]);
+            pIdx++;
+        }
+    } else {
+        const auto* pSrc = src->data<ov::float8_e8m0>();
+        for (std::size_t i = 0; i < dst->get_size(); i += 2) {
+            *(pDst + i) = static_cast<float>(pSrc[lo4(*pIdx)]);
+            *(pDst + i + 1) = static_cast<float>(pSrc[hi4(*pIdx)]);
+            pIdx++;
+        }
     }
 }
 
@@ -392,6 +687,13 @@ ov::SoPtr<ov::ITensor> ov::npuw::util::view(const ov::SoPtr<ov::ITensor>& src,
 
     // Sub-byte views are not supported here
     NPUW_ASSERT(type != ov::element::u4 && type != ov::element::i4);
+
+    // Bounds guard: from[d] <= to[d] <= shape[d] (prevents OOB views and unsigned wrap below).
+    const auto& shape = src->get_shape();
+    NPUW_ASSERT(from.size() == shape.size());
+    for (std::size_t d = 0; d < from.size(); ++d) {
+        NPUW_ASSERT(from[d] <= to[d] && to[d] <= shape[d]);
+    }
 
     const auto num_dims = from.size();
     ov::Shape view_shape;
@@ -540,43 +842,25 @@ ov::Tensor ov::npuw::util::transpose(const ov::Tensor& t) {
 
     const auto IN_ROWS = shape[0] * shape[1];
     const auto IN_COLS = shape[2];
-    for (std::size_t i = 0; i < IN_ROWS; i++) {
-        for (std::size_t j = 0; j < IN_COLS; j++) {
-            switch (t.get_element_type()) {
-            case ov::element::i4:
-                twrite_4b(tnew, tread_4b(t, i, j, IN_COLS), j, i, IN_ROWS);
-                break;
-            case ov::element::f32:
-                twrite<float>(tnew, tread<float>(t, i, j, IN_COLS), j, i, IN_ROWS);
-                break;
-            default:
-                NPUW_ASSERT(false && "Element type is not supported yet");
-            }
-        }
+
+    switch (t.get_element_type()) {
+    case ov::element::i4: {
+        NPUW_ASSERT(shape[2] % 2 == 0);
+        const uint8_t* src = static_cast<const uint8_t*>(t.data());
+        uint8_t* dst = static_cast<uint8_t*>(tnew.data());
+        ov::npuw::util::XARCH::transpose_i4(src, dst, IN_ROWS, IN_COLS);
+        break;
+    }
+    case ov::element::f32: {
+        const float* src = static_cast<const float*>(t.data());
+        float* dst = static_cast<float*>(tnew.data());
+        ov::npuw::util::XARCH::transpose_f32(src, dst, IN_ROWS, IN_COLS);
+        break;
+    }
+    default:
+        NPUW_ASSERT(false && "Element type is not supported yet");
     }
     return tnew;
-}
-
-template <typename T>
-void permute120(const ov::Tensor& src, ov::Tensor& dst) {
-    const ov::Shape src_shape = src.get_shape();
-    const ov::Shape dst_shape = dst.get_shape();
-    NPUW_ASSERT(src_shape.size() == 3);  // Yes, so far only transpose 3D tensors
-
-    const T* pSrc = static_cast<const T*>(src.data());
-    T* pDst = static_cast<T*>(dst.data());
-
-    // DSTs [b,r,c] map to SRC's [r,c,b]
-
-    for (std::size_t b = 0; b < dst_shape[0]; b++) {
-        for (std::size_t r = 0; r < dst_shape[1]; r++) {
-            for (std::size_t c = 0; c < dst_shape[2]; c++) {
-                auto dst_idx = b * dst_shape[1] * dst_shape[2] + r * dst_shape[2] + c;
-                auto src_idx = r * src_shape[1] * src_shape[2] + c * src_shape[1] + b;
-                pDst[dst_idx] = pSrc[src_idx];
-            }
-        }
-    }
 }
 
 ov::Tensor ov::npuw::util::permute(const ov::Tensor& t, const std::vector<std::size_t>& axes) {
@@ -586,72 +870,120 @@ ov::Tensor ov::npuw::util::permute(const ov::Tensor& t, const std::vector<std::s
     if (axes[0] == 2 && axes[1] == 0 && axes[2] == 1) {
         return transpose(t);
     } else if (axes[0] == 0 && axes[1] == 2 && axes[2] == 1) {
-        NPUW_ASSERT(t.get_element_type() == ov::element::i4 || t.get_element_type() == ov::element::f32);
+        NPUW_ASSERT(t.get_element_type() == ov::element::i4 || t.get_element_type() == ov::element::f32 ||
+                    t.get_element_type() == ov::element::f16);
         ov::Shape tshape = {shape[0], shape[2], shape[1]};
         ov::Tensor tnew(t.get_element_type(), tshape);
-
-        for (std::size_t p = 0; p < shape[0]; p++) {
-            for (std::size_t r = 0; r < shape[1]; r++) {
-                for (std::size_t c = 0; c < shape[2]; c++) {
-                    switch (t.get_element_type()) {
-                    case ov::element::i4:
-                        twrite_4b(tnew, tread_4b(t, p * shape[1] + r, c, shape[2]), p * shape[2] + c, r, shape[1]);
-                        break;
-                    case ov::element::f32:
-                        twrite<float>(tnew,
-                                      tread<float>(t, p * shape[1] + r, c, shape[2]),
-                                      p * shape[2] + c,
-                                      r,
-                                      shape[1]);
-                        break;
-                    default:
-                        NPUW_ASSERT(false && "Element type is not supported yet");
-                    }
-                }
-            }
+        switch (t.get_element_type()) {
+        case ov::element::i4: {
+            NPUW_ASSERT(shape[2] % 2 == 0);
+            const uint8_t* src = static_cast<const uint8_t*>(t.data());
+            uint8_t* dst = static_cast<uint8_t*>(tnew.data());
+            ov::parallel_for(shape[0], [&](size_t p) {
+                const uint8_t* src_ptr = src + p * shape[1] * shape[2] / 2;
+                uint8_t* dst_ptr = dst + p * shape[1] * shape[2] / 2;
+                ov::npuw::util::XARCH::transpose_i4(src_ptr, dst_ptr, shape[1], shape[2]);
+            });
+            break;
+        }
+        case ov::element::f32: {
+            const float* src = static_cast<const float*>(t.data());
+            float* dst = static_cast<float*>(tnew.data());
+            ov::parallel_for(shape[0], [&](size_t p) {
+                const float* src_ptr = src + p * shape[1] * shape[2];
+                float* dst_ptr = dst + p * shape[1] * shape[2];
+                ov::npuw::util::XARCH::transpose_f32(src_ptr, dst_ptr, shape[1], shape[2]);
+            });
+            break;
+        }
+        case ov::element::f16: {
+            const uint16_t* src = static_cast<const uint16_t*>(t.data());
+            uint16_t* dst = static_cast<uint16_t*>(tnew.data());
+            ov::parallel_for(shape[0], [&](size_t p) {
+                const uint16_t* src_ptr = src + p * shape[1] * shape[2];
+                uint16_t* dst_ptr = dst + p * shape[1] * shape[2];
+                ov::npuw::util::XARCH::transpose_f16(src_ptr, dst_ptr, shape[1], shape[2]);
+            });
+            break;
+        }
+        default:
+            NPUW_ASSERT(false && "Element type is not supported yet");
         }
         return tnew;
     } else if (axes[0] == 1 && axes[1] == 0 && axes[2] == 2) {
-        NPUW_ASSERT(t.get_element_type() == ov::element::i4 || t.get_element_type() == ov::element::f16);
+        NPUW_ASSERT(t.get_element_type() == ov::element::i4 || t.get_element_type() == ov::element::u2 ||
+                    t.get_element_type() == ov::element::f16);
         ov::Shape tshape = {shape[1], shape[0], shape[2]};
         ov::Tensor tnew(t.get_element_type(), tshape);
-
-        // Iterate over output tensor coordinates
-        for (std::size_t p = 0; p < tshape[0]; p++) {
-            for (std::size_t r = 0; r < tshape[1]; r++) {
-                for (std::size_t c = 0; c < tshape[2]; c++) {
-                    switch (t.get_element_type()) {
-                    case ov::element::i4:
-                        twrite_4b(tnew,
-                                  tread_4b(t, r, p * shape[2] + c, shape[1] * shape[2]),
-                                  p * tshape[1] + r,
-                                  c,
-                                  tshape[2]);
-                        break;
-                    case ov::element::f16:
-                        twrite<uint16_t>(tnew,
-                                         tread<uint16_t>(t, r, p * shape[2] + c, shape[1] * shape[2]),
-                                         p * tshape[1] + r,
-                                         c,
-                                         tshape[2]);
-                        break;
-                    default:
-                        NPUW_ASSERT(false && "Element type is not supported yet");
+        switch (t.get_element_type()) {
+        case ov::element::u2: {
+            const uint8_t* src = static_cast<const uint8_t*>(t.data());
+            uint8_t* dst = static_cast<uint8_t*>(tnew.data());
+            if (shape[2] % 4 == 0) {
+                ov::parallel_for2d(shape[0], shape[1], [&](size_t p, size_t r) {
+                    std::copy_n(&src[(p * shape[1] + r) * shape[2] / 4],
+                                shape[2] / 4,
+                                &dst[(r * shape[0] + p) * shape[2] / 4]);
+                });
+            } else {
+                // Rows are not byte-aligned, so move the elements one by one (LSB-first packing)
+                std::fill_n(dst, tnew.get_byte_size(), uint8_t{0});
+                for (size_t p = 0; p < shape[0]; ++p) {
+                    for (size_t r = 0; r < shape[1]; ++r) {
+                        for (size_t k = 0; k < shape[2]; ++k) {
+                            const size_t src_idx = (p * shape[1] + r) * shape[2] + k;
+                            const size_t dst_idx = (r * shape[0] + p) * shape[2] + k;
+                            const uint8_t value = (src[src_idx / 4] >> (2 * (src_idx % 4))) & 0x3;
+                            dst[dst_idx / 4] |= static_cast<uint8_t>(value << (2 * (dst_idx % 4)));
+                        }
                     }
                 }
             }
+            break;
+        }
+        case ov::element::i4: {
+            NPUW_ASSERT(shape[2] % 2 == 0);
+            const uint8_t* src = static_cast<const uint8_t*>(t.data());
+            uint8_t* dst = static_cast<uint8_t*>(tnew.data());
+            for (size_t p = 0; p < shape[0]; ++p) {
+                for (size_t r = 0; r < shape[1]; ++r) {
+                    std::copy_n(&src[(p * shape[1] * shape[2] + r * shape[2]) / 2],
+                                shape[2] / 2,
+                                &dst[(r * shape[0] * shape[2] + p * shape[2]) / 2]);
+                }
+            }
+            break;
+        }
+        case ov::element::f16: {
+            const uint16_t* src = static_cast<const uint16_t*>(t.data());
+            uint16_t* dst = static_cast<uint16_t*>(tnew.data());
+            ov::parallel_for2d(shape[0], shape[1], [&](size_t p, size_t r) {
+                const size_t src_off = (p * shape[1] + r) * shape[2];
+                const size_t dst_off = (r * shape[0] + p) * shape[2];
+                std::copy_n(src + src_off, shape[2], dst + dst_off);
+            });
+            break;
+        }
+        default:
+            NPUW_ASSERT(false && "Element type is not supported yet");
         }
         return tnew;
     } else if (axes[0] == 1 && axes[1] == 2 && axes[2] == 0) {
         ov::Shape tshape = {shape[1], shape[2], shape[0]};
         ov::Tensor tnew(t.get_element_type(), tshape);
         switch (t.get_element_type()) {
-        case ov::element::f32:
-            permute120<uint32_t>(t, tnew);
+        case ov::element::f32: {
+            const float* src = static_cast<const float*>(t.data());
+            float* dst = static_cast<float*>(tnew.data());
+            ov::npuw::util::XARCH::transpose_f32(src, dst, shape[0], shape[1] * shape[2]);
             break;
-        case ov::element::f16:
-            permute120<uint16_t>(t, tnew);
+        }
+        case ov::element::f16: {
+            const uint16_t* src = static_cast<const uint16_t*>(t.data());
+            uint16_t* dst = static_cast<uint16_t*>(tnew.data());
+            ov::npuw::util::XARCH::transpose_f16(src, dst, shape[0], shape[1] * shape[2]);
             break;
+        }
         default:
             NPUW_ASSERT(false && "Element type is not supported yet");
         }
@@ -667,7 +999,6 @@ ov::Tensor ov::npuw::util::concat(const std::vector<ov::Tensor>& tt, std::size_t
     const auto type = tt.front().get_element_type();
     auto shape = tt.front().get_shape();
     std::size_t new_dim = 0;
-
     std::vector<std::size_t> offsets;
     std::vector<std::size_t> lens;
     for (auto&& t : tt) {
@@ -692,24 +1023,26 @@ ov::Tensor ov::npuw::util::concat(const std::vector<ov::Tensor>& tt, std::size_t
         uint8_t* pDst = static_cast<uint8_t*>(tnew.data());
 
         const bool is_4bit = (type == ov::element::i4 || type == ov::element::u4);
-        for (std::size_t t_idx = 0; t_idx < tt.size(); t_idx++) {
+        ov::parallel_for(tt.size(), [&](size_t t_idx) {
             const uint8_t* pSrc = static_cast<const uint8_t*>(tt[t_idx].data());
 
             const auto copy_size = lens[t_idx] * shape[1] * shape[2];
             const auto copy_len = is_4bit ? copy_size / 2 : copy_size * type.size();
 
-            std::copy_n(pSrc, copy_len, pDst);
-            pDst += copy_len;
-        }
+            const auto dst_offset =
+                is_4bit ? offsets[t_idx] * shape[1] * shape[2] / 2 : offsets[t_idx] * shape[1] * shape[2] * type.size();
+            uint8_t* pDstIdx = pDst + dst_offset;
+
+            std::copy_n(pSrc, copy_len, pDstIdx);
+        });
         return tnew;
     } else if (axis == 2) {
         ov::Tensor tnew(tt.front().get_element_type(), shape);
         uint8_t* pDst = static_cast<uint8_t*>(tnew.data());
 
         const bool is_4bit = (type == ov::element::i4 || type == ov::element::u4);
-        for (std::size_t t_idx = 0; t_idx < tt.size(); t_idx++) {
+        ov::parallel_for(tt.size(), [&](size_t t_idx) {
             const auto& t_src = tt[t_idx];
-
             for (std::size_t r = 0; r < shape[0] * shape[1]; r++) {
                 const auto r_offset = is_4bit ? new_dim * r / 2 : new_dim * r * type.size();
                 const auto c_offset = is_4bit ? offsets[t_idx] / 2 : offsets[t_idx] * type.size();
@@ -722,11 +1055,50 @@ ov::Tensor ov::npuw::util::concat(const std::vector<ov::Tensor>& tt, std::size_t
 
                 std::copy_n(pSrcRow, copy_len, pDstRow);
             }
-        }
+        });
         return tnew;
     } else {
         NPUW_ASSERT(false && "Not supported yet");
     }
+}
+
+void ov::npuw::util::permute_i4d(const ov::SoPtr<ov::ITensor>& src,
+                                 ov::SoPtr<ov::ITensor>& dst,
+                                 const std::array<int, 4> order) {
+    const auto& src_shape = src->get_shape();
+    const auto& dst_shape = dst->get_shape();
+    NPUW_ASSERT(src_shape.size() == 4);
+    NPUW_ASSERT(dst_shape.size() == 4);
+
+    const auto& src_s = src->get_strides();
+    const auto& dst_s = dst->get_strides();
+    const auto elem_size = src->get_byte_size() / src->get_size();
+
+    const auto* src_p = static_cast<uint8_t*>(src->data());
+    auto* dst_p = static_cast<uint8_t*>(dst->data());
+
+    for (std::size_t i = 0; i < src_shape[0]; i++) {
+        for (std::size_t j = 0; j < src_shape[1]; j++) {
+            for (std::size_t k = 0; k < src_shape[2]; k++) {
+                for (std::size_t l = 0; l < src_shape[3]; l++) {
+                    const std::size_t v_src[4] = {i, j, k, l};  // source vector
+                    const auto src_o =
+                        v_src[0] * src_s[0] + v_src[1] * src_s[1] + v_src[2] * src_s[2] + v_src[3] * src_s[3];
+
+                    const std::size_t v_dst[4] = {
+                        // for order 0,1,3,2:
+                        v_src[order[0]],  // i -> i
+                        v_src[order[1]],  // j -> j
+                        v_src[order[2]],  // k -> l
+                        v_src[order[3]],  // l -> k
+                    };
+                    const auto dst_o =
+                        v_dst[0] * dst_s[0] + v_dst[1] * dst_s[1] + v_dst[2] * dst_s[2] + v_dst[3] * dst_s[3];
+                    std::copy_n(src_p + src_o, elem_size, dst_p + dst_o);
+                }  // l
+            }  // k
+        }  // j
+    }  // i
 }
 
 namespace {
@@ -764,4 +1136,419 @@ ov::npuw::util::range_1d ov::npuw::util::validMaskRange(const ov::SoPtr<ov::ITen
         OPENVINO_THROW("Unsupported type ", src->get_element_type());
     }
 #undef HNDL
+}
+
+ov::npuw::util::TensorPtr ov::npuw::util::allocMem(const ov::element::Type type,
+                                                   const ov::Shape& shape,
+                                                   const std::string& device,
+                                                   const std::shared_ptr<const ov::IPlugin>& plugin) {
+    if (device == "CPU" || ov::shape_size(shape) == 0) {
+        return ov::get_tensor_impl(ov::Tensor(type, shape));
+    }
+
+    OPENVINO_ASSERT(plugin, "allocMem: plugin must be non-null for non-CPU device '", device, "'");
+    auto remote_ctx = plugin->get_core()->get_default_context(device)._ptr;
+    OPENVINO_ASSERT(remote_ctx, "allocMem: failed to obtain remote context for device '", device, "'");
+    auto remote_tensor = remote_ctx->create_host_tensor(type, shape);
+    return ov::get_tensor_impl(ov::make_tensor(remote_tensor));
+}
+
+std::string ov::npuw::util::generate_random_string(std::size_t size) {
+    static constexpr auto chars = "0123456789"
+                                  "abcdefghijklmnopqrstuvwxyz"
+                                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution dist({}, std::strlen(chars) - 1);
+    std::string result(size, '\0');
+    std::generate_n(result.begin(), size, [&]() {
+        return chars[dist(gen)];
+    });
+    return result;
+}
+
+bool ov::npuw::util::matchStringWithLoRAPattern(const std::string& input, const std::string& pattern_suffix) {
+    std::string pattern = "^lora_state.*" + pattern_suffix + "$";
+    std::regex regex_pattern(pattern);
+
+    return std::regex_match(input, regex_pattern);
+}
+
+bool ov::npuw::util::matchLoRAMatMulAString(const std::string& input) {
+    return ov::npuw::util::matchStringWithLoRAPattern(input, LoRANames::MatMul_A);
+}
+
+bool ov::npuw::util::matchLoRAMatMulBString(const std::string& input) {
+    return ov::npuw::util::matchStringWithLoRAPattern(input, LoRANames::MatMul_B);
+}
+
+bool ov::npuw::util::matchLoRAMatMulAlphaString(const std::string& input) {
+    return ov::npuw::util::matchStringWithLoRAPattern(input, LoRANames::MatMul_alpha);
+}
+
+bool ov::npuw::util::matchLinCacheString(const std::string& input, const std::string& past_or_present) {
+    static const std::regex past_regex_pattern("^cache_params\\.past\\.(conv|ssm)\\.(\\d+)$");
+    static const std::regex present_regex_pattern("^cache_params\\.present\\.(conv|ssm)\\.(\\d+)$");
+    const std::regex& regex_pattern = (past_or_present == "past") ? past_regex_pattern : present_regex_pattern;
+    return std::regex_match(input, regex_pattern);
+}
+
+bool ov::npuw::util::starts_with_past_lincache(const std::string& input_name) {
+    static constexpr const char* past_lin_conv_cache = "cache_params.past.conv";
+    static constexpr const char* past_lin_ssm_cache = "cache_params.past.ssm";
+    return ov::npuw::util::starts_with(input_name, past_lin_conv_cache) ||
+           ov::npuw::util::starts_with(input_name, past_lin_ssm_cache);
+}
+
+bool ov::npuw::util::is_swa_kv_cache_name(const std::string& input_name) {
+    // SWA-managed names carry an extra "swa" segment, e.g. "past_key_values.0.swa.key".
+    return input_name.find(".swa.") != std::string::npos;
+}
+
+bool ov::npuw::util::is_pa_kv_cache_name(const std::string& input_name) {
+    return ov::npuw::util::starts_with(input_name, "key_cache.") ||
+           ov::npuw::util::starts_with(input_name, "value_cache.");
+}
+
+std::ostream& ov::npuw::util::operator<<(std::ostream& os, const TensorBrief& brief) {
+    const auto& tensor = brief.tensor;
+    const auto type = tensor->get_element_type();
+    const auto n = tensor->get_size();
+    os << type << " " << tensor->get_shape();
+    const bool readable =
+        type == ov::element::f32 || type == ov::element::f16 || type == ov::element::i32 || type == ov::element::i64;
+    if (!readable || n == 0 || n > TensorBrief::kMaxStats) {
+        return os;
+    }
+    const auto value_at = [&](std::size_t i) -> double {
+        if (type == ov::element::f32) {
+            return tensor->data<float>()[i];
+        }
+        if (type == ov::element::f16) {
+            return static_cast<float>(tensor->data<ov::float16>()[i]);
+        }
+        if (type == ov::element::i32) {
+            return tensor->data<int32_t>()[i];
+        }
+        return static_cast<double>(tensor->data<int64_t>()[i]);
+    };
+    if (n <= TensorBrief::kMaxInline) {
+        os << " {";
+        for (std::size_t i = 0; i < n; ++i) {
+            os << (i ? ", " : "") << value_at(i);
+        }
+        return os << "}";
+    }
+    auto lo = value_at(0), hi = lo, sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto v = value_at(i);
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+        sum += v;
+    }
+    return os << " min=" << lo << " max=" << hi << " mean=" << sum / static_cast<double>(n);
+}
+
+void ov::npuw::util::fill_tensor_bytes(ov::SoPtr<ov::ITensor> tensor, uint8_t fill_val) {
+    auto* tensor_data = reinterpret_cast<uint8_t*>(tensor->data());
+    const size_t byte_size = tensor->get_byte_size();
+    std::memset(tensor_data, fill_val, byte_size);
+}
+
+bool ov::npuw::util::isPastKeyParam(const std::string& str) {
+    // Match any past key param:
+    //   - contiguous, e.g. past_key_values.0.key
+    //   - block-split, e.g. past_key_values.0.key_block_3, past_key_values.0.key_block_tail
+    //   - SWA-managed, e.g. past_key_values.0.swa.key
+    static const std::regex pattern(R"(past_key_values\.\d+(?:\.[^.]+)*\.key(_block_(\d+|tail))?)");
+    return std::regex_match(str, pattern);
+}
+
+bool ov::npuw::util::isPastValueParam(const std::string& str) {
+    // Match any past value param:
+    //   - contiguous, e.g. past_key_values.0.value
+    //   - block-split, e.g. past_key_values.0.value_block_3, past_key_values.0.value_block_tail
+    //   - SWA-managed, e.g. past_key_values.0.swa.value
+    static const std::regex pattern(R"(past_key_values\.\d+(?:\.[^.]+)*\.value(_block_(\d+|tail))?)");
+    return std::regex_match(str, pattern);
+}
+
+bool ov::npuw::util::isDQScaleOrZPKey(const std::string& str) {
+    // Match DynamicQuantize scale/zp parameters for past key cache
+    static const std::regex pattern(R"(DynamicQuantize/\d+/past_key_values/key/(?:scale|zp))");
+    return std::regex_match(str, pattern);
+}
+
+bool ov::npuw::util::isDQScaleOrZPValue(const std::string& str) {
+    // Match DynamicQuantize scale/zp parameters for past value cache
+    static const std::regex pattern(R"(DynamicQuantize/\d+/past_key_values/value/(?:scale|zp))");
+    return std::regex_match(str, pattern);
+}
+
+bool ov::npuw::util::isRestoredPastKeyValueParam(const std::string& str) {
+    // Match badly handled KVCache states by StatefulToStateless pass for Whisper.
+    static const std::regex restored_pattern(
+        R"((input_restored\.past_key_values\.(\d+)\.decoder\.(key|value))(present\.(\d+)\.decoder\.(key|value)))");
+    return std::regex_match(str, restored_pattern);
+}
+
+std::optional<int> ov::npuw::util::isPastKeyValuesKeyContiguous(const std::string& str) {
+    // Match only the single contiguous past key param (no _block_ suffix).
+    // Allows optional intermediate parts like "encoder" or "decoder" (for Whisper).
+    // Returns the layer index if matched.
+    static const std::regex pattern(R"(past_key_values\.(\d+)(?:\.[^.]+)*\.key)");
+    std::smatch match;
+    if (std::regex_match(str, match, pattern)) {
+        int index = std::stoi(match[1].str());
+        return index;
+    }
+    return std::nullopt;
+}
+
+std::optional<int> ov::npuw::util::isPastKeyValuesValueContiguous(const std::string& str) {
+    // Match only the single contiguous past value param (no _block_ suffix).
+    // Allows optional intermediate parts like "encoder" or "decoder" (for Whisper).
+    // Returns the layer index if matched.
+    static const std::regex pattern(R"(past_key_values\.(\d+)(?:\.[^.]+)*\.value)");
+    std::smatch match;
+    if (std::regex_match(str, match, pattern)) {
+        int index = std::stoi(match[1].str());
+        return index;
+    }
+    return std::nullopt;
+}
+
+std::optional<int> ov::npuw::util::isPresentKeyValuesKey(const std::string& str) {
+    static const std::regex pattern(R"(present\.(\d+)(?:\.[^.]+)*\.key)");
+    std::smatch match;
+    if (std::regex_match(str, match, pattern)) {
+        int index = std::stoi(match[1].str());
+        return index;
+    }
+    return std::nullopt;
+}
+
+std::optional<int> ov::npuw::util::isPresentKeyValuesValue(const std::string& str) {
+    static const std::regex pattern(R"(present\.(\d+)(?:\.[^.]+)*\.value)");
+    std::smatch match;
+    if (std::regex_match(str, match, pattern)) {
+        int index = std::stoi(match[1].str());
+        return index;
+    }
+    return std::nullopt;
+}
+
+bool ov::npuw::util::isKVCacheName(const std::string& str) {
+    return isPastKeyValuesKey(str).has_value() || isPastKeyValuesValue(str).has_value() ||
+           isPresentKeyValuesKey(str).has_value() || isPresentKeyValuesValue(str).has_value() ||
+           str.find("/" + std::string(constants::past_key_values) + "/") != std::string::npos ||
+           str.find("/" + std::string(constants::present) + "/") != std::string::npos;
+}
+
+std::string ov::npuw::util::present_to_past_key_values_name(const std::string& output_name) {
+    const std::string present_prefix = constants::present;
+    const std::string past_prefix = constants::past_key_values;
+
+    if (output_name.rfind(present_prefix, 0) == 0) {
+        return past_prefix + output_name.substr(present_prefix.size());
+    }
+
+    auto mapped_name = output_name;
+    const auto pos = mapped_name.find(present_prefix);
+    if (pos != std::string::npos) {
+        mapped_name.replace(pos, present_prefix.size(), past_prefix);
+    }
+    return mapped_name;
+}
+
+std::string ov::npuw::util::past_key_values_to_present_name(const std::string& input_name) {
+    const std::string present_prefix = constants::present;
+    const std::string past_prefix = constants::past_key_values;
+
+    if (input_name.rfind(past_prefix, 0) == 0) {
+        return present_prefix + input_name.substr(past_prefix.size());
+    }
+
+    auto mapped_name = input_name;
+    const auto pos = mapped_name.find(past_prefix);
+    if (pos != std::string::npos) {
+        mapped_name.replace(pos, past_prefix.size(), present_prefix);
+    }
+    return mapped_name;
+}
+
+std::optional<std::string> ov::npuw::util::resolveKVInputName(
+    const std::string& output_name,
+    const std::function<bool(const std::string&)>& has_input_name) {
+    auto input_name = present_to_past_key_values_name(output_name);
+    if (has_input_name(input_name)) {
+        return input_name;
+    }
+
+    const auto marker = std::string(constants::past_key_values);
+    const auto marker_pos = input_name.find(marker);
+    if (marker_pos == std::string::npos) {
+        return std::nullopt;
+    }
+
+    auto canonical_name = input_name.substr(marker_pos);
+    if (has_input_name(canonical_name)) {
+        return canonical_name;
+    }
+
+    return std::nullopt;
+}
+
+namespace {
+
+std::vector<ov::npuw::util::SDPAPatternNodes> find_sdpa_pattern_nodes_internal(const std::shared_ptr<ov::Model>& model,
+                                                                               bool findAll) {
+    // Find decomposed SDPA pattern components
+    std::vector<ov::npuw::util::SDPAPatternNodes> pattern_nodes;
+
+    // Collect past key/value parameter nodes once for the whole model.
+    // After SplitKVCacheIntoBlocks these may be N block params; otherwise exactly one each.
+    std::vector<std::shared_ptr<ov::Node>> all_past_key_params, all_past_value_params;
+    for (auto& input : model->inputs()) {
+        auto* input_node = input.get_node();
+        const auto& input_name = input_node->get_friendly_name();
+        if (ov::npuw::util::isPastKeyParam(input_name)) {
+            all_past_key_params.push_back(input_node->shared_from_this());
+        } else if (ov::npuw::util::isPastValueParam(input_name)) {
+            all_past_value_params.push_back(input_node->shared_from_this());
+        }
+    }
+
+    // Helper lambda to trace from MatMul to find Concat node
+    auto find_concat_from_matmul = [](const std::shared_ptr<ov::Node>& matmul_node,
+                                      size_t input_idx) -> std::shared_ptr<ov::Node> {
+        if (!matmul_node)
+            return nullptr;
+
+        auto current_node = matmul_node->input(input_idx).get_source_output().get_node_shared_ptr();
+
+        // Traverse backwards through reshape/transpose operations to find Concat
+        while (current_node) {
+            if (ov::is_type<ov::op::v0::Concat>(current_node)) {
+                return current_node;
+            }
+
+            // Allow traversing through Reshape and Transpose
+            if (ov::is_type<ov::op::v1::Reshape>(current_node) || ov::is_type<ov::op::v3::Broadcast>(current_node) ||
+                ov::is_type<ov::op::v0::Unsqueeze>(current_node) || ov::is_type<ov::op::v1::Transpose>(current_node) ||
+                ov::is_type<ov::op::v1::Multiply>(current_node) || ov::is_type<ov::op::v0::Convert>(current_node)) {
+                if (current_node->get_input_size() > 0) {
+                    current_node = current_node->input(0).get_source_output().get_node_shared_ptr();
+                } else {
+                    break;
+                }
+            } else {
+                // Stop at other operations
+                break;
+            }
+        }
+
+        return nullptr;
+    };
+
+    LOG_DEBUG("Entering find_sdpa_pattern_nodes_internal");
+    LOG_BLOCK();
+    // Search for the pattern: MatMul -> Add -> Softmax -> MatMul
+    auto ops = model->get_ordered_ops();
+    for (auto&& node : ops) {
+        if (!ov::is_type<ov::op::v8::Softmax>(node))
+            continue;
+        LOG_DEBUG("Examining node: " << node->get_friendly_name() << " (" << node->get_type_name() << ")");
+
+        ov::npuw::util::SDPAPatternNodes candidate;
+        auto& current_node = candidate;
+        current_node.softmax_node = node;
+
+        // Check if softmax is fed by Add - TODO: how optional is add?
+        auto softmax_input = node->input(0).get_source_output().get_node_shared_ptr();
+        if (!ov::is_type<ov::op::v1::Add>(softmax_input)) {
+            LOG_DEBUG("Softmax input is not Add(" << softmax_input->get_friendly_name() << "), skipping pattern check");
+            continue;
+        }
+        current_node.add_node = softmax_input;
+
+        // Check if add is fed by MatMul (first MatMul)
+        auto add_input0 = current_node.add_node->input(0).get_source_output().get_node_shared_ptr();
+        if (!ov::is_type<ov::op::v0::MatMul>(add_input0)) {
+            LOG_DEBUG("Add input is not MatMul(" << add_input0->get_friendly_name() << "), skipping pattern check");
+            continue;
+        }
+        current_node.matmul1_node = add_input0;
+
+        // Find Concat node for past key (input 1 of MatMul1)
+        current_node.past_key_concat_node = find_concat_from_matmul(current_node.matmul1_node, 1);
+
+        // Check if softmax feeds into MatMul (second MatMul)
+        for (auto&& output : node->outputs()) {
+            for (auto&& target_input : output.get_target_inputs()) {
+                auto target_node = target_input.get_node()->shared_from_this();
+                if (ov::is_type<ov::op::v0::MatMul>(target_node)) {
+                    current_node.matmul2_node = target_node;
+
+                    // Find Concat node for past value (input 1 of MatMul2)
+                    current_node.past_value_concat_node = find_concat_from_matmul(current_node.matmul2_node, 1);
+                    break;
+                }
+            }
+            if (current_node.matmul2_node)
+                break;
+        }
+        if (!current_node.matmul2_node) {
+            LOG_DEBUG("Softmax does not feed into MatMul, skipping pattern check");
+            continue;
+        }
+
+        // Attach the model-level KV param nodes collected above.
+        candidate.past_key_param_nodes = all_past_key_params;
+        candidate.past_value_param_nodes = all_past_value_params;
+
+        // pattern might be not full, say missed concats for example
+        current_node.log_pattern(std::to_string(pattern_nodes.size()));
+
+        pattern_nodes.push_back(candidate);
+        if (!findAll) {
+            break;
+        }
+    }
+
+    return pattern_nodes;
+}
+}  // namespace
+
+std::vector<ov::npuw::util::SDPAPatternNodes> ov::npuw::util::find_all_sdpa_pattern_nodes(
+    const std::shared_ptr<ov::Model>& model) {
+    return find_sdpa_pattern_nodes_internal(model, true);
+}
+
+ov::npuw::util::SDPAPatternNodes ov::npuw::util::find_sdpa_pattern_nodes(const std::shared_ptr<ov::Model>& model) {
+    auto internal_nodes = find_sdpa_pattern_nodes_internal(model, false);
+    if (internal_nodes.size() != 1) {
+        return {};
+    }
+    return internal_nodes.front();
+}
+
+std::shared_ptr<ov::op::v0::Parameter> ov::npuw::util::find_mask_parameter(const std::shared_ptr<ov::Node>& add_node) {
+    if (!add_node || add_node->get_input_size() < 2) {
+        return nullptr;
+    }
+    // Traverse the Add node's mask input (input 1) upwards to find the Parameter.
+    // Only unary ops are allowed along the way.
+    auto mask_in_node = add_node->input(1).get_source_output().get_node_shared_ptr();
+    while (mask_in_node && !ov::op::util::is_parameter(mask_in_node)) {
+        if (mask_in_node->inputs().size() != 1) {
+            LOG_WARN("Non-unary or disconnected op on the way from Add to input mask");
+            return nullptr;
+        }
+        mask_in_node = mask_in_node->inputs()[0].get_source_output().get_node_shared_ptr();
+    }
+    if (mask_in_node && ov::op::util::is_parameter(mask_in_node)) {
+        return std::static_pointer_cast<ov::op::v0::Parameter>(mask_in_node);
+    }
+    return nullptr;
 }

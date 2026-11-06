@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -84,6 +84,20 @@ OPENVINO_RUNTIME_API bool with_cpu_x86_sse42();
 OPENVINO_RUNTIME_API bool with_cpu_neon_fp16();
 
 /**
+ * @brief      Checks whether CPU supports ARM Dot Product capability
+ * @ingroup    ov_dev_api_system_conf
+ * @return     `True` is ARM Dot Product instructions are available, `false` otherwise
+ */
+OPENVINO_RUNTIME_API bool with_cpu_arm_dotprod();
+
+/**
+ * @brief      Checks whether CPU supports ARM Int8 MM capability
+ * @ingroup    ov_dev_api_system_conf
+ * @return     `True` is ARM Int8 MM instructions are available, `false` otherwise
+ */
+OPENVINO_RUNTIME_API bool with_cpu_arm_i8mm();
+
+/**
  * @brief      Checks whether CPU supports ARM SVE capability
  * @ingroup    ov_dev_api_system_conf
  * @return     `True` if ARM SVE instructions are available, `false` otherwise
@@ -110,6 +124,13 @@ OPENVINO_RUNTIME_API bool with_cpu_x86_avx2();
  * @return     `True` is AVX2_VNNI instructions are available, `false` otherwise
  */
 OPENVINO_RUNTIME_API bool with_cpu_x86_avx2_vnni();
+
+/**
+ * @brief      Checks whether CPU supports AVX2_VNNI_2 capability
+ * @ingroup    ov_dev_api_system_conf
+ * @return     `True` is AVX2_VNNI_2 instructions are available, `false` otherwise
+ */
+OPENVINO_RUNTIME_API bool with_cpu_x86_avx2_vnni_2();
 
 /**
  * @brief      Checks whether CPU supports AVX 512 capability

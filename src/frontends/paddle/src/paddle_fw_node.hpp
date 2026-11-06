@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,7 @@
 #include "decoder_proto.hpp"
 #include "openvino/op/util/framework_node.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
+namespace ov::frontend::paddle {
 class FrameworkNode : public ov::op::util::FrameworkNode {
 public:
     OPENVINO_OP("FrameworkNode", "util", ov::op::util::FrameworkNode);
@@ -49,6 +47,4 @@ private:
     const std::shared_ptr<DecoderProto> m_decoder;
     std::vector<std::string> m_inputs_names;
 };
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle

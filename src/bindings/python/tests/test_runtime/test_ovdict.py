@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Mapping
 import numpy as np
 import pytest
 
@@ -209,6 +208,26 @@ def test_ovdict_single_output_dict(device, is_direct, use_function):
     with pytest.raises(KeyError) as e:
         _ = native_dict[0]
     assert "0" in str(e.value)
+
+
+@pytest.mark.parametrize("is_direct", [True, False])
+def test_ovdict_to_dict_returns_shallow_copy(device, is_direct):
+    result, obj = _get_ovdict(
+        device,
+        multi_output=False,
+        direct_infer=is_direct,
+    )
+    outs = obj.model_outputs if isinstance(obj, InferRequest) else obj.outputs
+    value = result[outs[0]]
+
+    native_dict = result.to_dict()
+    # Shallow copy: same arrays, but changing the dictionary must not change the OVDict
+    assert native_dict[outs[0]] is value
+    native_dict.clear()
+
+    assert len(result) == 1
+    assert result[outs[0]] is value
+    assert result.to_dict() is not result.to_dict()
 
 
 @pytest.mark.parametrize("is_direct", [True, False])

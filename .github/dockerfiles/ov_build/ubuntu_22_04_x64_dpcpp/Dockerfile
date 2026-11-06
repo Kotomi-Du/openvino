@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 ARG REGISTRY="docker.io"
 FROM ${REGISTRY}/library/ubuntu:22.04
 
@@ -18,21 +21,21 @@ RUN apt-get update && \
     add-apt-repository --yes --no-update ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install \
-        wget \
-        curl \
-        git \
-        ca-certificates \
-        gpg-agent \
-        tzdata \
-        libtbb2 \
-        # parallel gzip
-        pigz \
-        # Pythons \
-        python3.11-dev \
-        python3.11-venv \
-        python3.11-distutils \
-        default-jdk \
-        && \
+    wget \
+    curl \
+    git \
+    ca-certificates \
+    gpg-agent \
+    tzdata \
+    libtbb2 \
+    # parallel gzip
+    pigz \
+    # Pythons \
+    python3.11-dev \
+    python3.11-venv \
+    python3.11-distutils \
+    default-jdk \
+    && \
     rm -rf /var/lib/apt/lists/*
 
 
@@ -42,8 +45,8 @@ RUN echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] h
 
 RUN apt-get update && \
     apt-get install \
-        intel-oneapi-compiler-dpcpp-cpp=2024.2.1-1079 \
-        && \
+    intel-oneapi-compiler-dpcpp-cpp=2024.2.1-1079 \
+    && \
     rm -rf /var/lib/apt/lists/*
 
 # Install build dependencies
@@ -53,7 +56,7 @@ RUN chmod +x /install_build_dependencies.sh && \
     rm -rf /var/lib/apt/lists/*
 
 # Install sscache
-ARG SCCACHE_VERSION="v0.7.5"
+ARG SCCACHE_VERSION="v0.18.0"
 ENV SCCACHE_HOME="/opt/sccache" \
     SCCACHE_PATH="/opt/sccache/sccache"
 
@@ -74,7 +77,9 @@ RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
 RUN python3.11 -m venv venv
 ENV PATH="/venv/bin:$SCCACHE_HOME:$PATH"
 
-ENV PIP_CACHE_DIR=/mount/caches/pip/linux/${PIP_VERSION}
+# Install newer ninja (apt ships 1.10.1 on 22.04 which lacks --quiet)
+RUN python3 -m pip install --no-cache-dir ninja==1.13.0
+
 
 # OneAPI env
 ENV ONEAPI_ROOT=/opt/intel/oneapi

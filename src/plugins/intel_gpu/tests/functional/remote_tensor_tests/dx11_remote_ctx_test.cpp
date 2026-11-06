@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -245,4 +245,4 @@ TEST_F(DX11CachedTexture_Test, _make_shared_nv12_tensor_cached_inference_cached)
 }
 
 #endif // ENABLE_DX11
-#endif // WIN32
+#endif // _WIN32

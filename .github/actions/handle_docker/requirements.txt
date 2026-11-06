@@ -1,1 +1,4 @@
-ghapi~=1.0.5
+# pin fastcore CVS-179495
+fastcore==1.12.1
+ghapi==1.0.9
+packaging==26.3

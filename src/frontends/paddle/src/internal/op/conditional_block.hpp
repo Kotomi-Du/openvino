@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,9 +6,7 @@
 
 #include "openvino/op/op.hpp"
 
-namespace ov {
-namespace op {
-namespace internal {
+namespace ov::op::internal {
 class ConditionalBlock : public Op {
 public:
     OPENVINO_OP("ConditionalBlock", "internal");
@@ -34,7 +32,7 @@ public:
     /// \return A vector containing the values for each input except "cond".
     const OutputVector get_inputs_from_parent() const;
 
-    const int32_t get_subblock_index() const {
+    int32_t get_subblock_index() const {
         return m_sub_block_index;
     }
 
@@ -44,6 +42,4 @@ private:
     std::vector<std::pair<ov::element::Type, ov::PartialShape>> m_output_infos;
 };
 
-}  // namespace internal
-}  // namespace op
-}  // namespace ov
+}  // namespace ov::op::internal

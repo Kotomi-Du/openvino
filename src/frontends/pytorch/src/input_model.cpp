@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,7 @@
 #include "place.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
+namespace ov::frontend::pytorch {
 
 InputModel::InputModel(const std::shared_ptr<TorchDecoder>& model_decoder)
     : m_model_decoder(model_decoder),
@@ -157,7 +155,7 @@ void InputModel::override_all_outputs(const std::vector<Place::Ptr>& outputs) {
         return p->is_output();
     });
     FRONT_END_GENERAL_CHECK(all_outputs, "Only initial outputs are supported by override_all_inputs.");
-    // Number of outputs can be lower then in original model
+    // Number of outputs can be lower than in original model
     m_outputs = outputs;
 }
 
@@ -229,6 +227,4 @@ void InputModel::flush_places() {
     m_requested_places = {};
 }
 
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch

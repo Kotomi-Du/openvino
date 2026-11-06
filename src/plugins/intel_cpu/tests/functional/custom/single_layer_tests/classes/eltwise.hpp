@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,9 +26,10 @@ typedef std::tuple<
 class EltwiseLayerCPUTest : public testing::WithParamInterface<EltwiseLayerCPUTestParamsSet>,
                             virtual public SubgraphBaseTest, public CPUTestUtils::CpuTestWithFusing {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<EltwiseLayerCPUTestParamsSet> obj);
+    static std::string getTestCaseName(const testing::TestParamInfo<EltwiseLayerCPUTestParamsSet>& obj);
 
 protected:
+    void validate() override;
     ov::Tensor generate_eltwise_input(const ov::element::Type& type, const ov::Shape& shape, const bool adopt_intervals = false);
     void generate_inputs(const std::vector<ov::Shape>& targetInputStaticShapes) override;
     void SetUp() override;
@@ -36,8 +37,7 @@ protected:
 private:
     utils::EltwiseTypes eltwiseType;
 
-    std::string getPrimitiveType(const utils::EltwiseTypes& eltwise_type,
-                                 const ov::element::Type_t& element_type,
+    std::string getPrimitiveType(const ov::element::Type_t& element_type,
                                  const std::vector<std::pair<ov::PartialShape, std::vector<ov::Shape>>>& input_shapes) const;
 };
 
@@ -47,7 +47,6 @@ const std::vector<ov::AnyMap>& additional_config();
 
 const std::vector<ElementType>& netType();
 const std::vector<ov::test::utils::OpType>& opTypes();
-const std::vector<utils::EltwiseTypes>& eltwiseOpTypesBinInp();
 const std::vector<utils::InputLayerType>& secondaryInputTypes();
 
 const std::vector<utils::EltwiseTypes>& eltwiseOpTypesBinInp();

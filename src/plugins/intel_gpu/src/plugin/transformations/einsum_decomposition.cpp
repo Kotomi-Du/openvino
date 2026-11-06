@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -120,7 +120,7 @@ std::string generate_grouping_subscript(const std::string& input_subscript, cons
     }
 
     auto labels = ov::op::v7::Einsum::extract_labels(input_subscript);
-    std::string required_subscript = "";
+    std::string required_subscript;
     for (auto index : labels_inds) {
         required_subscript += labels[index];
     }
@@ -370,7 +370,7 @@ void reduce_input(EinsumDecomposition *einsum_decompose_ptr,
     std::set<int64_t> reduced_axes;
     const auto labels = ov::op::v7::Einsum::extract_labels(input_subscripts[input_ind]);
     auto label_dim_map = compute_label_dim_map(input_node.get_partial_shape().rank(), input_subscript);
-    std::string new_input_subscript = "";
+    std::string new_input_subscript;
 
     for (const auto& label : labels) {
         // check if the current label is met in the other input subscripts
@@ -481,7 +481,7 @@ ov::Output<ov::Node> build_multi_identity(EinsumDecomposition* einsum_decompose_
                                                   const std::vector<std::string>& repeated_labels,
                                                   const LabelDimMap& label_dim_map,
                                                   ov::NodeVector& subgraph_nodes) {
-    OPENVINO_ASSERT(repeated_labels.size() > 0);
+    OPENVINO_ASSERT(!repeated_labels.empty());
 
     const auto get_identity = [&](size_t idx) {
         const auto repeated_label_dims = label_dim_map.find(repeated_labels[idx]);
@@ -635,6 +635,45 @@ void compute_ranges(const ov::Rank& input_rank,
     }
 }
 
+/// \brief      Adjust ranks of ellipsis dimensions in the subscripts of two given inputs so
+/// that both ellipses represent the same number of dimensions. This is needed for correct
+/// broadcasting when one input's ellipsis covers fewer dimensions than the other's.
+///
+/// \param      inputs              A vector of input nodes to Einsum operation
+/// \param      input_subscripts    A vector of corresponding subscripts for the input nodes
+/// \param      input_ind1          An index of the first operand
+/// \param      input_ind2          An index of the second operand
+/// \param      subgraph_nodes      A vector of operation nodes that is included into a
+/// sub-graph decomposing Einsum that is needed for copy_runtime_info
+///
+void unsqueeze_ellipses_to_same_rank(ov::OutputVector& inputs, std::vector<std::string>& input_subscripts,
+                                     size_t input_ind1, size_t input_ind2, ov::NodeVector& subgraph_nodes) {
+    static const std::string ellipsis = "...";
+    const auto& input1 = inputs[input_ind1];
+    const auto& input2 = inputs[input_ind2];
+    auto label_to_dim_map1 = compute_label_dim_map(input1.get_partial_shape().rank(), input_subscripts[input_ind1]);
+    auto label_to_dim_map2 = compute_label_dim_map(input2.get_partial_shape().rank(), input_subscripts[input_ind2]);
+    if (label_to_dim_map1.find(ellipsis) != label_to_dim_map1.end() &&
+        label_to_dim_map2.find(ellipsis) != label_to_dim_map2.end()) {
+        std::vector<int64_t> unsqueeze_axis1, unsqueeze_axis2;
+        const auto& ellipsis_dims1 = label_to_dim_map1[ellipsis];
+        const auto& ellipsis_dims2 = label_to_dim_map2[ellipsis];
+        if (ellipsis_dims2.size() > ellipsis_dims1.size()) {
+            for (size_t i = 0; i < ellipsis_dims2.size() - ellipsis_dims1.size(); ++i) {
+                unsqueeze_axis1.push_back(ellipsis_dims1[0] + static_cast<int64_t>(i));
+            }
+        } else if (ellipsis_dims1.size() > ellipsis_dims2.size()) {
+            for (size_t i = 0; i < ellipsis_dims1.size() - ellipsis_dims2.size(); ++i) {
+                unsqueeze_axis2.push_back(ellipsis_dims2[0] + static_cast<int64_t>(i));
+            }
+        }
+        auto unsqueeze_output1 = unsqueeze_input(input1, unsqueeze_axis1, subgraph_nodes);
+        auto unsqueeze_output2 = unsqueeze_input(input2, unsqueeze_axis2, subgraph_nodes);
+        inputs[input_ind1] = unsqueeze_output1;
+        inputs[input_ind2] = unsqueeze_output2;
+    }
+}
+
 /// \brief      Contract two inputs of Einsum operation according to equation.
 /// The result of the contraction is appended into input_nodes along with its subscript.
 /// The input nodes for these two operands are removed from input_nodes along with their input
@@ -663,6 +702,9 @@ void contract_two_inputs(EinsumDecomposition* einsum_decompose_ptr,
     OPENVINO_ASSERT(num_inputs == input_subscripts.size(), "Each input must have own subscript.");
     OPENVINO_ASSERT(input_ind2 < num_inputs && input_ind1 != input_ind2, "Incorrect input index is specified.");
 
+    // Unsqueeze inputs to have the same rank for the ellipsis label for correct broadcasting
+    unsqueeze_ellipses_to_same_rank(input_nodes, input_subscripts, input_ind1, input_ind2, subgraph_nodes);
+
     const auto& input_node1 = input_nodes[input_ind1];
     const auto& input_node2 = input_nodes[input_ind2];
 
@@ -687,9 +729,9 @@ void contract_two_inputs(EinsumDecomposition* einsum_decompose_ptr,
     auto labels1 = ov::op::v7::Einsum::extract_labels(input_subscript1);
     auto& input_subscript2 = input_subscripts[input_ind2];
     auto labels2 = ov::op::v7::Einsum::extract_labels(input_subscript2);
-    std::string common_part = "";
-    std::string separate_part1 = "";
-    std::string separate_part2 = "";
+    std::string common_part;
+    std::string separate_part1;
+    std::string separate_part2;
     std::vector<int64_t> common_labels_inds1, common_labels_inds2;
     std::vector<int64_t> separate_labels_inds1, separate_labels_inds2;
     std::vector<int64_t> reduced_labels_inds1, reduced_labels_inds2;
@@ -866,8 +908,8 @@ void contract_two_inputs(EinsumDecomposition* einsum_decompose_ptr,
                 subgraph_nodes);
 
     // step 3. apply MatMul operation for formatted inputs
-    const bool transpose_a = (is_separate_first1 ? false : true);
-    const bool transpose_b = (is_separate_first2 ? true : false);
+    const bool transpose_a = (!is_separate_first1);
+    const bool transpose_b = (is_separate_first2);
     const auto matmul = std::make_shared<ov::op::v0::MatMul>(matmul_operand1, matmul_operand2, transpose_a, transpose_b);
 
     // step 4. reshape back by unrolling dimensions corresponding to separate labels if needed

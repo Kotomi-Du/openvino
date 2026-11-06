@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,22 +9,82 @@
 
 #pragma once
 
+#include <cstddef>
+#include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 
+#include "openvino/util/file_util.hpp"
+#include "openvino/util/memory.hpp"
+
 namespace ov {
+
+namespace util {
+int64_t get_system_page_size();
+
+/**
+ * @brief Alignment required for a memory mapping offset: allocation granularity on Windows, page size elsewhere.
+ */
+size_t get_system_alloc_granularity();
+}  // namespace util
+
+/**
+ * @brief Generic constant to indicate automatic size calculation is required.
+ */
+inline constexpr auto auto_size = std::numeric_limits<size_t>::max();
+
+/**
+ * @brief Access mode of a memory mapping.
+ */
+enum class MmapMode {
+    READ,       //!< Read-only mapping.
+    READ_WRITE  //!< Read-write mapping, modifications are written back to the file.
+};
 
 /**
  * @brief This class represents a mapped memory.
  * Instead of reading files, we can map the memory via mmap for Linux or MapViewOfFile for Windows.
  * The MappedMemory class is a abstraction to handle such memory with os-dependent details.
  */
-class MappedMemory {
+class MappedMemory : public util::IMutableBuffer {
 public:
-    virtual char* data() noexcept = 0;
-    virtual size_t size() const noexcept = 0;
-    virtual ~MappedMemory() = default;
+    ~MappedMemory() override = default;
+
+    virtual const std::byte* data() const noexcept override = 0;
+    virtual std::byte* data() noexcept override = 0;
+
+    virtual size_t size() const noexcept override = 0;
+    const util::MemoryProperties& get_properties() const noexcept override final;
+
+    virtual void hint_evict(size_t offset, size_t size) noexcept = 0;
+    void hint_evict() noexcept override final;
+
+    /**
+     * @brief Hint that the given region of the mapping will be accessed soon.
+     *
+     * @param offset Offset within the mapping where prefetching starts.
+     * @param size   Number of bytes to prefetch. Defaults to the rest of the
+     *               mapping when set to auto_size.
+     */
+    virtual void hint_prefetch(size_t offset, size_t size) noexcept = 0;
+
+    /** @brief Starts asynchronous prefetching of the entire mapping and returns its completion handle. */
+    util::PrefetchToken hint_prefetch() noexcept override final;
+
+    /**
+     * @brief Asynchronous variant of @ref hint_prefetch: starts populating the region in the
+     * background and returns immediately. Any background work is joined before this object is
+     * destroyed.
+     *
+     * @param offset Offset within the mapping where prefetching starts.
+     * @param size   Number of bytes to prefetch. Defaults to the rest of the
+     *               mapping when set to auto_size.
+     * @return A handle that can be waited on to know when the region is actually resident; an
+     *         invalid handle means there is nothing to wait for.
+     */
+    virtual util::PrefetchToken hint_prefetch_async(size_t offset = 0, size_t size = auto_size) noexcept = 0;
 };
 
 /**
@@ -33,21 +93,30 @@ public:
  * in order to avoid time-consuming reading and reduce memory consumption.
  *
  * @param path Path to a file which memory will be mmaped.
+ * @param offset Offset in the file where the mapping starts.
+ * @param size Size of the mapping. If size is std::numeric_limits<size_t>::max(), maps from offset to EOF.
+ * @param no_placeholder When true, skip the Windows 10+ placeholder/VEH mechanism and use the legacy
+ *                       single-call MapViewOfFile path instead. This guarantees a uniform AllocationBase
+ *                       across the whole mapping, required for NPU zero-copy blob import. On Linux ignored.
+ * @param mode Access mode of the mapping. A read_write mapping requires the file to be writable and reports
+ *             no_mapping_id, because get_id() marks an immutable data source that consumers may share.
  * @return MappedMemory shared ptr object which keep mmaped memory and control the lifetime.
  */
-std::shared_ptr<ov::MappedMemory> load_mmap_object(const std::string& path);
-
-#ifdef OPENVINO_ENABLE_UNICODE_PATH_SUPPORT
+std::shared_ptr<ov::MappedMemory> load_mmap_object(const std::filesystem::path& path,
+                                                   size_t offset = 0,
+                                                   size_t size = auto_size,
+                                                   bool no_placeholder = false,
+                                                   MmapMode mode = MmapMode::READ);
 
 /**
- * @brief Returns mapped memory for a file from provided path.
- * Instead of reading files, we can map the memory via MapViewOfFile for Windows
- * in order to avoid time-consuming reading and reduce memory consumption.
+ * @brief Returns mapped memory for a file from provided file handle (cross-platform).
+ * Uses mmap on Linux/Unix (with file descriptor) or MapViewOfFile on Windows (with HANDLE).
+ * This allows external control of file access through a callback function.
  *
- * @param path Path to a file which memory will be mmaped.
+ * @param handle Platform-specific file handle (int fd on Linux, HANDLE on Windows).
+ * @param offset Offset in the file where the mapping starts.
+ * @param size Size of the mapping. If size is std::numeric_limits<size_t>::max(), maps from offset to EOF.
  * @return MappedMemory shared ptr object which keep mmaped memory and control the lifetime.
  */
-std::shared_ptr<ov::MappedMemory> load_mmap_object(const std::wstring& path);
-
-#endif  // OPENVINO_ENABLE_UNICODE_PATH_SUPPORT
+std::shared_ptr<ov::MappedMemory> load_mmap_object(FileHandle handle, size_t offset = 0, size_t size = auto_size);
 }  // namespace ov

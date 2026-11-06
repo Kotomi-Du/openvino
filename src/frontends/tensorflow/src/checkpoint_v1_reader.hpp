@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,6 +6,7 @@
 
 #include <sys/stat.h>
 
+#include <filesystem>
 #include <unordered_map>
 #include <vector>
 
@@ -16,23 +17,21 @@
 #include "ov_tensorflow/tensor_shape.pb.h"
 #include "ov_tensorflow/types.pb.h"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
+namespace ov::frontend::tensorflow {
 // stores information about shape, type, and shard id for Variable
 struct VariableInfo {
     ::tensorflow::TensorShapeProto variable_shape;
     ::tensorflow::DataType variable_type;
     int32_t shard_id;
     std::vector<int64_t> starts;
-    std::vector<int64_t> lenghts;
+    std::vector<int64_t> lengths;
 };
 
 // reads checkpoints of v1 version
 // it parses value, shape and type for Variable nodes
 class CheckpointV1Reader {
-    const std::string m_checkpoints;
-    // a map from Variable name to its informations
+    const std::filesystem::path m_checkpoints;
+    // a map from Variable name to its information
     std::unordered_map<std::string, VariableInfo> m_variables_info_map;
     // a vector of streams for shards, where shard is one checkpoint file
     std::vector<std::shared_ptr<std::ifstream>> m_shards;
@@ -41,8 +40,7 @@ class CheckpointV1Reader {
 
 public:
     /// \brief constructs CheckpointV1Reader for a given directory of checkpoint files
-    // CheckpointV1Reader(const std::string& checkpoints_dir);
-    CheckpointV1Reader(const std::string& checkpoints);
+    CheckpointV1Reader(const std::filesystem::path& checkpoints);
 
     /// \brief initialize Checkpoint V1 reader
     void initialize();
@@ -74,6 +72,4 @@ private:
                     uint64_t& restart_offset) const;
 };
 
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow

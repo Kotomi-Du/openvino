@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -34,15 +34,17 @@
 #include "openvino/op/constant.hpp"
 #include "openvino/op/transpose.hpp"
 #include "shape_inference/custom/transpose.hpp"
-#include "utils/debug_capabilities.h"
 #include "utils/general_utils.h"
+#ifdef CPU_DEBUG_CAPS
+#    include "utils/debug_capabilities.h"
+#endif
 using namespace dnnl;
 
 namespace ov::intel_cpu::node {
 
 bool Transpose::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept {
     try {
-        if (!one_of(op->get_type_info(), ov::op::v1::Transpose::get_type_info_static())) {
+        if (none_of(op->get_type_info(), ov::op::v1::Transpose::get_type_info_static())) {
             errorMessage = "Node is not an instance of the Transpose operation from opset1.";
             return false;
         }
@@ -50,6 +52,11 @@ bool Transpose::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, 
         if (op->get_input_node_ptr(INPUT_ORDER_IDX)->get_type_info() != ov::op::v0::Constant::get_type_info_static()) {
             // TODO: Support parameterized Order input for dynamic shapes.
             errorMessage = "Constant expected as the second input for static shapes.";
+            return false;
+        }
+
+        if (op->get_input_element_type(INPUT_DATA_IDX) == ov::element::string) {
+            errorMessage = "String element type is not supported.";
             return false;
         }
     } catch (...) {
@@ -123,7 +130,7 @@ void Transpose::initSupportedPrimitiveDescriptors() {
 
     const auto& inputDataShape = getInputShapeAtPort(INPUT_DATA_IDX);
     const auto& outputDataShape = getOutputShapeAtPort(0);
-    if (inputDataShape.getRank() == 4 || inputDataShape.getRank() == 5) {
+    if (any_of(inputDataShape.getRank(), 4U, 5U)) {
         config.inConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(prec, inputDataShape));
         config.outConfs[0].setMemDesc(creatorsMap.at(LayoutType::ncsp)->createSharedDesc(prec, outputDataShape));
         supportedPrimitiveDescriptorsBuilder(config, transposeParams);
@@ -139,8 +146,7 @@ void Transpose::initSupportedPrimitiveDescriptors() {
             supportedPrimitiveDescriptorsBuilder(config, transposeParams);
         }
 #endif  // OPENVINO_ARCH_X86_64
-        if (prec == ov::element::f32 || prec == ov::element::f16 || prec == ov::element::i8 ||
-            prec == ov::element::u8 || prec == ov::element::bf16) {
+        if (any_of(prec, ov::element::f32, ov::element::f16, ov::element::i8, ov::element::u8, ov::element::bf16)) {
             config.inConfs[0].setMemDesc(creatorsMap.at(LayoutType::nspc)->createSharedDesc(prec, inputDataShape));
             config.outConfs[0].setMemDesc(creatorsMap.at(LayoutType::nspc)->createSharedDesc(prec, outputDataShape));
             supportedPrimitiveDescriptorsBuilder(config, transposeParams);
@@ -177,9 +183,7 @@ void Transpose::prepareParams() {
         auto dstDesc = dstMemPtr->getDescWithType<DnnlMemoryDesc>()->getDnnlDesc();
         auto srcDesc = dnnl::memory::desc(dstDesc.get_dims(), dstDesc.get_data_type(), memory::format_tag::acdb);
         auto result = getReorderPrim(context->getParamsCache(), getEngine(), srcDesc, dstDesc);
-        if (!result) {
-            THROW_CPU_NODE_ERR("reorder primitive descriptor was not found.");
-        }
+        CPU_NODE_ASSERT(result, "reorder primitive descriptor was not found.");
         prim = result;
 
         getSelectedPrimitiveDescriptor()->setImplementationType(
@@ -221,9 +225,7 @@ void Transpose::prepareParams() {
     auto cache = context->getParamsCache();
     auto result = cache->getOrCreate(transposeParams.permuteParams, builder);
 
-    if (!result.first) {
-        THROW_CPU_NODE_ERR("Primitive descriptor was not found.");
-    }
+    CPU_NODE_ASSERT(result.first, "Primitive descriptor was not found.");
 
     execPtr = result.first;
 }
@@ -235,15 +237,9 @@ void Transpose::createPrimitive() {
 
     auto dstMemPtr = getDstMemoryAtPort(0);
     auto srcMemPtr = getSrcMemoryAtPort(INPUT_DATA_IDX);
-    if (!dstMemPtr) {
-        THROW_CPU_NODE_ERR("Destination memory is null.");
-    }
-    if (!srcMemPtr) {
-        THROW_CPU_NODE_ERR("Input memory is null.");
-    }
-    if (getSelectedPrimitiveDescriptor() == nullptr) {
-        THROW_CPU_NODE_ERR("Preferable primitive descriptor was not set.");
-    }
+    CPU_NODE_ASSERT(dstMemPtr, "Destination memory is null.");
+    CPU_NODE_ASSERT(srcMemPtr, "Input memory is null.");
+    CPU_NODE_ASSERT(getSelectedPrimitiveDescriptor(), "Preferable primitive descriptor was not set.");
 
     if (getParentEdgeAt(INPUT_DATA_IDX)->getMemory().getDesc().hasLayoutType(LayoutType::ncsp) &&
         getChildEdgeAt(0)->getMemory().getDesc().hasLayoutType(LayoutType::ncsp) &&
@@ -289,7 +285,7 @@ void Transpose::execute(const dnnl::stream& strm) {
 
         execPtr->exec({srcMemPtr}, {dstMemPtr});
     } else {
-        THROW_CPU_NODE_ERR("Primitive was not created.");
+        CPU_NODE_THROW("Primitive was not created.");
     }
 }
 

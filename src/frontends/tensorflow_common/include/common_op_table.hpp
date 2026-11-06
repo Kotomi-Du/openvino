@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -17,10 +17,7 @@
                            ("While validating node '" + node_context.get_op_type() + "'"), \
                            __VA_ARGS__)
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 #define OP_CONVERTER(op)       OutputVector op(const ov::frontend::NodeContext& node)
 #define OP_CONVERTER_NAMED(op) NamedOutputVector op(const ov::frontend::NodeContext& node)
 #define OP_T_CONVERTER(op) \
@@ -136,6 +133,7 @@ OP_CONVERTER(translate_random_uniform_op);
 OP_CONVERTER(translate_random_uniform_int_op);
 OP_CONVERTER(translate_real_imag_op);
 OP_CONVERTER(translate_relu_6_op);
+OP_CONVERTER(translate_relu_0_to_1_op);
 OP_CONVERTER(translate_reciprocal_op);
 OP_CONVERTER(translate_reshape_op);
 OP_CONVERTER(translate_resource_gather_op);
@@ -193,6 +191,7 @@ OP_CONVERTER(translate_truncate_mod_op);
 OP_CONVERTER(translate_unique_with_counts_op);
 OP_CONVERTER(translate_unpack_op);
 OP_CONVERTER(translate_unravel_index_op);
+OP_CONVERTER(translate_unsorted_segment_max_op);
 OP_CONVERTER(translate_unsorted_segment_sum_op);
 OP_CONVERTER(translate_where_op);
 OP_CONVERTER(translate_x_div_y_op);
@@ -203,7 +202,4 @@ OP_CONVERTER(translate_zeros_like_op);
 // Translators for internal operations
 OP_CONVERTER_NAMED(translate_unique_op);
 
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

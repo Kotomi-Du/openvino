@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,8 +8,7 @@
 #include "openvino/frontend/decoder.hpp"
 #include "openvino/frontend/visibility.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 
 /// Abstract representation for an input model graph that gives nodes in topologically sorted order
 class FRONTEND_API GraphIterator : ::ov::RuntimeAttribute {
@@ -50,5 +49,4 @@ public:
     virtual std::map<std::string, std::string> get_output_names_map() const;
 };
 
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

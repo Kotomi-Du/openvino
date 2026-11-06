@@ -218,6 +218,19 @@ of the ``ov::RemoteContext`` sub-classes.
 object or request plugin to allocate specific device memory. There also provides C APIs to do the same things with C++ APIs.
 For more details, see the code snippets below:
 
+.. note::
+
+   In the C API, ``ov_core_create_context()`` and ``ov_remote_context_create_tensor()`` take property
+   values as variadic arguments and only handle-type properties are read as raw pointers:
+   ``ov_property_key_intel_gpu_ocl_context``, ``ov_property_key_intel_gpu_ocl_queue``,
+   ``ov_property_key_intel_gpu_va_device``, ``ov_property_key_intel_gpu_mem_handle``, and,
+   on Windows only, ``ov_property_key_intel_gpu_dev_object_handle`` (an ``ID3D11Resource*``).
+   Every other value is read with ``va_arg(..., char*)`` and must be passed as a null-terminated
+   string, including numeric ones such as ``ov_property_key_intel_gpu_va_plane``,
+   ``ov_property_key_intel_gpu_dev_object_handle`` on Linux (a ``VASurfaceID``),
+   ``ov_property_key_intel_gpu_ocl_context_device_id``, and ``ov_property_key_intel_gpu_tile_id``.
+   Passing such a value as an integer is undefined behavior.
+
 
 .. tab-set::
 
@@ -232,6 +245,19 @@ For more details, see the code snippets below:
             .. doxygensnippet:: docs/articles_en/assets/snippets/gpu/remote_objects_creation.cpp
                :language: cpp
                :fragment: [wrap_usm_pointer]
+
+         .. tab-item:: CPU pointer
+            :sync: cpu-pointer
+
+            Use this overload when your application owns a CPU virtual address, for example memory
+            allocated with ``ov::util::aligned_alloc`` or memory mapped from a file. On the OpenCL
+            backend, the pointer address and allocation size must be aligned to
+            ``ov::intel_gpu::cacheline_size``. The memory must remain valid for the whole lifetime of
+            the created remote tensor.
+
+            .. doxygensnippet:: docs/articles_en/assets/snippets/gpu/remote_objects_creation.cpp
+               :language: cpp
+               :fragment: [wrap_cpu_pointer]
 
          .. tab-item:: cl_mem
             :sync: cl-mem
@@ -253,6 +279,33 @@ For more details, see the code snippets below:
             .. doxygensnippet:: docs/articles_en/assets/snippets/gpu/remote_objects_creation.cpp
                :language: cpp
                :fragment: [wrap_cl_image]
+
+         .. tab-item:: external shared handle
+            :sync: external-shared-handle
+
+            Use this overload when your application already owns an OS-level shared memory handle
+            (for example, DX12 NT handle on Windows or DMA-BUF file descriptor on Linux).
+
+            .. doxygensnippet:: docs/articles_en/assets/snippets/gpu/remote_objects_creation.cpp
+               :language: cpp
+               :fragment: [wrap_shared_handle]
+
+            The ``shape`` and ``element type`` must describe the same memory layout as the external buffer.
+            The handle must remain valid for the whole lifetime of the created remote tensor.
+
+         .. tab-item:: file
+            :sync: file
+
+            Use this overload to wrap tensor data stored in a file. The access mode is declared in the
+            descriptor: ``AccessMode::READ`` maps the file read-only and may only be used as an inference
+            input, while ``AccessMode::READ_WRITE`` requires a writable file, may be used as an inference
+            output, and makes changes done through the tensor visible in the file. The plugin keeps the
+            mapping alive for the whole lifetime of the created remote tensor, so the file must not
+            otherwise be modified until the tensor is destroyed.
+
+            .. doxygensnippet:: docs/articles_en/assets/snippets/gpu/remote_objects_creation.cpp
+               :language: cpp
+               :fragment: [wrap_file]
 
          .. tab-item:: biplanar NV12 surface
             :sync: biplanar-nv12-surface
@@ -451,6 +504,26 @@ pointers or the ``VASurfaceID`` handle, as shown in the examples below:
          infer_request.start_async();
          infer_request.wait();
 
+.. important::
+
+   The application is responsible for the lifetime of the ``VADisplay`` and every ``VASurfaceID`` passed to the
+   plugin. Keep the exact VA surface allocation valid until both of the following conditions are met:
+
+   * All remote tensors created from the surface, including their copies, are destroyed.
+   * Every ``ov::InferRequest`` to which such a tensor was passed is destroyed, or has completed an inference after
+      a replacement tensor was assigned to the same input.
+
+   If a remote tensor is passed to the ``AUTO`` or ``MULTI`` plugin, keep the VA surface valid until the compiled
+   model is destroyed. These virtual-device plugins use internal infer requests whose tensor references
+   are not exposed to the application.
+
+   Do not destroy a VA surface or allow its numeric ID to be recycled before these observable conditions are met.
+   Deleting a shared VA surface earlier makes subsequent use of its OpenCL memory object undefined, as specified
+   by the ``cl_intel_va_api_media_sharing`` extension.
+
+   Pixel contents may change between inference calls while the same surface allocation remains alive. Synchronize VA
+   writes before inference; the plugin acquires and releases the shared surface through the OpenCL
+   interoperability API for every execution.
 
 .. important::
 
@@ -621,7 +694,7 @@ Two types of map entries are possible: descriptor and container.
 Descriptor sets the expected structure and possible parameter values of the map.
 
 For possible low-level properties and their description, refer to the header file:
-`remote_properties.hpp <https://github.com/openvinotoolkit/openvino/blob/releases/2025/0/src/inference/include/openvino/runtime/intel_gpu/remote_properties.hpp>`__.
+`remote_properties.hpp <https://github.com/openvinotoolkit/openvino/blob/releases/2026/0/src/inference/include/openvino/runtime/intel_gpu/remote_properties.hpp>`__.
 
 Examples
 ###########################################################
@@ -669,6 +742,6 @@ To see pseudo-code of usage examples, refer to the sections below.
 See Also
 #######################################
 
-* `ov::Core <https://docs.openvino.ai/2025/api/c_cpp_api/classov_1_1_core.html>`__
-* `ov::RemoteTensor <https://docs.openvino.ai/2025/api/c_cpp_api/classov_1_1_remote_tensor.html>`__
+* `ov::Core <https://docs.openvino.ai/2026/api/c_cpp_api/classov_1_1_core.html>`__
+* `ov::RemoteTensor <https://docs.openvino.ai/2026/api/c_cpp_api/classov_1_1_remote_tensor.html>`__
 

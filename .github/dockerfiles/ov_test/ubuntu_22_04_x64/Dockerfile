@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 ARG REGISTRY="docker.io"
 FROM ${REGISTRY}/library/ubuntu:22.04
 
@@ -23,6 +26,8 @@ RUN apt-get update && \
         ca-certificates \
         gpg-agent \
         tzdata \
+        # coverage
+        lcov \
         # parallel gzip
         pigz \
         # Samples
@@ -32,6 +37,11 @@ RUN apt-get update && \
         python3.11-venv \
         python3.11-distutils \
         libhdf5-dev \
+        # JS API
+        xvfb \
+        libgtk-3-0 \
+        libgbm1 \
+        libnss3 \
         # For TF Models tests
         wget \
         # libGL for PyTorch Models tests
@@ -62,5 +72,4 @@ RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
 RUN python3.11 -m venv venv
 ENV PATH="/venv/bin:$SCCACHE_HOME:$PATH"
 
-ENV PIP_CACHE_DIR=/mount/caches/pip/linux/${PIP_VERSION}
 ENV PIP_INSTALL_PATH=/venv/lib/python3.11/site-packages

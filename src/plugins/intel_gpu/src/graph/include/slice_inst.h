@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -80,8 +80,9 @@ inline const std::vector<size_t>& SliceKernelRefNeededInputs::GetNeededInputInde
 ///////////////////////////////////////////////////////////////////
 inline bool SliceKernelRefNeededInputs::IsInputNeededInRuntime(InputIndices type) const {
     for (auto idx : neededIndexes) {
-        if (idx == type)
+        if (idx == type) {
             return true;
+        }
     }
     return false;
 }

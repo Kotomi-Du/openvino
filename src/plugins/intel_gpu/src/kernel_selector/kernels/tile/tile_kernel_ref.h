@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -17,7 +17,7 @@ struct tile_params : public base_params {
 class TileKernelRef : public KernelBaseOpenCL {
 public:
     TileKernelRef() : KernelBaseOpenCL("tile_ref") {}
-    virtual ~TileKernelRef() {}
+    ~TileKernelRef() override = default;
 
     virtual JitConstants GetJitConstants(const tile_params& params) const;
     virtual CommonDispatchData SetDefault(const tile_params& params) const;

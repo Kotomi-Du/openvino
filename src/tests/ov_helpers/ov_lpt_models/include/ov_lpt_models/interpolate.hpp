@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -35,7 +35,6 @@ public:
         const ov::op::v0::Interpolate::Attributes& interpAttrs,
         const ov::element::Type precisionBeforeDequantization,
         const ov::builder::subgraph::DequantizationOperations& dequantizationBefore,
-        const ov::element::Type precisionAfterOperation,
         const ov::builder::subgraph::DequantizationOperations& dequantizationAfter);
 
     // v4::Interpolate
@@ -61,7 +60,6 @@ public:
         const ov::op::v4::Interpolate::InterpolateAttrs& interp4Attrs,
         const ov::element::Type precisionBeforeDequantization,
         const ov::builder::subgraph::DequantizationOperations& dequantizationBefore,
-        const ov::element::Type precisionAfterOperation,
         const ov::builder::subgraph::DequantizationOperations& dequantizationAfter);
 };
 

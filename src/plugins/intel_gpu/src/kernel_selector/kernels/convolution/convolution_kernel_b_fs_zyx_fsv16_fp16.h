@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,6 +14,6 @@ public:
 
     ConvolutionKernel_b_fs_zyx_fsv16_fp16() : ConvolutionKernel_b_fs_zyx_fsv16(Datatype::F16) {}
 
-    virtual ~ConvolutionKernel_b_fs_zyx_fsv16_fp16() {}
+    ~ConvolutionKernel_b_fs_zyx_fsv16_fp16() override = default;
 };
 }  // namespace kernel_selector

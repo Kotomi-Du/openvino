@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,10 +14,7 @@
 #include "openvino/op/transpose.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace jax {
-namespace op {
+namespace ov::frontend::jax::op {
 
 using namespace ov::op;
 
@@ -37,7 +34,4 @@ OutputVector translate_reshape(const NodeContext& context) {
     return {res};
 };
 
-}  // namespace op
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax::op

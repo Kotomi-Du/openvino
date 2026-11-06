@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -109,9 +109,10 @@ ov::mock_auto_plugin::tests::BaseTest::BaseTest(const MODELTYPE modelType) {
     ON_CALL(*plugin, get_device_list)
         .WillByDefault([this](ov::AnyMap& config,
                               const std::shared_ptr<const ov::Model>& model,
-                              const std::string& model_path) {
+                              const std::filesystem::path& model_path) {
             return plugin->Plugin::get_device_list(config, model, {});
         });
+    ON_CALL(*plugin, is_telemetry_available).WillByDefault(Return(true));
     ON_CALL(*plugin, parse_meta_devices)
         .WillByDefault([this](const std::string& priorityDevices, const ov::AnyMap& config) {
             return plugin->Plugin::parse_meta_devices(priorityDevices, config);
@@ -120,8 +121,21 @@ ov::mock_auto_plugin::tests::BaseTest::BaseTest(const MODELTYPE modelType) {
     ON_CALL(*plugin, select_device)
         .WillByDefault([this](const std::vector<DeviceInformation>& metaDevices,
                               const std::string& netPrecision,
-                              unsigned int priority) {
-            return plugin->Plugin::select_device(metaDevices, netPrecision, priority);
+                              unsigned int priority,
+                              const ov::auto_plugin::DeviceSelectionPolicy& selection_policy,
+                              const std::optional<DeviceInformation>& low_power_device) {
+            return plugin->Plugin::select_device(metaDevices, netPrecision, priority, selection_policy, low_power_device);
+        });
+
+    ON_CALL(*plugin, sort_device_by_perf_curve)
+        .WillByDefault([this](const std::unordered_map<std::string, float>& deviceUtilizations,
+                              const std::list<DeviceInformation>& validDevices,
+                              const ov::intel_auto::PerfCurveTable& perfCurveTable,
+                              size_t* out_scored_count) {
+            return plugin->Plugin::sort_device_by_perf_curve(deviceUtilizations,
+                                                             validDevices,
+                                                             perfCurveTable,
+                                                             out_scored_count);
         });
 
     ON_CALL(*plugin, get_valid_device)
@@ -129,6 +143,13 @@ ov::mock_auto_plugin::tests::BaseTest::BaseTest(const MODELTYPE modelType) {
             std::list<DeviceInformation> devices(metaDevices.begin(), metaDevices.end());
             return devices;
         });
+
+    ON_CALL(*plugin, get_property).WillByDefault([this](const std::string& name, const ov::AnyMap& arguments) {
+        return plugin->Plugin::get_property(name, arguments);
+    });
+
+    ON_CALL(*plugin, get_device_utilizations)
+        .WillByDefault(Return(std::unordered_map<std::string, float>{}));
 }
 
 ov::mock_auto_plugin::tests::BaseTest::~BaseTest() {

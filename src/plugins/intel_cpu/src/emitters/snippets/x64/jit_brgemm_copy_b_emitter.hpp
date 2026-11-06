@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -24,7 +24,7 @@ namespace ov::intel_cpu {
 
 class jit_brgemm_copy_b_emitter : public jit_binary_call_emitter {
 public:
-    jit_brgemm_copy_b_emitter(dnnl::impl::cpu::x64::jit_generator* h,
+    jit_brgemm_copy_b_emitter(dnnl::impl::cpu::x64::jit_generator_t* h,
                               dnnl::impl::cpu::x64::cpu_isa_t isa,
                               const ov::snippets::lowered::ExpressionPtr& expr,
                               const snippets::KernelExecutorTablePtr& kernel_table,
@@ -41,8 +41,8 @@ private:
     void validate_arguments(const std::vector<size_t>& in, const std::vector<size_t>& out) const override;
     void emit_impl(const std::vector<size_t>& in, const std::vector<size_t>& out) const override;
 
-    std::vector<size_t> m_memory_offsets{};
-    std::vector<size_t> m_buffer_ids{};
+    std::vector<size_t> m_memory_offsets;
+    std::vector<size_t> m_buffer_ids;
     std::shared_ptr<BrgemmCopyBKernelExecutor> m_kernel_executor{nullptr};
     bool m_with_comp{false};
 

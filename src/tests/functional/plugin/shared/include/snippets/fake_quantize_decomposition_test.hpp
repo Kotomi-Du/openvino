@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -39,10 +39,17 @@ typedef std::tuple<
 
 class FakeQuantizeDecompositionTest : public testing::WithParamInterface<testsParams>, virtual public SnippetsTestsCommon {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<testsParams> obj);
+    static std::string getTestCaseName(const testing::TestParamInfo<testsParams>& obj);
 
 protected:
     void SetUp() override;
+    void validate() override;
+
+private:
+    void validateOriginalLayersNamesByType(const std::string& layerType, const std::string& originalLayersNames);
+
+    std::string expected_layer_type;
+    std::string expected_original_layers_names;
 };
 }  // namespace snippets
 }  // namespace test

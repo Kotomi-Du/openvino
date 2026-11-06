@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -22,8 +22,7 @@ struct Edge {
     const int m_port_idx;
     const std::string m_new_input_name;
 };
-namespace frontend {
-namespace onnx {
+namespace frontend::onnx {
 /// \brief Defines an edge connected to an input of any node in the graph.
 ///        It consists of a node index in the processed ONNX model and the port index.
 ///        The node index should point to a node in the topological sort of the underlying
@@ -105,7 +104,7 @@ struct EditorOutput {
     const int m_output_index = -1;
 };
 
-/// \brief Specifies a single node by output name which is determinitic
+/// \brief Specifies a single node by output name which is deterministic
 ///        or node name which can be ambiguous.
 ///        For a node test_node, with 2 outputs:
 ///
@@ -115,7 +114,7 @@ struct EditorOutput {
 ///        You can indicate test_node by name as EditorNode("test_node")
 ///        or by assigned output as EditorNode(EditorOutput("out1"))
 ///        or EditorNode(EditorOutput("out2"))
-///        or you can determine the node by postition of a node in an ONNX graph (in topological order).
+///        or you can determine the node by position of a node in an ONNX graph (in topological order).
 struct EditorNode {
     EditorNode(std::string node_name) : m_node_name{std::move(node_name)} {}
     EditorNode(EditorOutput output) : m_output_name{std::move(output.m_output_name)} {}
@@ -124,6 +123,5 @@ struct EditorNode {
     std::string m_output_name = "";
     int m_node_index = -1;
 };
-}  // namespace onnx
-}  // namespace frontend
+}  // namespace frontend::onnx
 }  // namespace ov

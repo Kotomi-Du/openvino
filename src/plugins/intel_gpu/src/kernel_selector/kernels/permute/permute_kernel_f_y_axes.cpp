@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,8 +20,9 @@ constexpr size_t c3DTransposeBufHeight = 4UL;
 
 size_t GetDivisor(const size_t input_size) {
     for (size_t d : {16, 8, 4, 2}) {
-        if (input_size % d == 0)
+        if (input_size % d == 0) {
             return d;
+        }
     }
 
     return 1; // Fallback: Any integer divides evenly by 1
@@ -63,11 +64,16 @@ size_t GetTileWidth(const permute_params& params) {
         min_divisor = std::min(min_divisor, cSimpleMemCopyOpDivider);
     }
 
-    // i64 only supports tile size 4
+    // i64 uses a smaller tile to reduce register/SLM pressure, but only if
+    // the resulting subgroup size is supported by the platform (Xe2+ lacks SIMD8).
     if ((input_type == Datatype::INT64) || (output_type == Datatype::INT64)) {
-        min_divisor = min_divisor >= 4 ? min_divisor / 2 : min_divisor;
+        size_t halved = min_divisor >= 4 ? min_divisor / 2 : min_divisor;
+        const auto& supported = params.engineInfo.supportedSimdSizes;
+        if (std::any_of(supported.begin(), supported.end(), [halved](size_t s) { return s == halved; }) || supported.empty()) {
+            min_divisor = halved;
+        }
     }
-    if (input_type == Datatype::F16) {
+    if (input_type == Datatype::F16 || input_type == Datatype::BF16) {
         min_divisor = min_divisor * 2;
     }
     if (input_type == Datatype::INT8 || input_type == Datatype::UINT8) {
@@ -89,12 +95,14 @@ size_t GetTileSize(const permute_params& params) {
 ParamsKey PermuteKernel_f_y_axes::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableInputDataType(Datatype::INT8);
     k.EnableInputDataType(Datatype::UINT8);
     k.EnableInputDataType(Datatype::INT32);
     k.EnableInputDataType(Datatype::INT64);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::INT8);
     k.EnableOutputDataType(Datatype::UINT8);
@@ -197,7 +205,7 @@ CommonDispatchData PermuteKernel_f_y_axes::SetDefault(const permute_params& para
 
 bool PermuteKernel_f_y_axes::Validate(const Params& p) const {
     if (!Parent::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const auto is_swapping_f_with_y = [](const std::vector<uint16_t>& order) {
@@ -207,10 +215,7 @@ bool PermuteKernel_f_y_axes::Validate(const Params& p) const {
         if (order.size() != 4) {
             return false;
         }
-        if (order[0] != 0 || order[1] != 3 || order[2] != 2 || order[3] != 1) {
-            return false;
-        }
-        return true;
+        return order[0] == 0 && order[1] == 3 && order[2] == 2 && order[3] == 1;
     };
 
     const auto& params = dynamic_cast<const permute_params&>(p);
@@ -222,17 +227,17 @@ bool PermuteKernel_f_y_axes::Validate(const Params& p) const {
     const auto feature_div = GetDivisor(in.Feature().v);
     const auto y_div = GetDivisor(in.Y().v);
     if (feature_div == 1 || y_div == 1) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
     if (in.X().v > 1 && GetDivisor(in.X().v) == 1) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
     if (!is_swapping_f_with_y(params.order)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     if (in_layout != out_layout) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     // Accept only supported blocked layouts and SIMD sizes.
@@ -240,9 +245,9 @@ bool PermuteKernel_f_y_axes::Validate(const Params& p) const {
         const auto feature_block_size = GetFeatureBlockSize(params);
         const auto tile_size = GetTileSize(params);
         const auto subgroup_size = Is3DTranspose(params) ? feature_block_size : tile_size;
-        if (!(IsSIMDSizeSupported(params.engineInfo, subgroup_size) &&
-              (in_layout == DataLayout::b_fs_yx_fsv32 || in_layout == DataLayout::b_fs_yx_fsv16))) {
-            return false;
+        if (!IsSIMDSizeSupported(params.engineInfo, subgroup_size) ||
+              (in_layout != DataLayout::b_fs_yx_fsv32 && in_layout != DataLayout::b_fs_yx_fsv16)) {
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -32,7 +32,7 @@ public:
                           const std::vector<MemoryDescPtr>& dstDescs,
                           const ExecutorContext::CPtr& context)
         : ExecutorFactoryLegacy(context) {
-        for (auto& desc : getDeconvExecutorsList()) {
+        for (const auto& desc : getDeconvExecutorsList()) {
             if (desc.builder->isSupported(deconvAttrs, srcDescs, dstDescs)) {
                 supportedDescs.push_back(desc);
             }

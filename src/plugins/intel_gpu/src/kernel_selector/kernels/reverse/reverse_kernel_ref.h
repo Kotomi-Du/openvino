@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,7 +23,7 @@ class ReverseKernelRef : public KernelBaseOpenCL {
 public:
     ReverseKernelRef() : KernelBaseOpenCL("reverse_ref") {}
 
-    virtual ~ReverseKernelRef() {}
+    ~ReverseKernelRef() override = default;
 
     virtual JitConstants GetJitConstants(const reverse_params& params) const;
 

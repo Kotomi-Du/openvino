@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -31,13 +31,8 @@ typedef std::tuple<
 class GatherGPUTest : public testing::WithParamInterface<GatherGPUTestParams>,
                       virtual public ov::test::SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<GatherGPUTestParams> obj) {
-        GatherShapeParams Shapes;
-        ov::element::Type model_type;
-        bool isIndicesConstant;
-        bool isAxisConstant;
-
-        std::tie(Shapes, model_type, isIndicesConstant, isAxisConstant) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<GatherGPUTestParams>& obj) {
+        const auto& [Shapes, model_type, isIndicesConstant, isAxisConstant] = obj.param;
 
         std::ostringstream result;
         result << "IS=(";
@@ -65,13 +60,9 @@ public:
 
 protected:
     void SetUp() override {
-        GatherShapeParams Shapes;
-        ov::element::Type model_type;
-        bool isAxisConstant;
-        bool isIndicesConstant;
         const auto int_model_type = ov::element::i32;
 
-        std::tie(Shapes, model_type, isIndicesConstant, isAxisConstant) = this->GetParam();
+        const auto& [Shapes, model_type, isIndicesConstant, isAxisConstant] = this->GetParam();
         const int axis = Shapes.axis;
         const int batchDims = Shapes.batch_dims;
         targetDevice = ov::test::utils::DEVICE_GPU;
@@ -122,6 +113,31 @@ protected:
                                                           batchDims);
         ov::ResultVector results{std::make_shared<ov::op::v0::Result>(gatherNode)};
         function = std::make_shared<ov::Model>(results, params, "Gather");
+    }
+
+    void generate_inputs(const std::vector<ov::Shape>& targetInputStaticShapes) override {
+        // constrain "indices" to a valid range while leaving every other input to the default generator
+        const auto axis = std::get<0>(this->GetParam()).axis;
+        const auto& funcInputs = function->inputs();
+        inputs.clear();
+        for (size_t i = 0; i < funcInputs.size(); ++i) {
+            const auto& funcInput = funcInputs[i];
+            ov::Tensor tensor;
+            if (funcInput.get_node()->get_friendly_name() == "indices") {
+                const auto dataRank = static_cast<int>(targetInputStaticShapes[0].size());
+                const auto axisNorm = axis < 0 ? axis + dataRank : axis;
+                ov::test::utils::InputGenerateData in_data;
+                in_data.start_from = 0;
+                in_data.range = static_cast<uint32_t>(targetInputStaticShapes[0][axisNorm]);
+                tensor = ov::test::utils::create_and_fill_tensor(funcInput.get_element_type(),
+                                                                 targetInputStaticShapes[i],
+                                                                 in_data);
+            } else {
+                tensor = ov::test::utils::create_and_fill_tensor(funcInput.get_element_type(),
+                                                                 targetInputStaticShapes[i]);
+            }
+            inputs.insert({funcInput.get_node_shared_ptr(), tensor});
+        }
     }
 };
 
@@ -195,5 +211,26 @@ INSTANTIATE_TEST_SUITE_P(smoke_dynamic_input_shapes_const_target_shapes, GatherG
                     ::testing::ValuesIn(model_types),                          // network precision
                     ::testing::Values(true),                                   // is const indices
                     ::testing::Values(true)),                                  // is const axis
+                GatherGPUTest::getTestCaseName);
+
+const std::vector<GatherShapeParams> dynamicAxisStaticOutputScalarIndices = {
+    {
+        ov::test::InputShape(ov::PartialShape({-1, 300}), {{271, 300}}),
+        ov::test::InputShape(ov::PartialShape({}), {{}}),
+        0, 0
+    },
+    {
+        ov::test::InputShape(ov::PartialShape({8, 300}), {{8, 300}}),
+        ov::test::InputShape(ov::PartialShape({}), {{}}),
+        0, 0
+    }
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_dynamic_axis0_scalar_indices_static_output, GatherGPUTest,
+                ::testing::Combine(
+                    ::testing::ValuesIn(dynamicAxisStaticOutputScalarIndices),  // input shapes
+                    ::testing::Values(ov::element::f32),                        // network precision
+                    ::testing::Values(false, true),                             // is const indices
+                    ::testing::Values(true)),                                   // is const axis
                 GatherGPUTest::getTestCaseName);
 } // namespace

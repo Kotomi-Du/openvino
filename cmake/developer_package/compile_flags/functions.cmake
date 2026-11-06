@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -7,37 +7,10 @@ include(CheckCXXCompilerFlag)
 include(CheckCXXSourceCompiles)
 
 #
-# ov_disable_deprecated_warnings()
-#
-# Disables deprecated warnings generation in current scope (directory, function)
-# Defines ov_c_cxx_deprecated varaible which contains C / C++ compiler flags
-#
-macro(ov_disable_deprecated_warnings)
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        set(ov_c_cxx_deprecated "/wd4996")
-    elseif(OV_COMPILER_IS_INTEL_LLVM)
-        if(WIN32)
-            set(ov_c_cxx_deprecated "/Wno-deprecated-declarations")
-        else()
-            set(ov_c_cxx_deprecated "-Wno-deprecated-declarations")
-        endif()
-    elseif(OV_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCXX)
-        set(ov_c_cxx_deprecated "-Wno-deprecated-declarations")
-    else()
-        message(WARNING "Unsupported CXX compiler ${CMAKE_CXX_COMPILER_ID}")
-    endif()
-
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${ov_c_cxx_deprecated}")
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${ov_c_cxx_deprecated}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ov_c_cxx_deprecated}")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ov_c_cxx_deprecated}")
-endmacro()
-
-#
 # ov_deprecated_no_errors()
 #
 # Don't threat deprecated warnings as errors in current scope (directory, function)
-# Defines ov_c_cxx_deprecated_no_errors varaible which contains C / C++ compiler flags
+# Defines ov_c_cxx_deprecated_no_errors variable which contains C / C++ compiler flags
 #
 macro(ov_deprecated_no_errors)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
@@ -236,7 +209,6 @@ macro(ov_arm_neon_optimization_flags flags)
         endif()
     else()
         if(AARCH64)
-            set(${flags} -O2)
             if(NOT CMAKE_CL_64)
                 list(APPEND ${flags} -ftree-vectorize)
             endif()
@@ -263,7 +235,7 @@ macro(ov_arm_neon_fp16_optimization_flags flags)
             message(WARNING "ARM64 fp16 is not supported by Android armv7")
         endif()
     elseif(AARCH64)
-        set(${flags} -O2 -march=armv8.2-a+fp16)
+        set(${flags} -march=armv8.2-a+fp16)
         if(NOT CMAKE_CL_64)
             list(APPEND ${flags} -ftree-vectorize)
         endif()
@@ -301,14 +273,31 @@ macro(ov_arm_sve_optimization_flags flags)
         endif()
     else()
         if(AARCH64)
-            set(${flags} -O2)
-
             # Add flag for SVE if supported
             if(CXX_SVE_FOUND)
                 list(APPEND ${flags} -march=armv8-a+sve+fp16)
             endif()
             if(NOT CMAKE_CL_64)
                 list(APPEND ${flags} -ftree-vectorize)
+                # Keep auto-vectorization but restrict it to Advanced SIMD (NEON) for these SVE clones.
+                # Under -march=+sve the auto-vectorizer otherwise turns generic STL templates (e.g.
+                # std::vector<T>::_M_default_append zero-init/resize) into SVE. Such instantiations are
+                # emitted as WEAK COMDAT symbols with default visibility, so the linker may select the SVE
+                # copy as the single definition used by baseline (non-SVE) translation units too, executing
+                # illegal SVE on cores without SVE (e.g. Cortex-A72) and crashing with SIGILL. Lowering the
+                # auto-vectorizer to NEON (legal on every ARMv8-A core) keeps the generic loops vectorized
+                # while preserving the intentional SVE kernels, which use explicit ACLE intrinsics
+                # (svld1/svmla_f32/...) and are unaffected. Both GCC and Clang auto-vectorize to SVE here,
+                # but the knob is compiler-specific (Android/MSVC/IntelLLVM handled above).
+                if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+                    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+                        list(APPEND ${flags} -mautovec-preference=asimd-only)
+                    else()
+                        list(APPEND ${flags} --param=aarch64-autovec-preference=1)
+                    endif()
+                elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
+                    list(APPEND ${flags} -mllvm -scalable-vectorization=off)
+                endif()
             endif()
 
             set(${flags} ${${flags}})
@@ -330,7 +319,8 @@ function(ov_disable_all_warnings)
         get_target_property(target_type ${target} TYPE)
 
         if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR (OV_COMPILER_IS_INTEL_LLVM AND WIN32))
-            target_compile_options(${target} PRIVATE /WX-)
+            # restrict to C/CXX sources only
+            target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/WX->)
         elseif(CMAKE_COMPILER_IS_GNUCXX OR OV_COMPILER_IS_CLANG OR (OV_COMPILER_IS_INTEL_LLVM AND UNIX))
             target_compile_options(${target} PRIVATE -w)
             # required for LTO
@@ -430,24 +420,6 @@ function(ov_link_system_libraries TARGET_NAME)
 endfunction()
 
 #
-# ov_try_use_gold_linker()
-#
-# Tries to use gold linker in current scope (directory, function)
-#
-function(ov_try_use_gold_linker)
-    # don't use the gold linker, if the mold linker is set
-    if(CMAKE_EXE_LINKER_FLAGS MATCHES "mold" OR CMAKE_MODULE_LINKER_FLAGS MATCHES "mold" OR CMAKE_SHARED_LINKER_FLAGS MATCHES "mold")
-        return()
-    endif()
-
-    # gold linker on ubuntu20.04 may fail to link binaries build with sanitizer
-    if(CMAKE_COMPILER_IS_GNUCXX AND NOT ENABLE_SANITIZER AND NOT CMAKE_CROSSCOMPILING)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fuse-ld=gold" PARENT_SCOPE)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fuse-ld=gold" PARENT_SCOPE)
-    endif()
-endfunction()
-
-#
 # ov_target_link_libraries_as_system(<TARGET NAME> <PUBLIC | PRIVATE | INTERFACE> <target1 target2 ...>)
 #
 function(ov_target_link_libraries_as_system TARGET_NAME LINK_TYPE)
@@ -464,7 +436,7 @@ function(ov_target_link_libraries_as_system TARGET_NAME LINK_TYPE)
                 endif()
                 foreach(include_directory IN LISTS include_directories)
                     # cannot include /usr/include headers as SYSTEM
-                    if(NOT "${include_directory}" MATCHES ".*/usr/include.*$")
+                    if(NOT "${include_directory}" MATCHES "^/usr/include($|/)")
                         # Note, some include dirs can be wrapper with $<BUILD_INTERFACE:dir1 dir2 ...> and we need to clean it
                         if ("${include_directory}" MATCHES "^\\$<BUILD_INTERFACE:.*>$")
                             string(REGEX REPLACE "^\\$<BUILD_INTERFACE:" "" include_directory "${include_directory}")

@@ -1,18 +1,19 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "program_dump_graph.h"
-#include "intel_gpu/runtime/debug_configuration.hpp"
-#include "to_string_utils.h"
-#include "data_inst.h"
-#include "condition_inst.h"
-#include "data_inst.h"
-#include "json_object.h"
 
 #include <algorithm>
-#include <vector>
 #include <string>
+#include <vector>
+
+#include "condition_inst.h"
+#include "data_inst.h"
+#include "dynamic_quantize_inst.h"
+#include "intel_gpu/runtime/debug_configuration.hpp"
+#include "json_object.h"
+#include "to_string_utils.h"
 
 namespace cldnn {
 namespace {
@@ -135,14 +136,18 @@ static const std::vector<std::string> colors = {
     "yellowgreen",
 };
 
-void close_stream(std::ofstream& graph) { graph.close(); }
+void close_stream(std::ofstream& graph) {
+    graph.close();
+}
 
-std::string get_node_id(const program_node* ptr) { return "node_" + std::to_string(reinterpret_cast<uintptr_t>(ptr)); }
+std::string get_node_id(const program_node* ptr) {
+    return "node_" + std::to_string(reinterpret_cast<uintptr_t>(ptr));
+}
 
 void dump_full_node(std::ofstream& out, const program_node* node) {
     try {
         out << node->type()->to_string(*node);
-    } catch(const std::exception& e) {
+    } catch (const std::exception& e) {
         auto node_info = std::shared_ptr<json_composite>(new json_composite());
         node_info->add("id", node->id());
         node_info->add("ptr", "node_" + std::to_string(reinterpret_cast<uintptr_t>(node)));
@@ -195,7 +200,7 @@ void dump_graph_init(std::ofstream& graph,
         return out;
     };
     const auto dump_mem_preferred_info = [](const program_node* ptr) {
-        std::string out = "";
+        std::string out;
         auto input_fmts = ptr->get_preferred_input_fmts();
         if (!input_fmts.empty()) {
             out += "preferred_in_fmt";
@@ -214,39 +219,57 @@ void dump_graph_init(std::ofstream& graph,
 
         return out;
     };
+    const auto dump_prim_additional_info = [](const program_node* ptr) {
+        std::ostringstream oss;
+        if (ptr->is_type<dynamic_quantize>()) {
+            auto dyn_quan = ptr->as<dynamic_quantize>().get_primitive();
+            oss << "\n"
+                << "group_sizes: " << ov::util::join<std::ostream>(cldnn::convert_vector<int64_t>(dyn_quan->attrs.group_sizes));
+            if (dyn_quan->attrs.precomputed_reduction) {
+                oss << "\n"
+                    << "precomputed_reduction_dt: " << dyn_quan->attrs.precomputed_reduction_dt;
+            }
+        }
+        return oss.str();
+    };
 
     graph << "digraph cldnn_program {\n";
-    for (auto& node : program.get_processing_order()) {
+    for (const auto& node : program.get_processing_order()) {
 #ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wpotentially-evaluated-expression"
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wpotentially-evaluated-expression"
 #endif
         std::string node_type_name = node->get_primitive()->type_string();
-        graph << "    " << get_node_id(node) << "[label=\"" << node->id() << ":"
-              << "\\ntype: " << node_type_name
+        const auto& inst = get_primitive_inst ? get_primitive_inst(node->id()) : nullptr;
+        graph << "    " << get_node_id(node) << "[label=\"" << node->id() << ":" << "\\ntype: " << node_type_name
               << "\\nprocessing number: " << program.get_processing_order().get_processing_number(node)
               << "\\n color:" << (node->is_reusing_memory() ? std::to_string(node->get_reused_memory_color()) : "none")
-              << (((get_primitive_inst) ? get_primitive_inst(node->id())->can_be_optimized() : node->can_be_optimized()) ? "\\n optimized out" : "");
+              << ((inst ? inst->can_be_optimized() : node->can_be_optimized()) ? "\\n optimized out" : "");
 
         if (!node->is_type<data>()) {
-            graph << "\\n Selected kernel: "
-                  << (node->get_selected_impl() == nullptr ? "none"
-                        : (node->get_preferred_impl_type() == impl_types::ocl && node->get_selected_impl()->get_kernels_dump_info().second.size())
-                        ?  node->get_selected_impl()->get_kernels_dump_info().second
-                        : node->get_selected_impl()->get_kernel_name()) + " / "
-                  << node->get_preferred_impl_type();
-            if (node->get_selected_impl()) {
-                auto dump_info = node->get_selected_impl()->get_kernels_dump_info();
-                if (dump_info.first.size()) {
-                    graph << "\\n batch_hash : " << dump_info.first;
+            graph << "\\n Selected kernel: ";
+            if (node->get_selected_impl() == nullptr) {
+                graph << "none";
+            } else {
+                const auto& dump_info = node->get_selected_impl()->get_kernels_dump_info(*node->get_kernel_impl_params());
+                if (dump_info.has_entries()) {
+                    graph << dump_info.get_entries();
+                } else {
+                    graph << node->get_selected_impl()->get_kernel_name();
+                }
+                graph << " / " << node->get_preferred_impl_type();
+
+                if (!dump_info.get_batch_hash().empty()) {
+                    graph << "\\n batch_hash : " << dump_info.get_batch_hash();
                 }
             }
         }
         graph << "\n" + dump_mem_info(node);
         graph << "\n" + dump_mem_preferred_info(node);
+        graph << "\n" + dump_prim_additional_info(node);
         graph << "\"";
 #ifdef __clang__
-#pragma clang diagnostic pop
+#    pragma clang diagnostic pop
 #endif
 
         if (node->is_type<condition>()) {
@@ -264,13 +287,13 @@ void dump_graph_init(std::ofstream& graph,
 
         // To print duplicated connection port between two nodes.
         // <user_node, user's input port>
-        std::set<std::pair<program_node *, int>> marked_connection;
+        std::set<std::pair<program_node*, int>> marked_connection;
 
-        for (auto& user : node->get_users()) {
+        for (const auto& user : node->get_users()) {
             bool doubled = true;
             auto it = user->get_dependencies().begin();
             while (it != user->get_dependencies().end()) {
-                int input_port = it - user->get_dependencies().begin();
+                int input_port = static_cast<int>(it - user->get_dependencies().begin());
                 if (it->first == node && marked_connection.find({node, input_port}) == marked_connection.end()) {
                     marked_connection.emplace(user, input_port);
                     break;
@@ -278,32 +301,33 @@ void dump_graph_init(std::ofstream& graph,
                 ++it;
             }
 
-            if (it == user->get_dependencies().end())
+            if (it == user->get_dependencies().end()) {
                 doubled = false;
-            graph << "    " << get_node_id(node) << " -> " << get_node_id(user)
-                  << " [label=\"" << it->second << " -> " << std::distance(user->get_dependencies().begin(), it) << "\"]";
-
+            }
+            graph << "    " << get_node_id(node) << " -> " << get_node_id(user) << " [label=\"" << it->second << " -> "
+                  << std::distance(user->get_dependencies().begin(), it) << "\"]";
 
             bool data_flow = node->is_in_data_flow() && user->is_in_data_flow();
             if (data_flow) {
-                if (doubled)
+                if (doubled) {
                     graph << " [color=red]";
-                else
+                } else {
                     graph << " [color=red, style=dashed, label=\"usr\"]";
+                }
             } else {
-                if (!doubled)
+                if (!doubled) {
                     graph << " [style=dashed, label=\"usr\"]";
+                }
             }
             graph << ";\n";
         }
 
-        for (auto& dep : node->get_dependencies()) {
+        for (const auto& dep : node->get_dependencies()) {
             if (std::find(dep.first->get_users().begin(), dep.first->get_users().end(), node) != dep.first->get_users().end()) {
                 continue;
             }
 
-            graph << "   " << get_node_id(node) << " -> " << get_node_id(dep.first)
-                  << " [style=dashed, label=\"dep\", constraint=false];\n";
+            graph << "   " << get_node_id(node) << " -> " << get_node_id(dep.first) << " [style=dashed, label=\"dep\", constraint=false];\n";
         }
     }
     graph << "}\n";
@@ -311,20 +335,23 @@ void dump_graph_init(std::ofstream& graph,
 }
 
 void dump_graph_processing_order(std::ofstream& graph, const program& program) {
-    for (auto node : program.get_processing_order())
+    for (auto* node : program.get_processing_order()) {
         graph << reinterpret_cast<uintptr_t>(node) << " (" << node->id() << ")\n";
+    }
     graph << '\n';
     close_stream(graph);
 }
 
 void dump_graph_optimized(std::ofstream& graph, const program& program) {
-    for (auto& prim_id : program.get_optimized_out()) graph << prim_id << "\n";
+    for (const auto& prim_id : program.get_optimized_out()) {
+        graph << prim_id << "\n";
+    }
     graph << '\n';
     close_stream(graph);
 }
 
 void dump_graph_info(std::ofstream& graph, const program& program) {
-    for (auto& node : program.get_processing_order()) {
+    for (const auto& node : program.get_processing_order()) {
         dump_full_node(graph, node);
         graph << std::endl << std::endl;
     }

@@ -1,10 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
 #include <string>
+#include <string_view>
 
 #include "openvino/core/node.hpp"
 
@@ -27,6 +28,6 @@ namespace op::util {
  * @param name - new name
  * @param output_port - output port to rename
  */
-void OPENVINO_API set_name(ov::Node& node, const std::string& name, size_t output_port = 0);
+void OPENVINO_API set_name(ov::Node& node, std::string_view name, size_t output_port = 0);
 }  // namespace op::util
 }  // namespace ov

@@ -1,0 +1,340 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#include <gtest/gtest.h>
+
+#include "test_utils.h"
+#include "openvino/op/constant.hpp"
+#include "openvino/op/parameter.hpp"
+#include "openvino/op/relu.hpp"
+#include "intel_gpu/runtime/internal_properties.hpp"
+#include "ov_ops/moe_compressed.hpp"
+#include "plugin/ops/moe_offload_constant.hpp"
+
+using namespace ov::intel_gpu;
+
+// Helper: build a minimal MOECompressed node with 22 inputs (indices 0..21).
+// Inputs 0-2 are Parameters (hidden_states, routing_weights, topk_indices).
+// Inputs 3-11 are routed expert Constants (weight/scale/zp × gate/up/down).
+// Inputs 12-21 are shared expert Constants.
+// Returns the MOECompressed node and the constants at each input position.
+struct MoETestGraph {
+    std::shared_ptr<ov::op::internal::MOECompressed> moe_node;
+    std::vector<std::shared_ptr<ov::op::v0::Constant>> constants;  // indices 3..21
+    ov::ParameterVector parameters;
+
+    static MoETestGraph build(size_t num_experts = 4,
+                              size_t hidden_size = 128,
+                              size_t inter_size = 256,
+                              size_t group_size = 128,
+                              ov::op::internal::MOE::Expert_type expert_type = ov::op::internal::MOE::Expert_type::GEMM3_SWIGLU) {
+        MoETestGraph g;
+
+        const size_t top_k = 2;
+        ov::op::internal::MOECompressed::Config config{};
+        config.expert_type = expert_type;
+        config.hidden_size = hidden_size;
+        config.inter_size = inter_size;
+        config.num_expert = num_experts;
+        config.num_shared_expert = 1;
+        config.top_k = top_k;
+        config.group_size = group_size;
+        config.has_zp = true;
+        config.out_type = ov::element::f16;
+
+        size_t group_num = hidden_size / group_size;
+        size_t group_num2 = inter_size / group_size;
+
+        // Build input OutputVector (22 inputs)
+        ov::OutputVector inputs;
+
+        // 0: hidden_states [1, 1, hidden_size]
+        auto hidden = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::Shape{1, 1, hidden_size});
+        g.parameters.push_back(hidden);
+        inputs.push_back(hidden->output(0));
+
+        // 1: routing_weights [1, 1, top_k]
+        auto routing = std::make_shared<ov::op::v0::Parameter>(ov::element::f16, ov::Shape{1, 1, top_k});
+        g.parameters.push_back(routing);
+        inputs.push_back(routing->output(0));
+
+        // 2: topk_indices [1, 1, top_k]
+        auto topk_idx = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::Shape{1, 1, top_k});
+        g.parameters.push_back(topk_idx);
+        inputs.push_back(topk_idx->output(0));
+
+        // Helper to create a constant with given shape and type
+        auto make_const = [](ov::element::Type type, const ov::Shape& shape) {
+            return std::make_shared<ov::op::v0::Constant>(type, shape, 0);
+        };
+
+        // Inputs 3-11: routed expert weights (gate/up/down × weight/scale/zp)
+        // gate_w [E, inter, group_size, group_num]
+        g.constants.push_back(make_const(ov::element::u8, {num_experts, inter_size, group_size, group_num}));   // 3: w0_weight
+        g.constants.push_back(make_const(ov::element::f16, {num_experts, inter_size, group_num, 1}));           // 4: w0_scale
+        g.constants.push_back(make_const(ov::element::u8, {num_experts, inter_size, group_num, 1}));            // 5: w0_zp
+        g.constants.push_back(make_const(ov::element::u8, {num_experts, inter_size, group_size, group_num}));   // 6: w1_weight
+        g.constants.push_back(make_const(ov::element::f16, {num_experts, inter_size, group_num, 1}));           // 7: w1_scale
+        g.constants.push_back(make_const(ov::element::u8, {num_experts, inter_size, group_num, 1}));            // 8: w1_zp
+        g.constants.push_back(make_const(ov::element::u8, {num_experts, hidden_size, group_size, group_num2})); // 9: w2_weight
+        g.constants.push_back(make_const(ov::element::f16, {num_experts, hidden_size, group_num2, 1}));         // 10: w2_scale
+        g.constants.push_back(make_const(ov::element::u8, {num_experts, hidden_size, group_num2, 1}));          // 11: w2_zp
+
+        // Inputs 12-21: shared expert weights (same structure but num_experts=1 for shared)
+        g.constants.push_back(make_const(ov::element::u8, {1, inter_size, group_size, group_num}));   // 12: shared_gate_weight
+        g.constants.push_back(make_const(ov::element::f16, {1, inter_size, group_num, 1}));           // 13: shared_gate_scale
+        g.constants.push_back(make_const(ov::element::u8, {1, inter_size, group_num, 1}));            // 14: shared_gate_zp
+        g.constants.push_back(make_const(ov::element::u8, {1, inter_size, group_size, group_num}));   // 15: shared_up_weight
+        g.constants.push_back(make_const(ov::element::f16, {1, inter_size, group_num, 1}));           // 16: shared_up_scale
+        g.constants.push_back(make_const(ov::element::u8, {1, inter_size, group_num, 1}));            // 17: shared_up_zp
+        g.constants.push_back(make_const(ov::element::u8, {1, hidden_size, group_size, group_num2})); // 18: shared_down_weight
+        g.constants.push_back(make_const(ov::element::f16, {1, hidden_size, group_num2, 1}));         // 19: shared_down_scale
+        g.constants.push_back(make_const(ov::element::u8, {1, hidden_size, group_num2, 1}));          // 20: shared_down_zp
+        // Input 21 is sometimes shared_gate_gate (for gating the shared expert output)
+        g.constants.push_back(make_const(ov::element::f16, {1, hidden_size}));                        // 21: shared_gate_gate_weight
+
+        for (auto& c : g.constants) {
+            inputs.push_back(c->output(0));
+        }
+
+        g.moe_node = std::make_shared<ov::op::internal::MOECompressed>(inputs, config);
+        return g;
+    }
+};
+
+TEST(moe_offload_constant, validates_resident_weight_budget) {
+    auto g = MoETestGraph::build();
+    auto result = std::make_shared<ov::op::v0::Result>(g.moe_node);
+    ov::Model model(ov::ResultVector{result}, g.parameters);
+    const uint64_t resident_bytes = get_model_resident_constant_bytes(model, 1);
+
+    EXPECT_GT(resident_bytes, 0U);
+    EXPECT_NO_THROW(validate_model_resident_constant_memory(model, 1, resident_bytes));
+    EXPECT_THROW(validate_model_resident_constant_memory(model, 1, resident_bytes - 1), ov::Exception);
+    EXPECT_NO_THROW(validate_model_resident_constant_memory(model, 0, 1));
+    EXPECT_NO_THROW(validate_model_resident_constant_memory(model, 0, 0));
+}
+
+TEST(moe_offload_constant, offload_ratio_reduces_resident_weight_estimate) {
+    auto g = MoETestGraph::build();
+    auto result = std::make_shared<ov::op::v0::Result>(g.moe_node);
+    ov::Model model(ov::ResultVector{result}, g.parameters);
+
+    EXPECT_LT(get_model_resident_constant_bytes(model, 75), get_model_resident_constant_bytes(model, 0));
+    EXPECT_LE(get_model_resident_constant_bytes(model, 100), get_model_resident_constant_bytes(model, 75));
+    EXPECT_LT(get_model_resident_constant_bytes(model, 100), get_model_resident_constant_bytes(model, 0));
+}
+
+TEST(moe_offload_constant, non_moe_model_is_not_subject_to_resident_constant_check) {
+    auto constant = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{4, 128}, 0);
+    auto result = std::make_shared<ov::op::v0::Result>(constant);
+    ov::Model model(ov::ResultVector{result}, ov::ParameterVector{});
+
+    EXPECT_EQ(get_model_resident_constant_bytes(model, 0), 0U);
+    EXPECT_NO_THROW(validate_model_resident_constant_memory(model, 0, 1));
+}
+
+// Test that routed expert constants (inputs 3-11) are classified as OffloadableRoutedExpert
+TEST(moe_offload_constant, routed_expert_classification) {
+    auto g = MoETestGraph::build();
+
+    // Inputs 3..11 map to g.constants[0..8] (routed experts)
+    for (size_t i = 0; i < 9; i++) {
+        auto role = get_moe_constant_role(g.constants[i]);
+        EXPECT_EQ(role, MoEConstantRole::OffloadableRoutedExpert)
+            << "Constant at MOECompressed input " << (i + 3) << " should be OffloadableRoutedExpert";
+    }
+}
+
+// Test that shared expert constants (inputs 12-21) are classified as AlwaysResidentSharedExpert
+TEST(moe_offload_constant, shared_expert_classification) {
+    auto g = MoETestGraph::build();
+
+    // Inputs 12..21 map to g.constants[9..18] (shared experts)
+    for (size_t i = 9; i < g.constants.size(); i++) {
+        auto role = get_moe_constant_role(g.constants[i]);
+        EXPECT_EQ(role, MoEConstantRole::AlwaysResidentSharedExpert)
+            << "Constant at MOECompressed input " << (i + 3) << " should be AlwaysResidentSharedExpert";
+    }
+}
+
+// Test that a constant NOT connected to MOECompressed is NotMoE
+TEST(moe_offload_constant, unconnected_constant_is_not_moe) {
+    auto c = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{4, 128}, 0);
+    EXPECT_EQ(get_moe_constant_role(c), MoEConstantRole::NotMoE);
+}
+
+// Test is_moe_related_constant for both routed and shared
+TEST(moe_offload_constant, is_moe_related_covers_both) {
+    auto g = MoETestGraph::build();
+
+    // All constants connected to MOECompressed should be "MoE related"
+    for (auto& c : g.constants) {
+        EXPECT_TRUE(is_moe_related_constant(c));
+    }
+
+    // Unconnected constant is not MoE related
+    auto unconnected = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{4, 128}, 0);
+    EXPECT_FALSE(is_moe_related_constant(unconnected));
+}
+
+// KEY TEST: Shared expert constants must NOT be classified as OffloadableRoutedExpert
+// This is the regression test for the bug where shared constants were wrongly cropped.
+TEST(moe_offload_constant, shared_expert_not_cropped_by_partial_upload) {
+    auto g = MoETestGraph::build();
+
+    // Shared expert constants (inputs 12-21) must NEVER be OffloadableRoutedExpert
+    for (size_t i = 9; i < g.constants.size(); i++) {
+        auto role = get_moe_constant_role(g.constants[i]);
+        EXPECT_NE(role, MoEConstantRole::OffloadableRoutedExpert)
+            << "Shared expert constant at input " << (i + 3)
+            << " must NOT be classified as OffloadableRoutedExpert (would be wrongly cropped by partial upload)";
+    }
+}
+
+TEST(moe_offload_constant, partial_upload_uses_preferred_allocation_type) {
+    auto& engine = tests::get_test_engine();
+    auto config = tests::get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::offload_ratio(20));
+    auto graph = MoETestGraph::build();
+    auto constant = graph.constants[0];
+    const auto shape = constant->get_output_shape(0);
+    const auto layout = cldnn::layout(shape,
+                                      cldnn::element_type_to_data_type(constant->get_output_element_type(0)),
+                                      cldnn::format::get_default_format(shape.size()));
+
+    const auto desc = try_prepare_partial_upload(engine,
+                                                 config,
+                                                 constant,
+                                                 shape,
+                                                 layout.data_type,
+                                                 layout.format,
+                                                 layout);
+
+    ASSERT_TRUE(desc.enabled);
+    EXPECT_LT(desc.upload_bytes, layout.bytes_count());
+    EXPECT_EQ(desc.memory->get_allocation_type(), engine.get_preferred_memory_allocation_type());
+}
+
+TEST(moe_offload_constant, gemm2_moe_is_not_otd_capable_and_not_discounted) {
+    auto gemm3_graph = MoETestGraph::build(4, 128, 256, 128, ov::op::internal::MOE::Expert_type::GEMM3_SWIGLU);
+    EXPECT_TRUE(is_otd_capable_moe(gemm3_graph.moe_node.get()));
+
+    auto gemm2_graph = MoETestGraph::build(4, 128, 256, 128, ov::op::internal::MOE::Expert_type::GEMM2_BIAS_SWIGLU_CLAMP);
+    EXPECT_FALSE(is_otd_capable_moe(gemm2_graph.moe_node.get()));
+
+    // For GEMM2, constants must be classified as NotOffloadableMoE, yet still recognized as MoE related
+    for (auto& c : gemm2_graph.constants) {
+        EXPECT_EQ(get_moe_constant_role(c), MoEConstantRole::NotOffloadableMoE);
+        EXPECT_TRUE(is_moe_related_constant(c));
+    }
+
+    // Model with only GEMM2 MOE nodes should not trigger the OTD resident check (returns 0)
+    auto result = std::make_shared<ov::op::v0::Result>(gemm2_graph.moe_node);
+    ov::Model model(ov::ResultVector{result}, gemm2_graph.parameters);
+    EXPECT_EQ(get_model_resident_constant_bytes(model, 50), 0U);
+
+    // Partial upload must be disabled for GEMM2 constants
+    auto& engine = tests::get_test_engine();
+    auto config = tests::get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::offload_ratio(50));
+    auto constant = gemm2_graph.constants[0];
+    const auto shape = constant->get_output_shape(0);
+    const auto layout = cldnn::layout(shape,
+                                      cldnn::element_type_to_data_type(constant->get_output_element_type(0)),
+                                      cldnn::format::get_default_format(shape.size()));
+    const auto desc = try_prepare_partial_upload(engine,
+                                                 config,
+                                                 constant,
+                                                 shape,
+                                                 layout.data_type,
+                                                 layout.format,
+                                                 layout);
+    EXPECT_FALSE(desc.enabled);
+}
+
+TEST(moe_offload_constant, shared_routed_constant_is_not_offloadable) {
+    auto g = MoETestGraph::build();
+    auto routed_const = g.constants[0];
+
+    // Simulate sharing: attach another non-MoE consumer to the routed constant
+    auto dummy_relu = std::make_shared<ov::op::v0::Relu>(routed_const);
+    EXPECT_EQ(get_moe_constant_role(routed_const), MoEConstantRole::NotOffloadableRoutedExpert);
+    EXPECT_TRUE(is_moe_related_constant(routed_const));
+
+    // Must not be partially uploaded
+    auto& engine = tests::get_test_engine();
+    auto config = tests::get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::offload_ratio(50));
+    const auto shape = routed_const->get_output_shape(0);
+    const auto layout = cldnn::layout(shape,
+                                      cldnn::element_type_to_data_type(routed_const->get_output_element_type(0)),
+                                      cldnn::format::get_default_format(shape.size()));
+    const auto desc = try_prepare_partial_upload(engine,
+                                                 config,
+                                                 routed_const,
+                                                 shape,
+                                                 layout.data_type,
+                                                 layout.format,
+                                                 layout);
+    EXPECT_FALSE(desc.enabled);
+}
+
+TEST(moe_offload_constant, resident_fallback_keeps_sibling_constants_fully_resident) {
+    auto& engine = tests::get_test_engine();
+    auto config = tests::get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::offload_ratio(75));
+
+    for (bool tensor_weight : {false, true}) {
+        SCOPED_TRACE(tensor_weight);
+        auto graph = MoETestGraph::build();
+        ov::ResultVector results{std::make_shared<ov::op::v0::Result>(graph.moe_node)};
+        if (tensor_weight) {
+            auto weight = std::make_shared<ov::op::v0::Parameter>(graph.constants[0]->get_element_type(), graph.constants[0]->get_shape());
+            graph.moe_node->input(3).replace_source_output(weight);
+            graph.parameters.push_back(weight);
+        } else {
+            auto consumer = std::make_shared<ov::op::v0::Relu>(graph.constants[0]);
+            results.push_back(std::make_shared<ov::op::v0::Result>(consumer));
+        }
+        ov::Model model(results, graph.parameters);
+        EXPECT_FALSE(is_moe_otd_eligible(graph.moe_node.get()));
+        EXPECT_EQ(get_model_resident_constant_bytes(model, 75), get_model_resident_constant_bytes(model, 0));
+        EXPECT_EQ(get_model_resident_constant_bytes(model, 100), get_model_resident_constant_bytes(model, 0));
+
+        for (size_t index = 1; index < 9; ++index) {
+            const auto& constant = graph.constants[index];
+            EXPECT_FALSE(is_moe_constant_offloadable(constant));
+            const auto shape = constant->get_shape();
+            const auto layout =
+                cldnn::layout(shape, cldnn::element_type_to_data_type(constant->get_element_type()), cldnn::format::get_default_format(shape.size()));
+            const auto desc = try_prepare_partial_upload(engine, config, constant, shape, layout.data_type, layout.format, layout);
+            EXPECT_FALSE(desc.enabled);
+        }
+    }
+}
+
+TEST(moe_offload_constant, shared_routed_weights_propagate_resident_fallback) {
+    auto first = MoETestGraph::build();
+    auto second = MoETestGraph::build();
+    second.moe_node->input(3).replace_source_output(first.constants[0]);
+
+    EXPECT_TRUE(is_moe_otd_eligible(first.moe_node.get()));
+    EXPECT_TRUE(is_moe_otd_eligible(second.moe_node.get()));
+    EXPECT_TRUE(is_moe_constant_offloadable(first.constants[0]));
+
+    auto weight = std::make_shared<ov::op::v0::Parameter>(second.constants[3]->get_element_type(), second.constants[3]->get_shape());
+    second.moe_node->input(6).replace_source_output(weight);
+    second.parameters.push_back(weight);
+    auto parameters = first.parameters;
+    parameters.insert(parameters.end(), second.parameters.begin(), second.parameters.end());
+    ov::Model model(ov::ResultVector{std::make_shared<ov::op::v0::Result>(first.moe_node), std::make_shared<ov::op::v0::Result>(second.moe_node)}, parameters);
+
+    EXPECT_FALSE(is_moe_otd_eligible(first.moe_node.get()));
+    EXPECT_FALSE(is_moe_otd_eligible(second.moe_node.get()));
+    EXPECT_FALSE(is_moe_constant_offloadable(first.constants[0]));
+    EXPECT_FALSE(is_moe_constant_offloadable(first.constants[1]));
+    EXPECT_FALSE(is_moe_constant_offloadable(second.constants[1]));
+    EXPECT_EQ(get_model_resident_constant_bytes(model, 75), get_model_resident_constant_bytes(model, 0));
+}

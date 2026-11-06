@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,8 +14,7 @@
 #include "openvino/frontend/visibility.hpp"
 #include "openvino/opsets/opset.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 
 /// \brief The helper function to return an instance of OpSet class initialized with
 /// operations from provided opset by name.
@@ -25,7 +24,7 @@ inline const ov::OpSet& get_opset_by_name(const std::string& opset_name) {
     if (opsets.find(opset_name) != opsets.end())
         return opsets.at(opset_name)();
     if (opset_name.empty() || opset_name == "latest") {
-        return ov::get_opset15();  // TODO (ticket: 156877): Update to 16 at the end of opset16 development
+        return ov::get_opset16();  // TODO (ticket: 179247): Update to 17 at the end of opset17 development
     } else {
         FRONT_END_GENERAL_CHECK(false, "Unsupported opset name: ", opset_name);
     }
@@ -510,5 +509,4 @@ using OpExtension = ov::frontend::OpExtensionBase<ov::frontend::ConversionExtens
             FRONTEND_CAT(MAKE_MAP_, FRAMEWORK)(__VA_ARGS__)                                   \
         }                                                                                     \
     };
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

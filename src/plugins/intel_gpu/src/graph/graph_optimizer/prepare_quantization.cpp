@@ -1,8 +1,13 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "fully_connected_inst.h"
+#include "gather_matmul_inst.h"
+#include "grouped_matmul_inst.h"
+#include "moe_3gemm_fused_inst.h"
+#include "moe_gemm_inst.h"
+#include "impls/ocl_v2/moe/moe_3gemm_base.hpp"
 #include "pooling_inst.h"
 #include "quantize_inst.h"
 #include "reorder_inst.h"
@@ -13,8 +18,10 @@
 #include "to_string_utils.h"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 using namespace cldnn;
@@ -52,6 +59,7 @@ void prepare_quantization::prepare_scale_shift_opt(program &p, quantize_node& qu
     auto mem_output_high = output_high.get_attached_memory_ptr();
 
     auto scales_layout = mem_input_low->get_layout();
+
     auto max_size = tensor(0);
     max_size = tensor::max(max_size, mem_input_high->get_layout().get_tensor());
     max_size = tensor::max(max_size, mem_output_low->get_layout().get_tensor());
@@ -59,25 +67,47 @@ void prepare_quantization::prepare_scale_shift_opt(program &p, quantize_node& qu
 
     scales_layout.set_tensor(max_size);
 
+    // cldnn::layout::set_tensor() internally uses cldnn::format::dimension()
+    // to determine the tensor rank according to the format set.
+    // Because cldnn::format requires at least 4 dimensions, scales_layout is treated as a 4D tensor.
+    // If scales_layout was promoted from 3D to 4D due to format constraints, revert it back to its original 3D shape.
+    if (p.get_engine().get_device_info().supports_immad) {
+        auto input_max_rank = std::max({
+            mem_input_low->get_layout().get_partial_shape().rank().get_length(),
+            mem_input_high->get_layout().get_partial_shape().rank().get_length(),
+            mem_output_low->get_layout().get_partial_shape().rank().get_length(),
+            mem_output_high->get_layout().get_partial_shape().rank().get_length()
+        });
+
+        if (input_max_rank == 3 && scales_layout.get_partial_shape().rank().get_length() == 4) {
+            scales_layout.set_partial_shape({scales_layout.batch(), scales_layout.feature(),
+                std::max(scales_layout.spatial(0), scales_layout.spatial(1))});
+        }
+    }
+
     auto mem_input_scale  = p.get_engine().allocate_memory(scales_layout, false);
     auto mem_input_shift  = p.get_engine().allocate_memory(scales_layout, false);
     auto mem_output_scale = p.get_engine().allocate_memory(scales_layout, false);
     auto mem_output_shift = p.get_engine().allocate_memory(scales_layout, false);
 
-    auto get_offset_safe = [](const layout& l, const tensor& idx) -> int {
+    auto get_offset_safe = [](const layout& l, const tensor& idx) -> tensor::value_type {
         auto sizes = l.get_tensor();
         auto pitches = l.get_pitches();
 
         return (idx.batch[0] % sizes.batch[0])*pitches[0]
-                        + (idx.feature[0] % sizes.feature[0])*pitches[1]
-                        + (idx.spatial[1] % sizes.spatial[1])*pitches[2 + 0]   // y
-                        + (idx.spatial[0] % sizes.spatial[0])*pitches[2 + 1];  // x
+                    + (idx.feature[0] % sizes.feature[0])*pitches[1]
+                    + (idx.spatial[1] % sizes.spatial[1])*pitches[2 + 0]   // y
+                    + (idx.spatial[0] % sizes.spatial[0])*pitches[2 + 1];  // x
     };
 
     auto lock_memory = [&stream] (memory::ptr memory, std::function<void(std::size_t, float)>& set_data,
                                   std::function<float(size_t)>& get_data) {
         using float_mem_lock = mem_lock<float, mem_lock_type::write>;
         using float16_mem_lock = mem_lock<ov::float16, mem_lock_type::write>;
+        using bfloat16_mem_lock = mem_lock<ov::bfloat16, mem_lock_type::write>;
+        using locked_memory = std::tuple<std::shared_ptr<float_mem_lock>,
+                                         std::shared_ptr<float16_mem_lock>,
+                                         std::shared_ptr<bfloat16_mem_lock>>;
         switch (memory->get_layout().data_type) {
             case data_types::f32: {
                 std::shared_ptr<float_mem_lock> data_lock_ptr = std::make_shared<float_mem_lock>(memory, stream);
@@ -88,7 +118,7 @@ void prepare_quantization::prepare_scale_shift_opt(program &p, quantize_node& qu
                 get_data = [data] (size_t idx) {
                     return data[idx];
                 };
-                return std::pair<std::shared_ptr<float_mem_lock>, std::shared_ptr<float16_mem_lock>>(data_lock_ptr, nullptr);
+                return locked_memory(data_lock_ptr, nullptr, nullptr);
             }
             case data_types::f16: {
                 std::shared_ptr<float16_mem_lock> data_lock_ptr = std::make_shared<float16_mem_lock>(memory, stream);
@@ -99,7 +129,18 @@ void prepare_quantization::prepare_scale_shift_opt(program &p, quantize_node& qu
                 get_data = [data] (size_t idx) {
                     return static_cast<float>(data[idx]);
                 };
-                return std::pair<std::shared_ptr<float_mem_lock>, std::shared_ptr<float16_mem_lock>>(nullptr, data_lock_ptr);
+                return locked_memory(nullptr, data_lock_ptr, nullptr);
+            }
+            case data_types::bf16: {
+                std::shared_ptr<bfloat16_mem_lock> data_lock_ptr = std::make_shared<bfloat16_mem_lock>(memory, stream);
+                ov::bfloat16* data = data_lock_ptr->data();
+                set_data = [data] (size_t idx, float value) {
+                    data[idx] = ov::bfloat16(value);
+                };
+                get_data = [data] (size_t idx) {
+                    return static_cast<float>(data[idx]);
+                };
+                return locked_memory(nullptr, nullptr, data_lock_ptr);
             }
             default:
                 throw std::runtime_error("prepare_quantization: Unsupported precision of quantize output values");
@@ -212,7 +253,7 @@ void prepare_quantization::prepare_scale_shift_opt(program &p, quantize_node& qu
 
     auto out_is_int8 = quantize_node.get_output_layout().data_type == data_types::i8;
     auto out_is_uint8 = quantize_node.get_output_layout().data_type == data_types::u8;
-    auto out_is_fp = !(out_is_int8 || out_is_uint8);
+    auto out_is_fp = !out_is_int8 && !out_is_uint8;
     bool need_clamp = levels != 256 || out_is_fp;
     bool need_min_clamp = need_clamp;
     bool need_max_clamp = need_clamp;
@@ -240,7 +281,7 @@ void prepare_quantization::prepare_scale_shift_opt(program &p, quantize_node& qu
     quantize_inputs.push_back(out_scale_prim->id);
     quantize_inputs.push_back(out_shift_prim->id);
 
-    data_types out_dt = primitive->output_data_types.size() ? primitive->output_data_types[0].value_or(data_types::f32) : data_types::f32;
+    data_types out_dt = !primitive->output_data_types.empty() ? primitive->output_data_types[0].value_or(data_types::f32) : data_types::f32;
     auto new_quantize_prim = std::make_shared<quantize>(quantize_node.id() + "_opt", quantize_inputs, primitive->levels, out_dt);
     new_quantize_prim->origin_op_name = primitive->origin_op_name;
     new_quantize_prim->origin_op_type_name = primitive->origin_op_type_name;
@@ -328,7 +369,7 @@ void prepare_quantization::prepare_dequantize_merge(program& p, eltwise_node& el
     auto& input = eltwise_node.input();
     const auto& stream = p.get_stream();
 
-    for (auto& user : input.get_users()) {
+    for (const auto& user : input.get_users()) {
         if (user == &eltwise_node)
             continue;
 
@@ -353,17 +394,26 @@ void prepare_quantization::prepare_dequantize_merge(program& p, eltwise_node& el
         for (size_t i = 1; i < eltwise_node.get_dependencies().size(); i++) {
             auto mem0 = get_scale_shift_mem(eltwise_dep, i);
             auto mem1 = get_scale_shift_mem(eltwise_node, i);
+            if (mem0->get_layout().bytes_count() != mem1->get_layout().bytes_count()) {
+                same_params = false;
+                break;
+            }
 
             mem_lock<uint8_t, mem_lock_type::read> mem0_lock{mem0, stream};
             mem_lock<uint8_t, mem_lock_type::read> mem1_lock{mem1, stream};
-            auto ptr0 = mem0_lock.data();
-            auto ptr1 = mem1_lock.data();
+            auto* ptr0 = mem0_lock.data();
+            auto* ptr1 = mem1_lock.data();
 
             for (size_t j = 0; j < mem0->get_layout().bytes_count(); j++) {
                 if (ptr0[j] != ptr1[j]) {
                     same_params = false;
                     break;
                 }
+            }
+            // Avoid mem0 and mem1's memory are inplace, but they have different layout.
+            if (!mem0->get_layout().get_partial_shape().compatible(mem1->get_layout().get_partial_shape())) {
+                same_params = false;
+                break;
             }
         }
 
@@ -384,12 +434,13 @@ void prepare_quantization::remove_fake_reorders(program& p, reorder_node& reorde
         return;
     }
 
-    auto &usr = reorder_node.get_users().front();
+    const auto& usr = reorder_node.get_users().front();
     auto &dep = reorder_node.get_dependency(0);
-    if (!(usr->is_type<convolution>() && usr->get_input_layout(1).data_type == data_types::i8) ||
+    const bool is_reorder_node_non_fp = !one_of(reorder_node.get_output_layout().data_type, {data_types::f32, data_types::f16, data_types::bf16});
+    if (!usr->is_type<convolution>() || usr->get_input_layout(1).data_type != data_types::i8 ||
         !dep.is_input() ||
         dep.get_output_layout().data_type != data_types::u8 ||
-        (reorder_node.get_output_layout().data_type != data_types::f32 && reorder_node.get_output_layout().data_type != data_types::f16) ||
+        is_reorder_node_non_fp ||
         dep.get_output_layout().format != reorder_node.get_output_layout().format ||
         dep.get_output_layout().get_tensor() != reorder_node.get_output_layout().get_tensor())
         return;
@@ -405,7 +456,7 @@ bool prepare_quantization::optimize_quantize(program &p, quantize_node& quantize
 
     auto& input = quantize_node.get_dependency(0);
     auto parallel_quantizes_num = 0;
-    for (auto& usr : input.get_users()) {
+    for (const auto& usr : input.get_users()) {
         if (usr->is_type<quantize>())
             parallel_quantizes_num++;
     }
@@ -436,7 +487,7 @@ bool prepare_quantization::optimize_quantize(program &p, quantize_node& quantize
     mem_lock<uint8_t, mem_lock_type::read> mem_output_high_lock_first{mem_output_high_first, stream};
 
     program_node* same_quantize = nullptr;
-    for (auto& usr : input.get_users()) {
+    for (const auto& usr : input.get_users()) {
         if (!usr->is_type<quantize>() || usr == &quantize_node)
             continue;
 
@@ -496,42 +547,156 @@ bool prepare_quantization::optimize_quantize(program &p, quantize_node& quantize
 
 static void optimize_weights_decompression_parameters(fully_connected_node& fc_node, program& p) {
     auto fc_prim = fc_node.get_primitive();
-    if (!fc_prim->compressed_weights)
+    // Grouped scale/zp of non-transposed weights [K, N] are [K / G, N], so they already have the [groups, N] physical layout.
+    if (!fc_prim->compressed_weights || !fc_prim->weights_transposed)
         return;
 
-    auto reorder_bfyx_to_fbyx = [&](size_t dep_id) {
+    auto reorder_bfyx = [&](size_t dep_id, cldnn::format format) {
         auto& dep = fc_node.get_dependency(dep_id);
         auto target_layout = dep.get_output_layout();
-        target_layout.format = format::fbyx;
+        target_layout.format = format;
         auto reorder_prim = std::make_shared<reorder>(dep.id() + "_reorder_" + fc_node.id(), dep.id(), target_layout);
         p.add_intermediate(reorder_prim, fc_node, dep_id, true);
         fc_node.get_dependency(dep_id).recalc_output_layout(false);
     };
 
-    auto need_reorder = [&](size_t dep_id) {
+    auto need_reorder = [&](size_t dep_id, size_t weight_rank, bool transpose_b_param) {
+        if (!transpose_b_param)
+            return false;
         auto dep_layout = fc_node.get_input_layout(dep_id);
         auto dep_pshape = dep_layout.get_partial_shape();
-        if (dep_pshape.size() == 0) {
+        auto dep_rank = dep_pshape.size();
+        if (dep_rank == 0) {
             // ConvertU4WeightsZeroPointToScalar pass generates scalar const layer
             return false;
         }
 
-        // Group for scale_idx is always 1, whereas zero_point_idx is 0.
-        auto groups_idx = (dep_pshape.size() > 1) ? 1 : 0;
+        auto groups_idx = dep_rank == 1 ? 0 : weight_rank - 1;
         auto groups_count = dep_pshape[groups_idx].get_length();
-
         return groups_count > 1;
     };
+    // possible cases
+    // legacy [K, N, 1, 1] => crop padded dims
+    // new shape [1, K, N] => preserve
+    auto weights_shape = fc_node.get_input_layout(1).get_partial_shape();
+    auto weight_rank = weights_shape.size();
+    if (weight_rank >= 3 && weights_shape[0] != 1) {
+        // legacy case
+        weight_rank = std::count_if(weights_shape.begin(), weights_shape.end(), [](ov::Dimension d) {
+            return d.get_length() > 1;
+        });
+
+        weight_rank = std::max(static_cast<size_t>(2), weight_rank);
+    }
+
+    cldnn::format format = format::fbyx;
+    if (weight_rank == 3)
+      format = format::byfx;
 
     auto decompression_scale_idx = !fc_node.bias_term() ? 2 : 3;
-    if (need_reorder(decompression_scale_idx)) {
-        reorder_bfyx_to_fbyx(decompression_scale_idx);
+    // OCL/oneDNN kernel requires decompression scale/zp in layout where scale_ofm dimension is innermost
+    if (need_reorder(decompression_scale_idx, weight_rank, fc_prim->transpose_b_scale)) {
+        reorder_bfyx(decompression_scale_idx, format);
     }
 
     if (fc_prim->decompression_zero_point.is_valid()) {
         auto decompression_zp_idx = decompression_scale_idx + 1;
-        if (need_reorder(decompression_zp_idx)) {
-            reorder_bfyx_to_fbyx(decompression_zp_idx);
+        if (need_reorder(decompression_zp_idx, weight_rank, fc_prim->transpose_b_zp)) {
+            reorder_bfyx(decompression_zp_idx, format);
+        }
+    }
+}
+
+// Reorder per-group scales/zp to byfx so physical layout is [E, G, N, 1] (N innermost for SIMD reads).
+// Mirrors optimize_weights_decompression_parameters for FullyConnected.
+static void reorder_decompression_param_to_byfx(program_node& node, size_t dep_id, program& p) {
+    if (dep_id >= node.get_dependencies().size())
+        return;
+    auto& dep = node.get_dependency(dep_id);
+    const auto dep_layout = dep.get_output_layout();
+    const auto dep_pshape = dep_layout.get_partial_shape();
+    if (dep_pshape.rank().is_dynamic())
+        return;
+    const auto rank = dep_pshape.size();
+    // Groups at index 2; rank-4 trailing dim must be 1 for the bfyx→byfx swap.
+    if (rank != 3 && rank != 4)
+        return;
+    if (dep_pshape[2].is_dynamic() || dep_pshape[2].get_length() <= 1)
+        return;
+    if (rank == 4 && (dep_pshape[3].is_dynamic() || dep_pshape[3].get_length() != 1))
+        return;
+    if (dep_layout.format == cldnn::format::byfx)
+        return;
+
+    auto target_layout = dep_layout;
+    target_layout.format = cldnn::format::byfx;
+    auto reorder_prim =
+        std::make_shared<reorder>(dep.id() + "_byfx_" + node.id(), dep.id(), target_layout);
+    p.add_intermediate(reorder_prim, node, dep_id, true);
+    node.get_dependency(dep_id).recalc_output_layout(false);
+}
+
+static void optimize_gather_matmul_decompression_parameters(gather_matmul_node& node, program& p) {
+    auto prim = node.get_primitive();
+    reorder_decompression_param_to_byfx(node, gather_matmul::WEIGHT_SCALE, p);
+    if (prim->has_zp)
+        reorder_decompression_param_to_byfx(node, gather_matmul::WEIGHT_ZP, p);
+}
+
+// onednn grouped matmul reads group-wise scales/zp as [G, K/gs, N] (N innermost), while the graph provides
+// [G, N, K/gs]. The reorder to byfx is constant-folded at compile time.
+static void optimize_grouped_matmul_decompression_parameters(grouped_matmul_node& node, program& p) {
+    auto prim = node.get_primitive();
+    if (!prim->compressed_weights)
+        return;
+    size_t idx = grouped_matmul::GroupedMatmulInputIdx::OFFSETS + 1;
+    reorder_decompression_param_to_byfx(node, idx++, p);
+    if (prim->decompression_zero_point.is_valid())
+        reorder_decompression_param_to_byfx(node, idx, p);
+}
+
+static void optimize_moe_gemm_decompression_parameters(moe_gemm_node& node, program& p) {
+    auto prim = node.get_primitive();
+    // Production has bias; tests may not.
+    const size_t scale_idx = prim->has_bias ? static_cast<size_t>(moe_gemm::WEIGHT_SCALE)
+                                            : static_cast<size_t>(moe_gemm::WEIGHT_SCALE) - 1;
+    const size_t zp_idx = scale_idx + 1;
+    if (scale_idx >= node.get_dependencies().size())
+        return;
+    reorder_decompression_param_to_byfx(node, scale_idx, p);
+    if (zp_idx < node.get_dependencies().size())
+        reorder_decompression_param_to_byfx(node, zp_idx, p);
+}
+
+static void optimize_moe_3gemm_fused_decompression_parameters(moe_node& node, program& p) {
+    using ov::intel_gpu::ocl::MOE3GemmInputIndex;
+    auto prim = node.get_primitive();
+    if (prim->_otd.lru_expert_num > 0) {
+        // OTD routed weights are backed by resident-size allocations; reorders would materialize full logical tensors.
+        return;
+    }
+    const auto& cfg = prim->_config;
+    // Routed-expert scales (gate/up/down); zp at +1 when has_zp.
+    constexpr std::array<size_t, 3> routed_scale_indices{
+        static_cast<size_t>(MOE3GemmInputIndex::SCALE_0),
+        static_cast<size_t>(MOE3GemmInputIndex::SCALE_1),
+        static_cast<size_t>(MOE3GemmInputIndex::SCALE_2),
+    };
+    for (size_t idx : routed_scale_indices) {
+        reorder_decompression_param_to_byfx(node, idx, p);
+        if (cfg.has_zp)
+            reorder_decompression_param_to_byfx(node, idx + 1, p);
+    }
+    if (cfg.num_shared_expert > 0) {
+        constexpr std::array<size_t, 3> shared_scale_indices{
+            static_cast<size_t>(MOE3GemmInputIndex::SHARED_GATE_SCALE),
+            static_cast<size_t>(MOE3GemmInputIndex::SHARED_UP_SCALE),
+            static_cast<size_t>(MOE3GemmInputIndex::SHARED_DOWN_SCALE),
+        };
+        for (size_t idx : shared_scale_indices) {
+            reorder_decompression_param_to_byfx(node, idx, p);
+            if (cfg.has_zp)
+                reorder_decompression_param_to_byfx(node, idx + 1, p);
         }
     }
 }
@@ -539,7 +704,7 @@ static void optimize_weights_decompression_parameters(fully_connected_node& fc_n
 void prepare_quantization::run(program& p) {
     auto itr = p.get_processing_order().begin();
     while (itr != p.get_processing_order().end()) {
-        auto &node = (*itr++);
+        const auto& node = (*itr++);
         if (node->is_type<quantize>()) {
             handle_quantize_node(p, node->as<quantize>());
         } else if (node->is_type<eltwise>()) {
@@ -548,6 +713,14 @@ void prepare_quantization::run(program& p) {
             remove_fake_reorders(p, node->as<reorder>());
         } else if (node->is_type<fully_connected>()) {
             optimize_weights_decompression_parameters(node->as<fully_connected>(), p);
+        } else if (node->is_type<gather_matmul>()) {
+            optimize_gather_matmul_decompression_parameters(node->as<gather_matmul>(), p);
+        } else if (node->is_type<grouped_matmul>()) {
+            optimize_grouped_matmul_decompression_parameters(node->as<grouped_matmul>(), p);
+        } else if (node->is_type<moe_gemm>()) {
+            optimize_moe_gemm_decompression_parameters(node->as<moe_gemm>(), p);
+        } else if (node->is_type<moe_3gemm_fused_compressed>()) {
+            optimize_moe_3gemm_fused_decompression_parameters(node->as<moe_3gemm_fused_compressed>(), p);
         }
     }
 }

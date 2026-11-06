@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -76,7 +76,7 @@ TEST_P(resample_test, shape_infer_with_fused_op) {
 
     auto dummy_prim = std::make_shared<activation>("output1", input_info("output"), activation_func::abs);
     fused_primitive_desc desc(dummy_prim);
-    desc.output_layout = expected_layout;
+    desc.output_layouts = { expected_layout };
 
     resample_node.add_fused_primitive(desc);
 

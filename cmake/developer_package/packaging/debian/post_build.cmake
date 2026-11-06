@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -22,7 +22,9 @@ endif()
 set(lintian_passed ON)
 
 foreach(deb_file IN LISTS CPACK_PACKAGE_FILES)
-    execute_process(COMMAND "${lintian_PROGRAM}" ${deb_file}
+    execute_process(COMMAND "${lintian_PROGRAM}"
+                            --suppress-tags no-code-sections # Accept modern, code-free libs
+                            ${deb_file}
                     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
                     RESULT_VARIABLE lintian_exit_code
                     OUTPUT_VARIABLE lintian_output)

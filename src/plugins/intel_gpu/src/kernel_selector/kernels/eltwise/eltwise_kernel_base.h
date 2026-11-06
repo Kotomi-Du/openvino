@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -59,6 +59,7 @@ struct eltwise_params : public base_params {
     struct Node {
         std::vector<InputType> inputs;
         EltwiseMode mode;
+        bool m_pythondiv = false;
     };
 
     struct UpdateInputData {
@@ -96,7 +97,7 @@ struct eltwise_fuse_params : fuse_params {
 class EltwiseKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~EltwiseKernelBase() {}
+    ~EltwiseKernelBase() override = default;
 
     using DispatchData = CommonDispatchData;
     JitConstants GetJitConstantsCommon(const eltwise_params& params, bool useVload8) const;
@@ -106,11 +107,19 @@ protected:
     virtual JitConstants GetJitConstants(const eltwise_params& params) const;
     virtual JitConstants GetOperationsJitConstants(const eltwise_params& params, bool useVload8, size_t blockSize = 1) const;
     virtual JitConstants MakeLoadJitConstants(const eltwise_params& params, bool useVload8) const;
+    virtual std::string GetVload8InputIndex(const eltwise_params& params, size_t input_idx) const;
     virtual JitConstants MakeIndexJitConstants(const eltwise_params& params, bool useVload8) const;
     virtual JitConstants MakeInputDeclsJitConstants(const eltwise_params& params, bool useVload8) const;
     virtual DispatchData SetDefault(const eltwise_params& params) const;
     KernelsData GetCommonKernelsData(const Params& params) const;
     Datatype GetAccumulatorType(const eltwise_params &params) const;
+
+    // Only the generic reference kernel supports padding-reset work-items.
+    virtual bool SupportsFeaturePadReset() const { return false; }
+    // Returns the output feature block size when padding reset is required.
+    size_t GetFeaturePadResetBlockSize(const eltwise_params& params) const;
+    // Returns the number of padding-reset work-items for a static shape.
+    size_t GetFeaturePadResetSize(const eltwise_params& params) const;
 
     bool IsUnsupportedModeForVecCode(const eltwise_params& params) const;
     void GetUpdateDispatchDataFunc(KernelData& kd) const override;

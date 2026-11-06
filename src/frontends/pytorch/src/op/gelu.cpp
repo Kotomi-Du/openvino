@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,10 +7,7 @@
 #include "openvino/frontend/pytorch/node_context.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 namespace {
 OutputVector translate_gelu_common(const NodeContext& context, const std::string& approximate) {
@@ -45,7 +42,4 @@ OutputVector translate_gelu_fx(const NodeContext& context) {
     return translate_gelu_common(context, approximate);
 };
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

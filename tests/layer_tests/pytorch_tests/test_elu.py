@@ -1,16 +1,16 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from pytorch_layer_test_class import PytorchLayerTest, skip_if_export
+from pytorch_layer_test_class import PytorchLayerTest
 
 
 class aten_elu(torch.nn.Module):
     def __init__(self, alpha, dtype, inplace):
-        super(aten_elu, self).__init__()
+        super().__init__()
         self.alpha = alpha
         self.dtype = dtype
         self.inplace = inplace
@@ -28,18 +28,17 @@ class aten_elu(torch.nn.Module):
 
 class TestElu(PytorchLayerTest):
     def _prepare_input(self):
-        import numpy as np
-        return (np.random.randn(2, 4, 224, 224).astype(np.float32),)
+        return (self.random.randn(2, 4, 224, 224),)
 
     @pytest.mark.nightly
     @pytest.mark.precommit
     @pytest.mark.precommit_torch_export
     @pytest.mark.parametrize("alpha", [None, 0.5, 2.])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
-    @pytest.mark.parametrize("inplace", [skip_if_export(True), False])
+    @pytest.mark.parametrize("inplace", [True, False])
     def test_elu(self, alpha, dtype, inplace, ie_device, precision, ir_version):
         kwargs = {}
         if dtype == torch.float16:
             kwargs["custom_eps"] = 1e-2
-        self._test(aten_elu(alpha, dtype, inplace), None,
+        self._test(aten_elu(alpha, dtype, inplace),
                    "aten::elu_" if inplace else "aten::elu", ie_device, precision, ir_version, **kwargs)

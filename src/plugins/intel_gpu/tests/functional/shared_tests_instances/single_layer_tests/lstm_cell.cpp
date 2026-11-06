@@ -1,7 +1,8 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include <limits>
 #include <vector>
 
 #include "single_op_tests/lstm_cell.hpp"
@@ -9,6 +10,12 @@
 
 namespace {
 using ov::test::LSTMCellTest;
+
+class LSTMCellClipInfGPUTest : public LSTMCellTest {};
+
+TEST_P(LSTMCellClipInfGPUTest, Inference) {
+        run();
+}
 
 std::vector<bool> should_decompose{false, true};
 std::vector<size_t> batch{5};
@@ -56,4 +63,20 @@ INSTANTIATE_TEST_SUITE_P(smoke_LSTMCellCommon, LSTMCellTest,
                                 ::testing::ValuesIn(netPrecisions),
                                 ::testing::Values(ov::test::utils::DEVICE_GPU)),
                         LSTMCellTest::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_LSTMCellClipInf, LSTMCellClipInfGPUTest,
+                        ::testing::Combine(
+                                ::testing::Values(false),
+                                ::testing::Values(5),
+                                ::testing::Values(1),
+                                ::testing::Values(1),
+                                ::testing::Values(std::vector<std::string>{"sigmoid", "tanh", "tanh"}),
+                                ::testing::Values(std::numeric_limits<float>::infinity()),
+                                ::testing::Values(ov::test::utils::InputLayerType::CONSTANT),
+                                ::testing::Values(ov::test::utils::InputLayerType::CONSTANT),
+                                ::testing::Values(ov::test::utils::InputLayerType::CONSTANT),
+                                ::testing::Values(ov::element::f32),
+                                ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                        LSTMCellTest::getTestCaseName);
+
 }  // namespace

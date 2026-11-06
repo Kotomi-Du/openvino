@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -63,6 +63,12 @@ macro(ov_cpack_settings)
     # take release version into account
     if(DEFINED CPACK_RPM_PACKAGE_RELEASE)
         set(cpack_full_ver "${cpack_full_ver}-${CPACK_RPM_PACKAGE_RELEASE}")
+
+        # rpm's native distribution release tag (e.g. .el8, .el9) is appended by rpmbuild
+        # itself when CPACK_RPM_PACKAGE_RELEASE_DIST is enabled, so reflect it here as well
+        if(CPACK_RPM_PACKAGE_RELEASE_DIST)
+            string(APPEND cpack_full_ver "%{?dist}")
+        endif()
     endif()
 
     # take epoch version into account
@@ -91,6 +97,13 @@ macro(ov_cpack_settings)
         2025.0.0 2025.0.1
         2025.1.0
         2025.2.0
+        2025.3.0
+        2025.4.0
+        2026.0.0
+        2026.1.0
+        2026.2.0
+        2026.3.0
+        2026.4.0
         )
 
     ov_check_conflicts_versions(conflicting_versions)
@@ -272,6 +285,15 @@ macro(ov_cpack_settings)
         set(tensorflow_lite_copyright "generic")
     endif()
 
+    if(ENABLE_OV_GGUF_FRONTEND)
+        set(CPACK_COMPONENT_GGUF_DESCRIPTION "OpenVINO GGUF Frontend")
+        set(CPACK_RPM_GGUF_PACKAGE_NAME "libopenvino-gguf-frontend-${cpack_name_ver}")
+        set(CPACK_RPM_GGUF_POST_INSTALL_SCRIPT_FILE "${def_triggers}")
+        set(CPACK_RPM_GGUF_POST_UNINSTALL_SCRIPT_FILE "${def_triggers}")
+        _ov_add_package(frontend_packages gguf)
+        set(gguf_copyright "generic")
+    endif()
+
     #
     # core_dev: depends on core and frontends (since frontends don't want to provide its own dev packages)
     #
@@ -321,7 +343,7 @@ macro(ov_cpack_settings)
     # Samples
     #
 
-    set(samples_build_deps "cmake3, gcc-c++, gcc, glibc-devel, make, pkgconf-pkg-config")
+    set(samples_build_deps "cmake, gcc-c++, gcc, glibc-devel, make, pkgconf-pkg-config")
     set(samples_build_deps_suggest "opencv-devel >= 3.0")
     set(samples_opencl_deps_suggest "ocl-icd-devel, opencl-headers")
 
@@ -406,7 +428,7 @@ macro(ov_cpack_settings)
     # Install latest symlink packages
     #
 
-    # NOTE: we expicitly don't add runtime latest packages
+    # NOTE: we explicitly don't add runtime latest packages
     # since a user needs to depend on specific VERSIONED runtime package
     # with fixed SONAMEs, while latest package can be updated multiple times
     # ov_rpm_add_latest_component(libraries)

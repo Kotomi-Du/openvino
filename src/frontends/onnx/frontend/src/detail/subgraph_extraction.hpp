@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,9 +18,7 @@ class NodeProto;
 class ValueInfoProto;
 }  // namespace ONNX_NAMESPACE
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 
 using ::ONNX_NAMESPACE::GraphProto;
 
@@ -30,7 +28,7 @@ struct SubgraphExtractor {
 
     /// \brief Adds new inputs to the graph and connects them to the nodes indicated by
     ///        the provided input edges.
-    /// \param merge_inputs Flag indicating wheteher new inputs are generated for each input edge (false)
+    /// \param merge_inputs Flag indicating whether new inputs are generated for each input edge (false)
     ///                     or there is only one input created for provided edges (true)
     void add_new_inputs(const std::vector<InputEdge>& new_inputs, const bool merge_inputs = false);
 
@@ -100,6 +98,4 @@ private:
     /// \param subgraph An object describing the subgraph to be extracted (elems to be kept)
     void extract_subgraph_from_onnx_model(const SubgraphComponents& subgraph);
 };
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

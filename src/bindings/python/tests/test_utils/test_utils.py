@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -8,6 +8,8 @@ import numpy as np
 import openvino as ov
 from pathlib import Path
 from openvino.utils import deprecated, get_cmake_path, make_postponed_constant
+from openvino.exceptions import OVTypeError
+from openvino.utils.types import get_element_type, get_element_type_str, get_dtype, get_numpy_ctype
 from tests.utils.helpers import compare_models, get_relu_model, create_filenames_for_ir
 
 
@@ -56,11 +58,17 @@ def test_deprecation_decorator():
 
     with pytest.warns(DeprecationWarning, match="deprecated_function1 is deprecated"):
         deprecated_function1("param1")
-    with pytest.warns(DeprecationWarning, match="deprecated_function2 is deprecated and will be removed in version 2025.4"):
+    with pytest.warns(
+        DeprecationWarning,
+        match="deprecated_function2 is deprecated and will be removed in version 2025.4"
+    ):
         deprecated_function2(param1=1)
     with pytest.warns(DeprecationWarning, match="deprecated_function3 is deprecated. Use another function instead"):
         deprecated_function3()
-    with pytest.warns(DeprecationWarning, match="deprecated_function4 is deprecated and will be removed in version 2025.4. Use another function instead"):
+    with pytest.warns(
+        DeprecationWarning,
+        match="deprecated_function4 is deprecated and will be removed in version 2025.4. Use another function instead"
+    ):
         deprecated_function4()
 
 
@@ -102,10 +110,10 @@ class Maker:
     def __init__(self):
         self.calls_count = 0
 
-    def __call__(self, tensor: ov.Tensor) -> None:
+    def __call__(self) -> ov.Tensor:
         self.calls_count += 1
         tensor_data = np.array([2, 2, 2, 2], dtype=np.float32).reshape(1, 1, 2, 2)
-        ov.Tensor(tensor_data).copy_to(tensor)
+        return ov.Tensor(tensor_data)
 
     def called_times(self):
         return self.calls_count
@@ -188,3 +196,15 @@ def test_infer_postponned_constant():
 
     expected_output = np.array([4, 5, 6, 7], dtype=np.float32).reshape(1, 2, 1, 2)
     assert np.allclose(results[list(results)[0]], expected_output, 1e-4, 1e-4)
+
+
+@pytest.mark.parametrize(("func", "data_type"), [
+    (get_element_type, np.complex64),
+    (get_element_type_str, np.complex64),
+    (get_dtype, ov.Type.i4),
+    (get_numpy_ctype, ov.Type.i4),
+])
+def test_unidentified_type_error_message(func, data_type):
+    with pytest.raises(OVTypeError) as e:
+        func(data_type)
+    assert str(e.value) == f"Unidentified data type {data_type}"

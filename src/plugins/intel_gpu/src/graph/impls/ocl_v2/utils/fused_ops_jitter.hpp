@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -109,7 +109,7 @@ struct FusedOpsConfiguration {
         shuffle_var_name = std::move(val);
         return *this;
     }
-    [[nodiscard]] bool is_post_reorder_fused(void) const {
+    [[nodiscard]] bool is_post_reorder_fused() const {
         return orig_output_layout != cldnn::format::any;
     }
 
@@ -270,7 +270,7 @@ public:
             };
 
             for (const auto& [channel_name, dim] : channels_map) {
-                if (extract_channel(channel_name, t) == 1) {
+                if (extract_dim(channel_name, t) == 1) {
                     *dim = "0";
                 }
             }

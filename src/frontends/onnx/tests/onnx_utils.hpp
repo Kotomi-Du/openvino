@@ -1,15 +1,19 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
-#include <stdlib.h>
-
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <iostream>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 
-#include "common_test_utils/test_constants.hpp"
 #include "common_test_utils/test_assertions.hpp"
+#include "common_test_utils/test_constants.hpp"
 #include "openvino/core/model.hpp"
 #include "openvino/frontend/extension.hpp"
 #include "openvino/frontend/manager.hpp"
@@ -25,10 +29,7 @@ inline std::string backend_name_to_device(const std::string& backend_name) {
     throw "Unsupported backend name";
 }
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace tests {
+namespace ov::frontend::onnx::tests {
 
 extern const std::string ONNX_FE;
 
@@ -46,10 +47,46 @@ InputModel::Ptr load_model(const std::string& model_path, ov::frontend::FrontEnd
 InputModel::Ptr load_model(const std::wstring& model_path, ov::frontend::FrontEnd::Ptr* return_front_end = nullptr);
 // Returns path to a manifest file
 std::string onnx_backend_manifest(const std::string& manifest);
-}  // namespace tests
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+
+// Duplicate implementation for tests - will be removed when ONNX_ITERATOR is removed
+inline bool is_graph_iterator_enabled() {
+    const char* env_value = std::getenv("ONNX_ITERATOR");
+    if (env_value == nullptr) {
+        return true;  // Enabled by default
+    }
+
+    std::string value(env_value);
+    // Remove whitespace
+    value.erase(std::remove_if(value.begin(),
+                               value.end(),
+                               [](unsigned char ch) {
+                                   return std::isspace(ch);
+                               }),
+                value.end());
+    // Convert to lowercase
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    static const std::unordered_map<std::string, bool> valid_values = {{"1", true},
+                                                                       {"true", true},
+                                                                       {"on", true},
+                                                                       {"enable", true},
+                                                                       {"0", false},
+                                                                       {"false", false},
+                                                                       {"off", false},
+                                                                       {"disable", false}};
+
+    auto it = valid_values.find(value);
+    if (it != valid_values.end()) {
+        return it->second;
+    }
+
+    throw std::runtime_error(std::string{"Unknown value for ONNX_ITERATOR environment variable: '"} + env_value +
+                             "'. Expected 1 (enable) or 0 (disable).");
+}
+
+}  // namespace ov::frontend::onnx::tests
 
 // For compatibility purposes, need to remove when will be unused
 extern const std::string ONNX_FE;

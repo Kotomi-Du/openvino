@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -34,9 +34,7 @@ std::string lrn_inst::to_string(lrn_node const& node) {
     auto k = desc->k;
     auto alpha = desc->alpha;
     auto beta = desc->beta;
-    auto norm_region = desc->norm_region == lrn_norm_region::lrn_norm_region_across_channel
-                           ? "across channel"
-                           : "within channel";
+    const auto* norm_region = desc->norm_region == lrn_norm_region::lrn_norm_region_across_channel ? "across channel" : "within channel";
     auto& input = node.input();
 
     std::stringstream primitive_description;

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,10 +12,7 @@
 using namespace ov::op;
 using ov::Shape;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
+namespace ov::frontend::onnx::ai_onnx {
 namespace opset_10 {
 ov::OutputVector slice(const ov::frontend::onnx::Node& node) {
     using ov::op::util::is_null;
@@ -68,7 +65,4 @@ ov::OutputVector slice(const ov::frontend::onnx::Node& node) {
 }
 ONNX_OP("Slice", OPSET_RANGE(1, 9), ai_onnx::opset_1::slice);
 }  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx

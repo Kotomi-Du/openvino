@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -81,13 +81,25 @@ public:
         conv_params.deformable_groups = deformable_groups;
 
         conv_params.groups = groups;
+        conv_params.grouped_weights_shape = primitive->grouped_weights_shape;
 
         auto deform_conv_dep_offset = primitive->deformable_mode ? 1 : 0;
-        if (primitive->input.size() == 3)
+        if (primitive->input.size() == 3) {
             deform_conv_dep_offset++;
+        }
 
-        const auto& weights_layout = impl_param.input_layouts[1 + 0 + deform_conv_dep_offset]
+        const size_t weights_input_idx = 1 + deform_conv_dep_offset;
+        auto weights_layout = impl_param.input_layouts[weights_input_idx]
                                                .convert_to_weights_layout(primitive->grouped_weights_shape);
+
+        // Extend grouped 1d conv weights shape from 4d to 5d when conv input shape is canonicalized to 4d by allow_new_shape_infer=false
+        const bool is_1d_group_conv = (primitive->filter_rank == 4) && conv_params.grouped_weights_shape && groups > 1;
+        const bool needs_weights_extension = is_1d_group_conv && weights_layout.get_rank() == 4;
+
+        if (needs_weights_extension) {
+            weights_layout = extend_weights_layout_to_5d(weights_layout);
+            conv_params.weights = convert_weights_tensor(weights_layout, true);
+        }
 
         ov::CoordinateDiff pads_begin(primitive->padding_begin.begin(), primitive->padding_begin.end());
         ov::CoordinateDiff pads_end(primitive->padding_end.begin(), primitive->padding_end.end());
@@ -97,6 +109,12 @@ public:
         if (auto_pad == ov::op::PadType::SAME_UPPER || auto_pad == ov::op::PadType::SAME_LOWER) {
             const auto& input_layout = impl_param.get_input_layout();
             const auto spatial_rank = input_layout.get_spatial_rank();
+
+            // Match the trailing singleton axis added when canonicalizing 1D convolution shapes.
+            stride.resize(spatial_rank, 1);
+            dilation.resize(spatial_rank, 1);
+            pads_begin.resize(spatial_rank, 0);
+            pads_end.resize(spatial_rank, 0);
 
             ov::PartialShape kernel;
             for (int32_t i = static_cast<int32_t>(spatial_rank) - 1; i >= 0; i--) {
@@ -119,9 +137,9 @@ public:
             std::fill(pads_end.begin(), pads_end.end(), 0);
         }
 
-        uint32_t kx = weights_layout.spatial(0);
-        uint32_t ky = weights_layout.spatial(1);
-        uint32_t kz = weights_layout.spatial(2);
+        uint32_t kx = static_cast<uint32_t>(weights_layout.spatial(0));
+        uint32_t ky = static_cast<uint32_t>(weights_layout.spatial(1));
+        uint32_t kz = static_cast<uint32_t>(weights_layout.spatial(2));
         conv_params.filterSize = { kx, ky, kz };
 
         uint32_t pad_begin_x, pad_begin_y, pad_begin_z;
@@ -171,16 +189,20 @@ public:
                 && cp.outputs[0].GetLayout() == kernel_selector::Tensor::DataLayout::bfyx
                 && cp.outputs[0].X().v == 1 && cp.outputs[0].Y().v > 1
                 && cp.weights.X().v == 1 && cp.weights.Y().v > 1
-                && !(cp.groups == cp.inputs[0].Feature().v && cp.inputs[0].Feature().v == cp.outputs[0].Feature().v)) {
+                && (cp.groups != cp.inputs[0].Feature().v || cp.inputs[0].Feature().v != cp.outputs[0].Feature().v)) {
                 auto can_swap = [](const kernel_selector::Tensor::DataTensor& dt) -> bool {
-                    auto x_channel_idx = static_cast<uint32_t>(kernel_selector::Tensor::DataTensor::Channelndex(dt.GetLayout(),
-                                                    kernel_selector::Tensor::DataChannelName::X));
-                    auto x_axis_dim = dt.GetDims()[x_channel_idx];
+                    auto x_channel_idx = kernel_selector::Tensor::DataTensor::Channelndex(dt.GetLayout(),
+                                                                                        kernel_selector::Tensor::DataChannelName::X);
+                    if (x_channel_idx < 0) {
+                        return false;
+                    }
+                    auto x_axis_dim = dt.GetDims()[static_cast<size_t>(x_channel_idx)];
                     return (x_axis_dim.pad.Total() == 0 && x_axis_dim.v == 1);
                 };
 
                 for (auto& desc : cp.fused_ops) {
-                    if (!can_swap(desc.output_tensor)) {
+                    OPENVINO_ASSERT(desc.output_tensors.size() == 1, "Design changed to allow multiple layouts, this path is not expected to be impacted.");
+                    if (!can_swap(desc.output_tensors[0])) {
                         return false;
                     }
                     for (size_t i = 0; i < desc.tensors.size(); i++) {
@@ -195,12 +217,12 @@ public:
         };
 
         // Swap XY axes
-        if (can_swap_xy(conv_params) && primitive->deformable_mode == false) {
+        if (can_swap_xy(conv_params) && !primitive->deformable_mode) {
             conv_params.inputs[0].SwapXY();
             conv_params.outputs[0].SwapXY();
             conv_params.weights.SwapXY();
             for (auto& desc : conv_params.fused_ops) {
-                desc.output_tensor.SwapXY();
+                desc.output_tensors[0].SwapXY();
                 for (size_t i = 0; i < desc.tensors.size(); i++) {
                     desc.tensors[i].SwapXY();
                 }
@@ -225,8 +247,9 @@ public:
         if (format == format::b_fs_zyx_fsv16 ||
             format == format::bs_fs_zyx_bsv16_fsv16 ||
             format == format::bs_fs_yx_bsv16_fsv16 ||
-            format == format::b_fs_zyx_fsv32)
+            format == format::b_fs_zyx_fsv32) {
             conv_params.allowInputReordering = true;
+        }
 
         conv_params.set_dynamic_shape_offsets();
 

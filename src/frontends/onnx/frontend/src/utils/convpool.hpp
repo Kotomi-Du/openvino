@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,10 +8,7 @@
 #include "openvino/core/shape.hpp"
 #include "openvino/core/strides.hpp"
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace convpool {
+namespace ov::frontend::onnx::convpool {
 /// \brief Get shape of kernel (filter) in pixels.
 ///
 /// \param node The Node ptr representing Conv or Pool operation.
@@ -97,6 +94,33 @@ void calculate_auto_pads(const ov::Shape& data_shape,
 ///
 ov::op::PadType get_auto_pad(const ov::frontend::onnx::Node& node);
 
+/// \brief      Calculate paddings for ConvTranspose with auto_pad.
+///
+/// \details    For ConvTranspose with SAME_UPPER/SAME_LOWER, ONNX spec requires:
+///             output_shape[i] = input_shape[i] * strides[i]
+///
+///             This function calculates padding values to satisfy that constraint.
+///             Formula: output = (input-1)*stride + dilated_kernel - 2*padding + output_padding
+///             Solving for padding to achieve desired output = input * stride.
+///
+/// \param[in]      data_shape       The input data tensor shape.
+/// \param[in]      filter_shape     The input filters tensor shape.
+/// \param[in]      strides          The data strides.
+/// \param[in]      dilations        The data dilations.
+/// \param[in]      pad_type         The value of auto_pad attribute.
+/// \param[in]      output_padding   The output padding values.
+/// \param[in,out]  padding_below    The paddings below axis.
+/// \param[in,out]  padding_above    The paddings above axis.
+///
+void calculate_transpose_auto_pads(const ov::Shape& data_shape,
+                                   const ov::Shape& filter_shape,
+                                   const ov::Strides& strides,
+                                   const ov::Strides& dilations,
+                                   const ov::op::PadType& pad_type,
+                                   const ov::CoordinateDiff& output_padding,
+                                   ov::CoordinateDiff& padding_below,
+                                   ov::CoordinateDiff& padding_above);
+
 /// \brief      Reshape group convolution filters to match desired shape:
 ///             from [C_INPUT x C_OUTPUT/groups x k1 x k2 x ... x kn]
 ///             to [GROUPS, C_INPUT, C_OUTPUT, K_D, ..., K_1]
@@ -106,7 +130,4 @@ ov::op::PadType get_auto_pad(const ov::frontend::onnx::Node& node);
 ///
 /// \return     Reshaped filters input.
 ov::Output<ov::Node> get_reshaped_filters(const ov::Output<ov::Node>& filters, int64_t groups);
-}  // namespace convpool
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::convpool

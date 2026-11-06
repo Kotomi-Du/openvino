@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,7 +16,7 @@ public:
     using Parent = PermuteKernelBase;
     using Parent::Parent;
     PermuteKernelRef() : PermuteKernelBase("permute_ref") {}
-    virtual ~PermuteKernelRef() {}
+    ~PermuteKernelRef() override = default;
 
     bool Validate(const Params& p) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;
@@ -27,6 +27,7 @@ protected:
     CommonDispatchData SetDefault(const permute_params& params) const override;
     std::vector<FusedOpType> GetSupportedFusedOps() const override {
         return {
+            FusedOpType::REORDER,
             FusedOpType::ACTIVATION,
             FusedOpType::QUANTIZE,
             FusedOpType::ELTWISE

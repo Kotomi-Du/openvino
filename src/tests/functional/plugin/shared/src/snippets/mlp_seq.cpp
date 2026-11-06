@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,12 +14,6 @@ namespace ov {
 namespace test {
 namespace snippets {
 
-void MLPSeqBase::compile_model() {
-    if (m_thread_count != default_thread_count)
-        core->set_property(targetDevice, ov::inference_num_threads(m_thread_count));
-    SubgraphBaseTest::compile_model();
-}
-
 void MLPSeqBase::SetUp() {
     std::vector<InputShape> input_shapes;
     ov::element::Type prc;
@@ -31,33 +25,29 @@ void MLPSeqBase::SetUp() {
     function = subgraph_model->getOriginal();
 
     configuration.insert(additional_config.begin(), additional_config.end());
-    if (!configuration.count("SNIPPETS_MODE")) {
-        configuration.insert({"SNIPPETS_MODE", "IGNORE_CALLBACK"});
-    }
+    setIgnoreCallbackMode();
 
     inType = outType = prc;
     setInferenceType(prc);
 }
 
-std::string MLPSeq::getTestCaseName(testing::TestParamInfo<ov::test::snippets::MLPSeqParams> obj) {
-    auto [input_shapes,
-          elem_types,
-          prc,
-          thread_count,
-          target_device,
-          additional_config,
-          num_hidden_layers_with_expectations,
-          hidden_matmul_size] = obj.param;
+std::string MLPSeq::getTestCaseName(const testing::TestParamInfo<ov::test::snippets::MLPSeqParams>& obj) {
+    const auto& [input_shapes,
+                 elem_types,
+                 prc,
+                 target_device,
+                 additional_config,
+                 num_hidden_layers_with_expectations,
+                 hidden_matmul_size] = obj.param;
 
-    auto [num_hidden_layers, num_subgraphs_and_nodes] = num_hidden_layers_with_expectations;
-    auto [num_subgraphs, num_nodes] = num_subgraphs_and_nodes;
+    const auto& [num_hidden_layers, num_subgraphs_and_nodes] = num_hidden_layers_with_expectations;
+    const auto& [num_subgraphs, num_nodes] = num_subgraphs_and_nodes;
 
     std::ostringstream result;
     for (size_t i = 0; i < input_shapes.size(); i++)
         result << "IS[" << i << "]=" << input_shapes[i] << "_";
     for (size_t i = 0; i < elem_types.size(); i++)
         result << "T[" << i << "]=" << elem_types[i] << "_";
-    result << "ThreadNum=" << thread_count << "_";
     result << "PRC=" << prc << "_";
     result << "#N=" << num_nodes << "_";
     result << "#S=" << num_subgraphs << "_";
@@ -75,17 +65,22 @@ std::string MLPSeq::getTestCaseName(testing::TestParamInfo<ov::test::snippets::M
 }
 
 void MLPSeq::init_params(std::vector<InputShape>& input_shapes, ov::element::Type& prc, ov::AnyMap& additional_config) {
-    std::pair <size_t, std::pair<size_t, size_t>> num_hidden_layers_with_expectations;
-    std::tie(input_shapes,
-             m_input_types,
-             prc,
-             m_thread_count,
-             targetDevice,
-             additional_config,
-             num_hidden_layers_with_expectations,
-             m_hidden_matmul_size) = this->GetParam();
-    std::pair<size_t, size_t> ref_num_subgraphs_and_nodes;
-    std::tie(m_num_hidden_layers, ref_num_subgraphs_and_nodes) = num_hidden_layers_with_expectations;
+    const auto& [_input_shapes,
+                 _m_input_types,
+                 _prc,
+                 _targetDevice,
+                 _additional_config,
+                 num_hidden_layers_with_expectations,
+                 _m_hidden_matmul_size] = this->GetParam();
+    input_shapes = _input_shapes;
+    m_input_types = _m_input_types;
+    prc = _prc;
+    targetDevice = _targetDevice;
+    additional_config = _additional_config;
+    m_hidden_matmul_size = _m_hidden_matmul_size;
+
+    const auto& [_m_num_hidden_layers, ref_num_subgraphs_and_nodes] = num_hidden_layers_with_expectations;
+    m_num_hidden_layers = _m_num_hidden_layers;
     std::tie(ref_num_subgraphs, ref_num_nodes) = ref_num_subgraphs_and_nodes;
 }
 
@@ -105,15 +100,11 @@ std::shared_ptr<SnippetsFunctionBase> MLPSeqQuantized::get_subgraph(size_t num_h
 }
 
 TEST_P(MLPSeq, CompareWithRefImpl) {
-    SKIP_IF_CURRENT_TEST_IS_DISABLED()
     run();
-    validateNumSubgraphs();
 }
 
 TEST_P(MLPSeqQuantized, CompareWithRefImpl) {
-    SKIP_IF_CURRENT_TEST_IS_DISABLED()
     run();
-    validateNumSubgraphs();
 }
 
 }  // namespace snippets

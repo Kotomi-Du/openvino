@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -19,7 +19,7 @@ struct gather_elements_params : public base_params {
 class GatherElementsKernelRef : public KernelBaseOpenCL {
 public:
     GatherElementsKernelRef() : KernelBaseOpenCL("gather_elements_ref") {}
-    virtual ~GatherElementsKernelRef() {}
+    ~GatherElementsKernelRef() override = default;
     virtual JitConstants GetJitConstants(const gather_elements_params& params) const;
     virtual CommonDispatchData SetDefault(const gather_elements_params& params) const;
     KernelsData GetKernelsData(const Params& params) const override;

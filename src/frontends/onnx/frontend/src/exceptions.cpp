@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,9 +6,7 @@
 
 #include <sstream>
 
-namespace ov {
-namespace frontend {
-namespace onnx_error {
+namespace ov::frontend::onnx_error {
 namespace detail {
 std::string get_error_msg_prefix(const ov::frontend::onnx::Node& node) {
     std::stringstream ss;
@@ -25,6 +23,4 @@ void OnnxNodeValidationFailure::create(const char* file,
     throw OnnxNodeValidationFailure(
         make_what(file, line, check_string, detail::get_error_msg_prefix(node), explanation));
 }
-}  // namespace onnx_error
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx_error

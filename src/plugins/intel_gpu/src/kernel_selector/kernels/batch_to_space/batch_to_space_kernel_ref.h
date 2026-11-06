@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@ class BatchToSpaceKernelRef : public BatchToSpaceKernelBase {
 public:
     using Parent = BatchToSpaceKernelBase;
     BatchToSpaceKernelRef() : BatchToSpaceKernelBase("batch_to_space_ref") {}
-    virtual ~BatchToSpaceKernelRef() {}
+    ~BatchToSpaceKernelRef() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

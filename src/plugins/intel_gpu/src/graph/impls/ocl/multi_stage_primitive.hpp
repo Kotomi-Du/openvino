@@ -1,31 +1,30 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <list>
+#include <utility>
+#include <vector>
+
+#include "concatenation_inst.h"
+#include "gather_inst.h"
 #include "intel_gpu/graph/network.hpp"
+#include "intel_gpu/graph/program.hpp"
 #include "intel_gpu/graph/serialization/binary_buffer.hpp"
 #include "intel_gpu/graph/serialization/cl_kernel_data_serializer.hpp"
 #include "intel_gpu/graph/serialization/helpers.hpp"
 #include "intel_gpu/graph/serialization/set_serializer.hpp"
 #include "intel_gpu/graph/serialization/string_serializer.hpp"
 #include "intel_gpu/graph/serialization/vector_serializer.hpp"
-#include "intel_gpu/graph/program.hpp"
-
 #include "kernel_selector_common.h"
-#include "openvino/core/except.hpp"
-#include "primitive_inst.h"
 #include "kernel_selector_helper.h"
+#include "openvino/core/except.hpp"
+#include "permute_inst.h"
+#include "primitive_inst.h"
 #include "register.hpp"
 #include "registry/implementation_map.hpp"
-#include "concatenation_inst.h"
-#include "gather_inst.h"
-#include "permute_inst.h"
-
-#include <vector>
-#include <list>
-#include <utility>
 
 namespace cldnn {
 namespace ocl {
@@ -37,16 +36,11 @@ template <class PType>
 struct multi_stage_primitive : public typed_primitive_impl<PType> {
     std::vector<kernel_selector::kernel_data> _kernels_data;
     std::vector<kernel::ptr> _kernels;
-
-    // a pair of batch program hash and kernel entry hash of each ocl impl.
-    std::pair<std::string, std::string> kernel_dump_info;
+    mutable KernelDumpInfo kernel_dump_info;
 
     multi_stage_primitive() : _kernels_data({}), _kernels({}) {}
 
-    multi_stage_primitive(const multi_stage_primitive<PType>& other)
-        : typed_primitive_impl<PType>()
-        , _kernels_data(other._kernels_data)
-        , _kernels({}) {
+    multi_stage_primitive(const multi_stage_primitive<PType>& other) : typed_primitive_impl<PType>(), _kernels_data(other._kernels_data), _kernels({}) {
         _kernels.reserve(other._kernels.size());
         for (size_t k = 0; k < other._kernels.size(); ++k) {
             _kernels.emplace_back(other._kernels[k]->clone(other.can_share_kernels));
@@ -58,14 +52,14 @@ struct multi_stage_primitive : public typed_primitive_impl<PType> {
         this->m_manager = other.m_manager;
     }
 
-    multi_stage_primitive(const std::vector<kernel_selector::kernel_data>& kd)
-        : typed_primitive_impl<PType>()
-        , _kernels_data(kd) {
+    multi_stage_primitive(const std::vector<kernel_selector::kernel_data>& kd) : typed_primitive_impl<PType>(), _kernels_data(kd) {
         this->can_reuse_memory = false;
         this->_kernel_name = kd[0].kernelName;
     }
 
-    bool is_cpu() const final { return false; }
+    bool is_cpu() const final {
+        return false;
+    }
 
     // Cache blob format:
     //     [ kernel_selector::kernel_data ]
@@ -73,7 +67,7 @@ struct multi_stage_primitive : public typed_primitive_impl<PType> {
     void save(BinaryOutputBuffer& ob) const override {
         primitive_impl::save(ob);
         ob << _kernels_data.size();
-        for (auto& kd : _kernels_data) {
+        for (const auto& kd : _kernels_data) {
             ob << make_data(&kd.internalBufferDataType, sizeof(kernel_selector::Datatype));
             ob << kd.internalBuffers;
             ob << kd.kernels;
@@ -109,19 +103,19 @@ protected:
         _kernels.clear();
         if (!_kernels_data.empty() && !_kernels_data[0].kernels.empty()) {
             auto compiled_kernels = kernels_cache.get_kernels(params);
-            size_t total_kernels = std::accumulate(_kernels_data.begin(), _kernels_data.end(), (size_t)0,
-                [](size_t acc, const kernel_selector::kernel_data& kd) {
+            size_t total_kernels =
+                std::accumulate(_kernels_data.begin(), _kernels_data.end(), (size_t)0, [](size_t acc, const kernel_selector::kernel_data& kd) {
                     return acc + kd.kernels.size();
                 });
-            OPENVINO_ASSERT(total_kernels == compiled_kernels.size(), "[GPU] Mismatch between number of expected and actually compiled kernels.\n",
-                                                                      "Expected: ", total_kernels, "\n"
-                                                                      "Got: ", compiled_kernels.size());
+            OPENVINO_ASSERT(total_kernels == compiled_kernels.size(),
+                            "[GPU] Mismatch between number of expected and actually compiled kernels.\n",
+                            "Expected: ",
+                            total_kernels,
+                            "\n"
+                            "Got: ",
+                            compiled_kernels.size());
             _kernels.insert(_kernels.begin(), compiled_kernels.begin(), compiled_kernels.end());
-            // batch program hash and kernel entry point to find corresponding cl source code
-            kernel_dump_info = std::make_pair(std::to_string(kernels_cache.get_kernel_batch_hash(params)),
-                                              _kernels_data[0].kernels[0].code.kernelString->entry_point);
-            for (size_t i = 1; i < _kernels_data[0].kernels.size(); ++i)
-                kernel_dump_info.second += " " + _kernels_data[0].kernels[i].code.kernelString->entry_point;
+            kernel_dump_info.set_batch_hash(std::to_string(kernels_cache.get_kernel_batch_hash(params)));
         }
         this->can_share_kernels = kernels_cache.get_kernels_reuse();
     }
@@ -140,7 +134,7 @@ protected:
         return {kernels_cache.get_cached_kernel_ids(_kernels)};
     }
 
-    template<typename ImplType, typename KernelParamsType>
+    template <typename ImplType, typename KernelParamsType>
     static std::unique_ptr<primitive_impl> make_deep_copy(const ImplType& impl_ocl) {
         auto prim_impl = std::make_unique<ImplType>(impl_ocl);
         for (auto& _kernel_data : (*prim_impl)._kernels_data) {
@@ -158,9 +152,10 @@ protected:
 
     std::vector<BufferDescriptor> get_internal_buffer_descs(const kernel_impl_params&) const override {
         std::vector<BufferDescriptor> internal_buffers;
-        for (auto& kd : _kernels_data) {
-            if (kd.internalBuffers.empty())
+        for (const auto& kd : _kernels_data) {
+            if (kd.internalBuffers.empty()) {
                 continue;
+            }
 
             auto dtype = from_data_type(kd.internalBufferDataType);
             const auto bpp = data_type_traits::size_of(dtype);
@@ -229,12 +224,33 @@ protected:
         }
     }
 
-    std::pair<std::string, std::string> get_kernels_dump_info() const override {
+    // Regardless of the model's dynamism, the compile time graph will rely on the skip_execution mechanism to determine which kernels will be executed
+    // The runtime graph relies on the actual execution of the kernel in execute_stage(..)
+    KernelDumpInfo get_kernels_dump_info(const cldnn::kernel_impl_params& impl_params) const override {
+        if (!kernel_dump_info.has_entries()) {
+            return kernel_dump_info;
+        }
+
+        size_t kernel_idx = 0;
+        for (size_t stage = 0; stage < _kernels_data.size(); stage++) {
+            for (size_t kd_idx = 0; kd_idx < _kernels_data[stage].kernels.size(); kd_idx++, kernel_idx++) {
+                if (_kernels_data[stage].kernels[kd_idx].skip_execution) {
+                    continue;
+                }
+
+                if (_kernels_data[stage].kernels[kd_idx].code.kernelString) {
+                    kernel_dump_info.add_entry_point(_kernels_data[stage].kernels[kd_idx].code.kernelString->entry_point);
+                } else if (kernel_idx < _kernels.size() && _kernels[kernel_idx]) {
+                    kernel_dump_info.add_entry_point(_kernels[kernel_idx]->get_id());
+                }
+            }
+        }
+
         return kernel_dump_info;
     }
 
     virtual void update_dispatch_data(const kernel_impl_params& impl_params) {
-        OPENVINO_ASSERT(this->_is_dynamic, "[GPU] update_dispatch_data() is called for static shape implementation ", this-> _kernel_name);
+        OPENVINO_ASSERT(this->_is_dynamic, "[GPU] update_dispatch_data() is called for static shape implementation ", this->_kernel_name);
         OPENVINO_ASSERT(false, "[GPU] update_dispatch_data() is not implemented for dynamic implemenation ", this->_kernel_name);
     }
 };

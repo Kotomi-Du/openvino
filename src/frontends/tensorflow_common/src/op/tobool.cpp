@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,10 +18,7 @@
 using namespace std;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 OutputVector translate_tobool_op(const NodeContext& node) {
     // (rank(x) == 0 && x != 0) || (rank > 0 && ReduceProd(ShapeOf(x))) > 0
     default_op_checks(node, 1, {"ToBool"});
@@ -66,7 +63,4 @@ OutputVector translate_tobool_op(const NodeContext& node) {
     set_node_name(node.get_name(), to_bool);
     return to_bool->outputs();
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

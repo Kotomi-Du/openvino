@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -56,20 +56,14 @@ class AlignConcatQuantizationParametersTransformation
       public testing::WithParamInterface<AlignConcatQuantizationParametersTransformationParams> {
 public:
     void SetUp() override {
-        ov::element::Type precision;
-        ov::Shape shape;
-        bool addFakeQuantize;
-        std::string additionalLayer;
-        AlignConcatQuantizationParametersTransformationTestValues testValues;
-        std::tie(precision, shape, addFakeQuantize, additionalLayer, testValues) = GetParam();
+        const auto& [precision, shape, addFakeQuantize, additionalLayer, testValues] = GetParam();
 
         actualFunction = ov::builder::subgraph::AlignConcatQuantizationParametersFunction::getOriginal(
             precision,
             testValues.actual.inputPrecision,
             shape,
             addFakeQuantize,
-            additionalLayer,
-            testValues.actual.dequantization);
+            additionalLayer);
 
         auto supportedPrecisions = std::vector<ov::pass::low_precision::PrecisionsRestriction>(
             {ov::pass::low_precision::PrecisionsRestriction::create<ov::op::v1::Convolution>(
@@ -96,18 +90,12 @@ public:
             addFakeQuantize,
             additionalLayer,
             testValues.expected.dequantizationBefore,
-            testValues.expected.preicsionAfterOperation,
             testValues.expected.dequantizationAfter);
     }
 
     static std::string getTestCaseName(
         testing::TestParamInfo<AlignConcatQuantizationParametersTransformationParams> obj) {
-        ov::element::Type precision;
-        ov::Shape shape;
-        bool addFakeQuantize;
-        std::string additionalLayer;
-        AlignConcatQuantizationParametersTransformationTestValues testValues;
-        std::tie(precision, shape, addFakeQuantize, additionalLayer, testValues) = obj.param;
+        const auto& [precision, shape, addFakeQuantize, additionalLayer, testValues] = obj.param;
 
         std::ostringstream result;
         result << precision << "_"

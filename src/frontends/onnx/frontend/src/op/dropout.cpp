@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,10 +11,7 @@
 #include "openvino/op/util/op_types.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
+namespace ov::frontend::onnx::ai_onnx {
 namespace {
 ov::OutputVector build_dropout(const ov::frontend::onnx::Node& node, bool training_mode) {
     CHECK_VALID_NODE(node, !training_mode, "Training mode is not supported for Dropout op");
@@ -36,14 +33,17 @@ ov::OutputVector build_dropout(const ov::frontend::onnx::Node& node, bool traini
 namespace opset_12 {
 ov::OutputVector dropout(const ov::frontend::onnx::Node& node) {
     const auto ng_inputs = node.get_ov_inputs();
-    // seed attribute and ratio input are ignored because traning mode is not
+    // seed attribute and ratio input are ignored because training mode is not
     // supported anyway
     bool training_mode = false;  // default value
     if (ng_inputs.size() > 2 && !ov::op::util::is_null(ng_inputs.at(2))) {
         CHECK_VALID_NODE(node,
                          ov::op::util::is_constant(ng_inputs.at(2).get_node_shared_ptr()),
                          "Non-constant training_mode input is not supported.");
-        training_mode = ov::as_type_ptr<v0::Constant>(ng_inputs.at(2).get_node_shared_ptr())->cast_vector<bool>()[0];
+        const auto training_mode_values =
+            ov::as_type_ptr<v0::Constant>(ng_inputs.at(2).get_node_shared_ptr())->cast_vector<int32_t>();
+        CHECK_VALID_NODE(node, training_mode_values.size() == 1, "training_mode input must contain one element.");
+        training_mode = training_mode_values[0] != 0;
     }
     return build_dropout(node, training_mode);
 }
@@ -53,7 +53,7 @@ ONNX_OP("Dropout", OPSET_SINCE(12), ai_onnx::opset_12::dropout);
 namespace opset_7 {
 ov::OutputVector dropout(const ov::frontend::onnx::Node& node) {
     // "is_test" attribute was removed
-    // ratio attribute is ignored because traning mode is not supported
+    // ratio attribute is ignored because training mode is not supported
     const bool training_mode = false;
 
     return build_dropout(node, training_mode);
@@ -64,14 +64,11 @@ ONNX_OP("Dropout", OPSET_RANGE(7, 11), ai_onnx::opset_7::dropout);
 namespace opset_1 {
 ov::OutputVector dropout(const ov::frontend::onnx::Node& node) {
     // legacy consumed_inputs attribute ignored
-    // ratio attribute is ignored because traning mode is not supported
+    // ratio attribute is ignored because training mode is not supported
     const bool training_mode = !node.get_attribute_value<int64_t>("is_test", 0);
 
     return build_dropout(node, training_mode);
 }
 ONNX_OP("Dropout", OPSET_RANGE(1, 6), ai_onnx::opset_1::dropout);
 }  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx

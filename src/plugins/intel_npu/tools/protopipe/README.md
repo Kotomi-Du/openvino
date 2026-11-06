@@ -33,7 +33,7 @@ The **YAML** config starts with specifying the several global parameters:
 - `model_dir` - **Optional**. Path to the models location. (**Default**: ".")
 - `blob_dir` - **Optional**. Path to the models location. (**Default**: ".")
 - `device_name` - **Optional**. OpenVINO device name: _CPU_, _GPU_, etc. (**Default**: _NPU_)
-- `compiler_type` - **Optional**. NPU compiler type: _DRIVER_, _MLIR_. (**Default**: _DRIVER_)
+- `compiler_type` - **Optional**. NPU compiler type: _DRIVER_, _PLUGIN_. (**Default**: _DRIVER_)
 - `log_level` - **Optional**. Log level: _NONE_, _INFO_, _DEBUG_. (**Default**: _NONE_)
 - `disable_high_resolution_waitable_timer` - **Optional**. Disables high resolution timer used to perform delays on Windows. (**Default**: false)
 
@@ -42,7 +42,7 @@ Example:
 model_dir:
   local: C:\workspace\models
 device_name: NPU
-compiler_type: MLIR
+compiler_type: PLUGIN
 log_level: INFO
 ```
 ### Model parameters
@@ -50,21 +50,23 @@ log_level: INFO
 - `name` or `path` - **Required**. Path to the model file.
 - `framework` - **Optional**. Framework to use for inference: *onnxrt*, *openvino*. (**Default**: *openvino*)
 - `input_data`, `output_data`, `metric`, `random` - **Optional**. Follow [Use-cases](#use-cases) to  learn the details.
+- `reshape` - **Optional**. Set shape for input layers. For example, "input1: [1,3,224,224], input2: [1,4]" or "[1,3,224,224]" in case of one input layer.
 #### OpenVINO parameters
 - `priority` - **Optional**. Model priority: _HIGH_, _MEDIUM_, _LOW_. (Default: _MEDIUM_)
 - `config` - **Optional**. OpenVINO Plugin specific parameters.
-- `device` - **Optional**. OpenVINO device name. 
-- `ip` - **Optional**. Input layer precision: _FP16_, _FP32_, _U8_, _I32_.
-- `op` - **Optional**. Output layer precision: _FP16_, _FP32_, _U8_, _I32_.
+- `device` - **Optional**. OpenVINO device name.
+- `ip` - **Optional**. Input layer precision: _FP16_, _FP32_, _U8_, _I32_, _BOOL_.
+- `op` - **Optional**. Output layer precision: _FP16_, _FP32_, _U8_, _I32_, _BOOL_.
 - `il` - **Optional**. Input layer layout.
 - `ol` - **Optional**. Output layer layout.
 - `iml` - **Optional**. Input model layout.
 - `oml` - **Optional**. Output model layout.
-- `reshape` - **Optional**. Set shape for input layers. For example, "input1: [1,3,224,224], input2: [1,4]" or "[1,3,224,224]" in case of one input layer.
+- `clamp_outputs` - **Optional**. Clamps all model outputs to the valid range for their precision. Requires `op` to be set for it to take effect.
 
 Examples:
 ```
 - { name: model.xml, ip: FP16, iml: NHWC, il: NCHW }
+- { name: model.xml, ip: U8, op: U8, clamp_outputs: true }
 - { name: model.xml, ip: { data: FP16 }, priority: HIGH }
 - { name: model.xml, device: NPU, config: { PERFORMANCE_HINT: THROUGHPUT } }
 ```
@@ -88,7 +90,7 @@ Examples:
 ```
 
 ### Graph structure
-There are two ways to describe the execution graph structure in Protopipe:  
+There are two ways to describe the execution graph structure in Protopipe:
 1. Using [Dependency Graph](#dependency-graph) (preferable)
 2. Using [Network Sequence](#network-sequence) (old)
 
@@ -162,7 +164,7 @@ In this case the section `connections` **can be omitted**.
 ```
 #1: Invalid - The list must contain at least two operations to connect
 - [A]
-#2: Invalid - Self-loop is prohibited 
+#2: Invalid - Self-loop is prohibited
 - [A, A]
 #3: Invalid - Loop is prohibited
 - [A, B, C, A]
@@ -216,20 +218,20 @@ graph LR;
     D[Model-D.xml]
     E[Model-E.xml]
     F[Model-F.xml]
-    
+
     D --> E
     D --> F
 
   end
-  
+
   A --> B
   B --> C
 ```
 
 #### Network Sequence
-There is also a way to describe the graph by using chain-like structure:  
-`network` - **Required**. List or list of lists of model parameters. Follow [Model Parameters](#model-parameters) for the details.  
-`delay_in_us` - **Optional**. Delay between models in microseconds.  
+There is also a way to describe the graph by using chain-like structure:
+`network` - **Required**. List or list of lists of model parameters. Follow [Model Parameters](#model-parameters) for the details.
+`delay_in_us` - **Optional**. Delay between models in microseconds.
 
 ```
 input_stream_list:
@@ -237,7 +239,7 @@ input_stream_list:
   - { name: A.xml, ip: FP16, il: NCHW, device: CPU }
   - [{ name: B.xml, ip: FP16, op: FP16 }, { name: C.xml, ip: FP16, op: FP16 }]
   - { name: D.xml, ip: FP16, op: FP16, config: { PEROFMRANCE_HINT: LATENCY } }
-  delay_in_us: 5000 
+  delay_in_us: 5000
 ```
 
 ```mermaid
@@ -253,24 +255,33 @@ input_stream_list:
 ### Scenario parameters
 The list of scenarios are specified by using `multi_inference` parameter, every scenario has the following parameters:
 - `name` - **Optional**. The name of execution scenario.
-- `input_stream_list` - **Required**. The list of the streams that will be run in parallel.  
+- `input_stream_list` - **Required**. The list of the streams that will be run in parallel.
 
 Every stream has the following execution parameters:
-- `name` - **Optional**. The name of the stream.  
-- `iteration_count` - **Optional**. Number of iterations to execute.  
-- `exec_time_in_secs` - **Optional**. Execute until timeout specified.  
-- `frames_interval_in_ms` - **Optional**. Execution frequency of the stream (**Default**: 0 - Unbounded)  
+- `name` - **Optional**. The name of the stream.
+- `iteration_count` - **Optional**. Number of iterations to execute.
+- `exec_time_in_secs` - **Optional**. Execute until timeout specified.
+- `frames_interval_in_ms` - **Optional**. Execution frequency of the stream (**Default**: 0 - Unbounded)
 - `target_fps` - **Optional**. Execution frequency of the stream. `target_fps = 1000 / frames_interval_in_ms`. `target_fps` and `frames_interval_in_ms` are mutually exclusive and cannot be provided together.
 - `target_latency_in_ms` - **Optional**. When iteration isn't finished within specified interval, the next frame will be dropped from execution. (**Default**: Disabled)
 - `op_desc`/`conections` or `network` - **Required**. Execution graph structure. Follow [Graph structure](#graph-structure) for the details.
+- `workload_type` - **Optional**. Configure workload type updates at runtime. `workload_type` has the following parameters:
+  - `initial_value` - **Required**. Initial value for workload type. This value will be used when starting the simulation.
+  - `change_to` - **Required**. A list containing the values used to update the workload type during runtime.
+  - `change_interval` - **Required**. A value that represents the number of seconds or iterations depending on stream configuration (iteration_count or exec_time_in_secs is set). The workload type will be updated according to this interval value.
+  - `repeat` - **Optional**. If this value is set to true and all the values in the `change_to` list were used, the values will be reiterated. If set to false or not set at all, workload type updates will stop after the last value in `change_to` list.
 
+  Example:
+    ```
+    workload_type : {initial_value: Default, change_to: [Efficient, Default], change_interval: 5, repeat: true}
+    ```
 ### Config example
-Consider the following scenario that consists of two parallel streams specified on `config.yaml`:  
+Consider the following scenario that consists of two parallel streams specified on `config.yaml`:
 ```
 model_dir:
   local: C:\workspace\models
 device_name: NPU
-compiler_type: MLIR
+compiler_type: PLUGIN
 log_level: INFO
 
 multi_inference:
@@ -304,7 +315,7 @@ multi_inference:
 	E-->F;
 	F-->G;
 	```
- 
+
 Run:
 ```
 ./protopipe -cfg config.yaml --drop_frames
@@ -318,19 +329,21 @@ stream 1: throughput: <number> FPS, latency: min: <number> ms, avg: <number> ms,
 ```
 
 ## How to run
-Protopipe has the following `CLI` options to configure the execution behaviour:  
+Protopipe has the following `CLI` options to configure the execution behaviour:
 
-`--cfg <path>` - Path to configuration file.       
-`--drop_frames`- **Optional**. Drop frames if they come earlier than stream is completed. E.g if `stream` works with `target_fps: 10` (~`100ms` latency) but stream iteration takes `150ms` - the next iteration will be triggered only in `50ms` if option is enabled.           
-`--pipeline` - **Optional**. Enables pipelined execution for all scenarios/streams.                      
-`--niter <value>` - **Optional**. Number of iterations. If specified overwrites termination criterion specified in configuration file for all scenarios/streams.             
-`-t <value>` - **Optional**. Time in seconds. If specified overwrites termination criterion specified in configuration file for all scenarios/streams.  
-`--mode <value>` - **Optional**. Execution mode: *performance*, *reference*, *validation* (**Default**: *performance*)  
-`--exec_filter <value>` - **Optional**. Run only the scenarios that match provided string pattern.  
-`--inference_only` - **Optional**. Run only inference execution for every model excluding i/o data transfer (**Default**: true)  
+`--cfg <path>` - Path to configuration file.
+`--drop_frames`- **Optional**. Drop frames if they come earlier than stream is completed. E.g if `stream` works with `target_fps: 10` (~`100ms` latency) but stream iteration takes `150ms` - the next iteration will be triggered only in `50ms` if option is enabled.
+`--pipeline` - **Optional**. Enables pipelined execution for all scenarios/streams.
+`--niter <value>` - **Optional**. Number of iterations. If specified overwrites termination criterion specified in configuration file for all scenarios/streams.
+`-t <value>` - **Optional**. Time in seconds. If specified overwrites termination criterion specified in configuration file for all scenarios/streams.
+`--mode <value>` - **Optional**. Execution mode: *performance*, *reference*, *validation*, *accuracy* (**Default**: *performance*)
+`--reference_device <value>` - **Optional**. Reference device for accuracy mode comparison. (**Default**: *CPU*)
+`--target_device <value>` - **Optional**. Target device for accuracy mode comparison. (**Default**: *NPU*)
+`--exec_filter <value>` - **Optional**. Run only the scenarios that match provided string pattern.
+`--inference_only` - **Optional**. Run only inference execution for every model excluding i/o data transfer (**Default**: true)
 
 ### Filtering
-Sometime it's needed to run particular set of scenarios specified in config file rather than all of them.   
+Sometime it's needed to run particular set of scenarios specified in config file rather than all of them.
 For example consider the following config file with three scenarios specified in `scenarios.yaml`:
 ```
 model_dir:
@@ -347,13 +360,13 @@ multi_inference:
   - network:
     - { name: C.xml }
 ```
-By default all scenarios are assigned unique names according to the following `multi_inference_<number>` pattern.    
-E.g scenario with model `A.xml` has default name `multi_inference_0`.    
-Use `-exec_filter <value>` CLI option to control what scenarios from config should be executed:   
+By default all scenarios are assigned unique names according to the following `multi_inference_<number>` pattern.
+E.g scenario with model `A.xml` has default name `multi_inference_0`.
+Use `-exec_filter <value>` CLI option to control what scenarios from config should be executed:
 ```
 ./protopipe -cfg scenarios.yaml -niter 100 -exec_filter=".*[0-1]"
 ```
-Only `multi_inference_0` and `multi_inference_1` scenarios will be executed.  
+Only `multi_inference_0` and `multi_inference_1` scenarios will be executed.
 
 It's also possible to overwrite the default names in config file:
 ```
@@ -403,11 +416,11 @@ As the prerequisite for accuracy validation it's useful to have a mechanism that
 Use additional parameters to configure `reference` mode:
 - `input_data` - **Required**. Path that contain input data for the model, if entity under the path is empty, input data will be generated randomly and dumped into the path specified.
 - `output_data` - **Required**. Path where to dump reference output data.
-- `random` - **Optional**. Initializer to generate input data randomly. (Default: ` { dist: uniform, low: 0.0, high: 255 }`)
+- `random` - **Optional**. Initializer to generate input data randomly. (Default: ` { dist: uniform, low: 0.0, high: 255, seed: -1 }`, or `{ dist: uniform, low: 0.0, high: 2.0 }` for layers with `ip: BOOL`, so only valid `0`/`1` values are generated)
 
 Examples:
 ```
-random: { dist: uniform, low: -1.0, high: 1.0 } # specified globally for all models
+random: { dist: uniform, low: -1.0, high: 1.0, seed: 4 } # specified globally for all models
 multi_inference:
 - input_stream_list:
   - network:
@@ -431,7 +444,7 @@ Protopipe has the dedicated `validation` mode to perform accuracy validation. Ex
 - `save_validation_outputs` - **Optional**. Accepts the path where to dump actual execution outputs. (Default: disabled)
 - `metric` - **Optional**. Accuracy metric to compare actual vs reference outputs. (Default: `{ name: norm, tolerance: 0.0 }`)
 - `input_data` - **Required**. Path that contain input data for the model.
-- `output_data` - **Required**. Path that contain **reference** data to compare with.  
+- `output_data` - **Required**. Path that contain **reference** data to compare with.
 
 **Note**: If folder is provided either for **input_data** or **output_data**, it must be in the following format:
 ```
@@ -459,11 +472,11 @@ Examples:
 ```
 
 ### Supported metrics
-1. L2 Norm: $$\text{Norm}(\mathbf{A}, \mathbf{B}) = \sqrt{\sum_{i,j} (A_{i,j} - B_{i,j})^2}$$  
+1. L2 Norm: $$\text{Norm}(\mathbf{A}, \mathbf{B}) = \sqrt{\sum_{i,j} (A_{i,j} - B_{i,j})^2}$$
 Parameters:
     - `name: norm` - **Required**. Enables L2 Norm metric.
 	- `tolerance` - **Required**. If value of metric is greater than **tolerance** it will be treated as **FAIL**.
-3. Cosine similarity: $$\text{Cosine}(\mathbf{A}, \mathbf{B}) = \frac{\mathbf{A} \cdot \mathbf{B}}{\| \mathbf{A} \|_2 \| \mathbf{B} \|_2}$$  
+3. Cosine similarity: $$\text{Cosine}(\mathbf{A}, \mathbf{B}) = \frac{\mathbf{A} \cdot \mathbf{B}}{\| \mathbf{A} \|_2 \| \mathbf{B} \|_2}$$
 Parameters:
     - `name: cosine` - **Required**. Enables cosine similarity metric.
 	- `threshold` - **Required**. If value of metric is lower than **threshold** it will be treated as **FAIL**.
@@ -473,6 +486,28 @@ $$D = \text{max}(0.001, \text{max}(A_{max}-A_{min}\text{, } B_{max}-B_{min}))$$
 Parameters:
     - `name: nrmse` - **Required**. Enables nrmse metric.
 	- `tolerance` - **Required**. If value of metric is greater than **tolerance** it will be treated as **FAIL**.
+4. mAP (mean Average Precision) - accuracy metric for object detection models. Raw model output is decoded into detections (boxes, scores, class ids), post-processed with per-class NMS and compared against the reference detections. AP is computed with all-point (COCO/VOC2010+) interpolation and averaged over the classes present in the reference.
+Parameters:
+    - `name: map` - **Required**. Enables the mean Average Precision metric.
+	- `map_threshold` - **Required**. If value of metric is lower than **map_threshold** it will be treated as **FAIL**.
+	- `overlap_threshold` - **Optional**. IoU threshold used to match a prediction against a reference box (mAP@0.5 by default). Use `"0.5:0.95"` to average the result over IoU thresholds 0.5-0.95 with step 0.05 (mAP@0.5:0.95). (**Default**: 0.5)
+	- `confidence_threshold` - **Optional**. Detections with a score lower than this value are discarded. (**Default**: 0.0)
+	- `nms_threshold` - **Optional**. IoU threshold for per-class non-maximum suppression. Set to `0` to disable NMS for models with NMS-free heads (e.g. YOLOv10). (**Default**: 0.45)
+	- `num_classes` - **Optional**. Number of classes. **Required** only to decode raw (not post-processed) detection outputs.
+
+	Supported detection output layouts (unit dimensions are ignored):
+    - `[N, 6]` - `[x1, y1, x2, y2, score, label]`, e.g. post-processed YOLOv8/YOLOv10 output of shape `[1, 300, 6]`.
+    - `[N, 7]` - `[image_id, label, score, x1, y1, x2, y2]`, e.g. SSD/`DetectionOutput` of shape `[1, 1, N, 7]`.
+    - `[N, num_classes + 4]` or `[num_classes + 4, N]` - raw YOLOv8-style head: `[cx, cy, w, h, class scores...]`.
+    - `[N, num_classes + 5]` or `[num_classes + 5, N]` - raw YOLOv5-style head: `[cx, cy, w, h, objectness, class scores...]`.
+
+	Examples:
+	```
+	# mAP@0.5 for a post-processed detection output
+	- { name: yolo.xml, ip: FP16, output_data: ref_output/, metric: { name: map, overlap_threshold: 0.5, map_threshold: 0.9 } }
+	# mAP@0.5:0.95 for a raw detection output
+	- { name: yolo.xml, ip: FP16, output_data: ref_output/, metric: { name: map, overlap_threshold: "0.5:0.95", map_threshold: 0.9, confidence_threshold: 0.25, nms_threshold: 0.45, num_classes: 80 } }
+	```
 
 ### Example
 Consider the following `config.yaml`:
@@ -480,7 +515,7 @@ Consider the following `config.yaml`:
 model_dir:
   local: C:\workspace\models
 device_name: NPU
-compiler_type: MLIR
+compiler_type: PLUGIN
 log_level: INFO
 
 save_validation_outputs: actual-outputs/
@@ -494,6 +529,7 @@ multi_inference:
     - { name: B.xml, ip: FP16, input_data: B-inputs/, output_data: B-outputs/, metric: { name: norm, tolerance: 0.0 }
 ```
 
+#### Two-step validation (reference + validation modes)
 Use `reference` mode to generate the input random data for every model and calculate reference outputs
 **Note**: If reference device is different, it can be changed in config file (`device_name`) accordingly
 ```
@@ -509,7 +545,25 @@ stream 0: Validation has passed for <number> iteration(s)
 ```
 In case of accuracy issues the output will be the following:
 ```
-stream 0: Accuraccy check failed on <number> iteration(s) (first 10):
+stream 0: Accuracy check failed on <number> iteration(s) (first 10):
+Iteration <number>:
+  Model: A, Layer: <name>, Metric: Norm{tolerance: 0.01}, Reason: <number> > 0.01;
+```
+
+#### One-step validation (accuracy mode)
+Use `accuracy` mode to run inference on both reference and target devices in parallel and compare outputs directly:
+```
+./protopipe --cfg config.yaml --mode accuracy --reference_device CPU --target_device NPU -niter 10
+```
+**Note**: When `output_data` is specified, outputs will be dumped to `<path>_REFERENCE` and `<path>_TARGET` directories.
+
+Example of successful validation:
+```
+stream 0: Accuracy validation passed - Ref: <number> iteration(s), Tgt: <number> iteration(s)
+```
+In case of accuracy issues the output will be the following:
+```
+stream 0: Accuracy check failed on <number> iteration(s) (first 10):
 Iteration <number>:
   Model: A, Layer: <name>, Metric: Norm{tolerance: 0.01}, Reason: <number> > 0.01;
 ```
@@ -536,7 +590,7 @@ Iteration <number>:
 - Clone OpenCV repo:
     ```
     git clone https://github.com/opencv/opencv
-    cd opencv && git checkout 3919f33e21
+    cd opencv && git checkout 252403bbf2
     ```
 - Build OpenCV G-API:
     ```
@@ -584,7 +638,7 @@ Iteration <number>:
    ```
 ### Verify the installation
 **Note**: Make sure `opencv_*` libraries are visible in the environment:
-- Windows: 
+- Windows:
 	```
 	set PATH=<path-to-opencv>\build\bin\Release\;%PATH%
 	```

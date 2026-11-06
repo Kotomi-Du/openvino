@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,7 @@ namespace kernel_selector {
 class PoolingKernelGPUByxfOpt : public PoolingKernelBase {
 public:
     PoolingKernelGPUByxfOpt() : PoolingKernelBase("pooling_gpu_byxf_opt") {}
-    virtual ~PoolingKernelGPUByxfOpt() {}
+    ~PoolingKernelGPUByxfOpt() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

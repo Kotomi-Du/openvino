@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,7 +25,7 @@ public:
     GenerateProposalsRef()
             : KernelBaseOpenCL("generate_proposals_ref") {}
 
-    ~GenerateProposalsRef() = default;
+    ~GenerateProposalsRef() override = default;
 
     using DispatchData = CommonDispatchData;
 

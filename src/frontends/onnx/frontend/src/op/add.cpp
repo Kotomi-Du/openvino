@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,10 +10,7 @@
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
+namespace ov::frontend::onnx::ai_onnx {
 namespace opset_1 {
 ov::OutputVector add(const ov::frontend::onnx::Node& node) {
     CHECK_VALID_NODE(node,
@@ -46,7 +43,4 @@ namespace opset_14 {
 ONNX_OP("Add", OPSET_SINCE(14), ai_onnx::opset_7::add);
 }  // namespace opset_14
 
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx

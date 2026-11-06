@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,16 +18,19 @@ ParamsKey DepthToSpaceKernelBlock2Opt::GetSupportedKey() const {
 }
 
 bool DepthToSpaceKernelBlock2Opt::Validate(const Params& p) const {
-    if (!DepthToSpaceKernelBase::Validate(p))
-        return false;
+    if (!DepthToSpaceKernelBase::Validate(p)) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     const auto& params = static_cast<const depth_to_space_params&>(p);
 
-    if ((params.block_size != 2) || (params.inputs[0].X().v % 2 != 0))
-        return false;
+    if ((params.block_size != 2) || (params.inputs[0].X().v % 2 != 0)) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (params.mode != DepthToSpaceMode::BLOCKS_FIRST)
-        return false;
+    if (params.mode != DepthToSpaceMode::BLOCKS_FIRST) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

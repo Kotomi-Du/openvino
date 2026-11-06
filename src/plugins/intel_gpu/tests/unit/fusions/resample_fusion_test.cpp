@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -78,6 +78,17 @@ public:
 #define CASE_RESAMPLE_FP16_13 { 1, 16, 4, 5 }, { 1, 16, 7, 8 }, data_types::f16, format::b_fs_yx_fsv16, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::f16, format::bfyx
 #define CASE_RESAMPLE_FP16_14 { 1, 32, 4, 5 }, { 1, 32, 2, 3 }, data_types::f16, format::fs_b_yx_fsv32, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::f16, format::bfyx
 
+#define CASE_RESAMPLE_BF16_1 { 1, 15, 4, 5 }, { 1, 15, 2, 3 }, data_types::bf16, format::bfyx, resample::InterpolateOp::InterpolateMode::NEAREST, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_3 { 1, 15, 4, 5 }, { 1, 15, 2, 3 }, data_types::bf16, format::bfyx, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_4 { 1, 16, 4, 5 }, { 1, 16, 7, 8 }, data_types::bf16, format::bfyx, resample::InterpolateOp::InterpolateMode::NEAREST, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_6 { 1, 16, 4, 5 }, { 1, 16, 7, 8 }, data_types::bf16, format::bfyx, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_7 { 1, 16, 4, 5, 4 }, { 1, 16, 2, 3, 2 }, data_types::bf16, format::bfzyx, resample::InterpolateOp::InterpolateMode::NEAREST, data_types::bf16, format::bfzyx
+#define CASE_RESAMPLE_BF16_8 { 1, 16, 4, 5, 4 }, { 1, 16, 2, 3, 2 }, data_types::bf16, format::bfzyx, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfzyx
+#define CASE_RESAMPLE_BF16_11 { 1, 16, 4, 5 }, { 1, 16, 7, 8 }, data_types::bf16, format::b_fs_yx_fsv16, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_12 { 2, 32, 4, 5 }, { 2, 32, 7, 8 }, data_types::bf16, format::fs_b_yx_fsv32, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_13 { 1, 16, 4, 5 }, { 1, 16, 7, 8 }, data_types::bf16, format::b_fs_yx_fsv16, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfyx
+#define CASE_RESAMPLE_BF16_14 { 1, 32, 4, 5 }, { 1, 32, 2, 3 }, data_types::bf16, format::fs_b_yx_fsv32, resample::InterpolateOp::InterpolateMode::LINEAR, data_types::bf16, format::bfyx
+
 #define CASE_RESAMPLE_I8_1 { 1, 16, 4, 5 }, { 1, 16, 2, 3 }, data_types::i8, format::b_fs_yx_fsv16, resample::InterpolateOp::InterpolateMode::NEAREST, data_types::f32, format::bfyx
 #define CASE_RESAMPLE_I8_2 { 2, 32, 4, 5 }, { 2, 32, 2, 3 }, data_types::i8, format::b_fs_yx_fsv16, resample::InterpolateOp::InterpolateMode::NEAREST, data_types::f32, format::bfyx
 
@@ -87,12 +98,18 @@ public:
 class resample_quantize : public ResamplePrimitiveFusingTest {};
 TEST_P(resample_quantize, basic) {
     auto p = GetParam();
+    auto quant_layout = get_single_element_layout(p);
+    auto quant_per_ch = get_per_channel_layout(p);
+    if (p.default_type == data_types::bf16) {
+        quant_layout.data_type = data_types::f32;
+        quant_per_ch.data_type = data_types::f32;
+    }
     create_topologies(
         input_layout("input", get_input_layout(p)),
-        data("in_lo", get_mem(get_per_channel_layout(p), min_random, 0)),
-        data("in_hi", get_mem(get_per_channel_layout(p), 1, max_random)),
-        data("out_lo", get_mem(get_single_element_layout(p), -127)),
-        data("out_hi", get_mem(get_single_element_layout(p), 127)),
+        data("in_lo", get_mem(quant_per_ch, min_random, 0)),
+        data("in_hi", get_mem(quant_per_ch, 1, max_random)),
+        data("out_lo", get_mem(quant_layout, -127)),
+        data("out_hi", get_mem(quant_layout, 127)),
         resample("resample_prim", input_info("input"), p.out_shape, p.in_shape.feature[0], p.type),
         quantize("quantize", input_info("resample_prim"), input_info("in_lo"), input_info("in_hi"),
                  input_info("out_lo"), input_info("out_hi"), 255, data_types::i8),
@@ -140,6 +157,9 @@ TEST_P(resample_scale_activation_eltwise, basic) {
     );
 
     tolerance = 1e-5f;
+    // bf16 accumulates larger rounding error, relax tolerance accordingly
+    if (p.data_type == data_types::bf16)
+        tolerance = 5e-2f;
     execute(p);
 }
 
@@ -163,6 +183,17 @@ INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_scale_activation_eltwise, ::testi
     resample_test_params{ CASE_RESAMPLE_FP16_12, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
     resample_test_params{ CASE_RESAMPLE_FP16_13, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
     resample_test_params{ CASE_RESAMPLE_FP16_14, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+
+    resample_test_params{ CASE_RESAMPLE_BF16_1, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_3, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_4, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_6, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_7, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_8, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_11, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_12, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_13, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
+    resample_test_params{ CASE_RESAMPLE_BF16_14, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
 
     resample_test_params{ CASE_RESAMPLE_I8_1, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
     resample_test_params{ CASE_RESAMPLE_I8_2, RESAMPLE_SCALE_ACTIVATION_ELTWISE },
@@ -221,6 +252,18 @@ INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_quantize_concat, ::testing::Value
     resample_test_params{ CASE_RESAMPLE_FP16_12, RESAMPLE_QUANTIZE_CONCAT_CNT },
     resample_test_params{ CASE_RESAMPLE_FP16_13, RESAMPLE_QUANTIZE_CONCAT_CNT },
     resample_test_params{ CASE_RESAMPLE_FP16_14, RESAMPLE_QUANTIZE_CONCAT_CNT },
+
+    // concat is not yet supported for bf16 (no layout format available for concat with bf16), so bf16 cases are disabled
+    // resample_test_params{ CASE_RESAMPLE_BF16_1, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_3, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_4, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_6, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_7, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_8, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_11, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_12, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_13, RESAMPLE_QUANTIZE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_14, RESAMPLE_QUANTIZE_CONCAT_CNT },
 }));
 
 class resample_eltwise_concat : public ResamplePrimitiveFusingTest {};
@@ -270,6 +313,18 @@ INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_eltwise_concat, ::testing::Values
     resample_test_params{ CASE_RESAMPLE_FP16_13, RESAMPLE_ELTWISE_CONCAT_CNT },
     resample_test_params{ CASE_RESAMPLE_FP16_14, RESAMPLE_ELTWISE_CONCAT_CNT },
 
+    // concat is not yet supported for bf16 (no layout format available for concat with bf16), so bf16 cases are disabled
+    // resample_test_params{ CASE_RESAMPLE_BF16_1, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_3, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_4, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_6, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_7, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_8, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_11, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_12, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_13, RESAMPLE_ELTWISE_CONCAT_CNT },
+    // resample_test_params{ CASE_RESAMPLE_BF16_14, RESAMPLE_ELTWISE_CONCAT_CNT },
+
     resample_test_params{ CASE_RESAMPLE_I8_1, RESAMPLE_ELTWISE_CONCAT_CNT },
     resample_test_params{ CASE_RESAMPLE_I8_2, RESAMPLE_ELTWISE_CONCAT_CNT },
 
@@ -280,6 +335,9 @@ INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_eltwise_concat, ::testing::Values
 class resample_eltwise_fusing_through : public ResamplePrimitiveFusingTest {};
 TEST_P(resample_eltwise_fusing_through, reshape) {
     auto p = GetParam();
+    // bf16 compute requires XMX support (Xe-HPG+)
+    if (p.data_type == data_types::bf16 && !get_test_engine().get_device_info().supports_immad)
+        GTEST_SKIP();
     auto reshape_shape = p.out_shape;
     reshape_shape.feature[0] *= reshape_shape.spatial[0];
     reshape_shape.spatial[0] = 1;
@@ -314,6 +372,13 @@ INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_eltwise_fusing_through, ::testing
     resample_test_params{ CASE_RESAMPLE_FP16_7, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
     resample_test_params{ CASE_RESAMPLE_FP16_8, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
 
+    resample_test_params{ CASE_RESAMPLE_BF16_1, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
+    resample_test_params{ CASE_RESAMPLE_BF16_3, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
+    resample_test_params{ CASE_RESAMPLE_BF16_4, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
+    // BF16_6 (LINEAR non-integer upscale) covered by resample_basic and resample_eltwise_fusing
+    resample_test_params{ CASE_RESAMPLE_BF16_7, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
+    resample_test_params{ CASE_RESAMPLE_BF16_8, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_FP },
+
     resample_test_params{ CASE_RESAMPLE_I8_1, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_INT },
     resample_test_params{ CASE_RESAMPLE_I8_2, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT_INT },
 
@@ -347,4 +412,366 @@ INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_eltwise_fusing_through_not_allowe
     resample_test_params{ CASE_RESAMPLE_FP32_1, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT },
 
     resample_test_params{ CASE_RESAMPLE_FP16_1, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT },
+
+    resample_test_params{ CASE_RESAMPLE_BF16_1, RESAMPLE_ELTWISE_FUSING_THROUGH_CNT },
+}));
+
+class resample_eltwise : public ResamplePrimitiveFusingTest {};
+TEST_P(resample_eltwise, opt_kernel) {
+    auto p = GetParam();
+    create_topologies(
+        input_layout("input", get_input_layout(p)),
+        data("scale_data", get_mem(get_per_channel_layout(p), -10, 10)),
+        reorder("reorder_datat", input_info("scale_data"), p.default_format, p.data_type),
+        resample("resample_prim", input_info("input"), p.out_shape, p.in_shape.feature[0], p.type),
+        eltwise("eltwise",{ input_info("resample_prim"), input_info("reorder_datat") }, eltwise_mode::sum, p.data_type),
+        reorder("out", input_info("eltwise"), p.input_format, data_types::f32)
+    );
+
+    tolerance = 1.f;
+    execute(p);
+}
+
+#define RESAMPLE_QUANTIZE_CNT 2, 3
+INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_eltwise, ::testing::ValuesIn(std::vector<resample_test_params>{
+    resample_test_params{ CASE_RESAMPLE_FP16_1, RESAMPLE_QUANTIZE_CNT },
+    resample_test_params{ CASE_RESAMPLE_FP16_4, RESAMPLE_QUANTIZE_CNT },
+    resample_test_params{ CASE_RESAMPLE_FP16_7, RESAMPLE_QUANTIZE_CNT },
+    resample_test_params{ CASE_RESAMPLE_FP16_11, RESAMPLE_QUANTIZE_CNT },
+
+    resample_test_params{ CASE_RESAMPLE_BF16_1, RESAMPLE_QUANTIZE_CNT },
+    resample_test_params{ CASE_RESAMPLE_BF16_4, RESAMPLE_QUANTIZE_CNT },
+    resample_test_params{ CASE_RESAMPLE_BF16_7, RESAMPLE_QUANTIZE_CNT },
+    resample_test_params{ CASE_RESAMPLE_BF16_11, RESAMPLE_QUANTIZE_CNT },
+}));
+
+/* ----------------------------------------------------------------------------------------------------- */
+/* -------------------------------- Resample BICUBIC_PILLOW with axes ----------------------------------- */
+/* ----------------------------------------------------------------------------------------------------- */
+
+namespace {
+struct resample_axes_test_params {
+    ov::PartialShape in_shape;
+    ov::PartialShape out_shape;
+    data_types data_type;
+    format input_format;
+    resample::InterpolateOp::InterpolateMode type;
+    data_types default_type;
+    format default_format;
+    std::vector<int64_t> axes;
+    size_t expected_fused_primitives;
+    size_t expected_not_fused_primitives;
+};
+
+class ResampleAxesPrimitiveFusingTest : public ::BaseFusingTest<resample_axes_test_params> {
+public:
+    void SetUp() override {
+        BaseFusingTest::SetUp();
+        // BICUBIC_PILLOW with partial axes requires v11 shape inference for correct output layout
+        cfg_fused.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+        ov::intel_gpu::ImplementationDesc resample_target_impl = { format::bfyx, "resample_pil_ref", cldnn::impl_types::ocl};
+        cfg_fused.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"resample_prim", resample_target_impl} }));
+        cfg_not_fused.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    }
+
+    void execute(resample_axes_test_params& p) {
+        auto input_prim = get_mem(get_input_layout(p));
+        network network_not_fused(this->engine, this->topology_non_fused, cfg_not_fused);
+        network network_fused(this->engine, this->topology_fused, cfg_fused);
+        network_fused.set_input_data("input", input_prim);
+        network_not_fused.set_input_data("input", input_prim);
+        compare(network_not_fused, network_fused, p);
+    }
+
+    layout get_input_layout(resample_axes_test_params& p) {
+        return layout{ p.in_shape, p.data_type, p.input_format, padding{} };
+    }
+
+    layout get_output_layout(resample_axes_test_params& p) {
+        return layout{ p.out_shape, p.data_type, p.input_format };
+    }
+
+    layout get_per_channel_layout(resample_axes_test_params& p) {
+        ov::PartialShape shape(std::vector<ov::Dimension>(p.out_shape.size(), 1));
+        shape[1] = p.out_shape[1];
+        return layout{ shape, p.default_type, p.default_format };
+    }
+
+    std::vector<int64_t> get_sizes_for_axes(resample_axes_test_params& p) {
+        std::vector<int64_t> sizes;
+        for (auto ax : p.axes) {
+            sizes.push_back(p.out_shape[ax].get_length());
+        }
+        return sizes;
+    }
+};
+}  // namespace
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_1 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 3, 2 }, data_types::f16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_2 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 8, 7 }, data_types::f16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale only horizontal - vertical axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_3 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 5, 2 }, data_types::f16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale only horizontal - vertical axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_4 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 5, 7 }, data_types::f16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale only vertical - horizontal axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_5 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 3, 4 }, data_types::f16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale only vertical - horizontal axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_6 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 8, 4 }, data_types::f16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_1 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 3, 2 }, data_types::bf16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::bf16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_2 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 8, 7 }, data_types::bf16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::bf16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale only horizontal - vertical axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_3 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 5, 2 }, data_types::bf16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::bf16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale only horizontal - vertical axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_4 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 5, 7 }, data_types::bf16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::bf16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale only vertical - horizontal axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_5 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 3, 4 }, data_types::bf16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::bf16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale only vertical - horizontal axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_6 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 8, 4 }, data_types::bf16, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::bf16, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_1 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 3, 2 }, data_types::f32, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f32, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_2 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 8, 7 }, data_types::f32, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f32, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale only horizontal - vertical axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_3 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 5, 2 }, data_types::f32, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f32, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale only horizontal - vertical axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_4 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 5, 7 }, data_types::f32, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f32, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (downscale only vertical - horizontal axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_5 \
+    ov::PartialShape{ 1, 15, 5, 4 }, ov::PartialShape{ 1, 15, 3, 4 }, data_types::f32, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f32, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+
+// BICUBIC_PILLOW, spatial axes = {2,3} (upscale only vertical - horizontal axis not changed)
+#define CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_6 \
+    ov::PartialShape{ 1, 16, 5, 4 }, ov::PartialShape{ 1, 16, 8, 4 }, data_types::f32, format::bfyx, \
+    resample::InterpolateOp::InterpolateMode::BICUBIC_PILLOW, data_types::f32, format::bfyx, \
+    std::vector<int64_t>{2, 3}
+    
+class resample_bicubic_pillow_axes_scale_activation_eltwise : public ResampleAxesPrimitiveFusingTest {};
+TEST_P(resample_bicubic_pillow_axes_scale_activation_eltwise, basic) {
+    auto p = GetParam();
+    auto sizes = get_sizes_for_axes(p);
+    create_topologies(
+        input_layout("input", get_input_layout(p)),
+        data("scale_data", get_mem(get_per_channel_layout(p), -10, 10)),
+        data("eltwise_data", get_mem(get_output_layout(p), -10, 10)),
+        resample("resample_prim", input_info("input"), sizes, {}, p.axes, {}, {}, 0, -0.75f,
+                 p.type, resample::InterpolateOp::ShapeCalcMode::SIZES),
+        eltwise("scale", { input_info("resample_prim"), input_info("scale_data") }, eltwise_mode::prod, data_types::f16),
+        activation("activation", input_info("scale"), activation_func::abs),
+        eltwise("eltwise", { input_info("activation"), input_info("eltwise_data") }, eltwise_mode::sum),
+        reorder("reorder_bfyx", input_info("eltwise"), p.default_format, data_types::f32)
+    );
+
+    tolerance = 5e-2f;
+    // bf16 accumulates larger rounding error, relax tolerance accordingly
+    if (p.data_type == data_types::bf16)
+        tolerance = 1e-1f;
+    execute(p);
+}
+
+#define RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT 2, 5
+INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_bicubic_pillow_axes_scale_activation_eltwise,
+    ::testing::ValuesIn(std::vector<resample_axes_test_params>{
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_1, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_2, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_3, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_4, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_5, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_6, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_1, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_2, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_3, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_4, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_5, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_6, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_1, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_2, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_3, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_4, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_5, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_6, RESAMPLE_BICUBIC_PILLOW_AXES_SCALE_ACTIVATION_ELTWISE_CNT },
+}));
+
+class resample_bicubic_pillow_axes_activation : public ResampleAxesPrimitiveFusingTest {};
+TEST_P(resample_bicubic_pillow_axes_activation, basic) {
+    auto p = GetParam();
+    auto sizes = get_sizes_for_axes(p);
+    create_topologies(
+        input_layout("input", get_input_layout(p)),
+        resample("resample_prim", input_info("input"), sizes, {}, p.axes, {}, {}, 0, -0.75f,
+                 p.type, resample::InterpolateOp::ShapeCalcMode::SIZES),
+        activation("activation", input_info("resample_prim"), activation_func::abs),
+        reorder("reorder_bfyx", input_info("activation"), p.default_format, data_types::f32)
+    );
+
+    tolerance = 2e-2f;
+    execute(p);
+}
+
+#define RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT 2, 3
+INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_bicubic_pillow_axes_activation,
+    ::testing::ValuesIn(std::vector<resample_axes_test_params>{
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_1, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_2, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_3, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_4, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_5, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_6, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_1, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_2, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_3, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_4, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_5, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_6, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_1, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_2, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_3, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_4, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_5, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_6, RESAMPLE_BICUBIC_PILLOW_AXES_ACTIVATION_CNT },
+}));
+
+class resample_bicubic_pillow_axes_quantize : public ResampleAxesPrimitiveFusingTest {};
+TEST_P(resample_bicubic_pillow_axes_quantize, basic_i8) {
+    auto p = GetParam();
+    auto sizes = get_sizes_for_axes(p);
+    auto quant_layout = get_single_element_layout(p);
+    auto quant_per_ch = get_per_channel_layout(p);
+    if (p.default_type == data_types::bf16) {
+        quant_layout.data_type = data_types::f32;
+        quant_per_ch.data_type = data_types::f32;
+    }
+    create_topologies(
+        input_layout("input", get_input_layout(p)),
+        data("in_lo", get_mem(quant_per_ch, min_random, 0)),
+        data("in_hi", get_mem(quant_per_ch, 1, max_random)),
+        data("out_lo", get_mem(quant_layout, -127)),
+        data("out_hi", get_mem(quant_layout, 127)),
+        resample("resample_prim", input_info("input"), sizes, {}, p.axes, {}, {}, 0, -0.75f,
+                 p.type, resample::InterpolateOp::ShapeCalcMode::SIZES),
+        quantize("quantize", input_info("resample_prim"), input_info("in_lo"), input_info("in_hi"),
+                 input_info("out_lo"), input_info("out_hi"), 255, data_types::i8),
+        reorder("reorder_bfyx", input_info("quantize"), p.default_format, data_types::f32)
+    );
+
+    tolerance = 1;
+    execute(p);
+}
+
+TEST_P(resample_bicubic_pillow_axes_quantize, basic_u8) {
+    auto p = GetParam();
+    auto sizes = get_sizes_for_axes(p);
+    auto quant_layout = get_single_element_layout(p);
+    auto quant_per_ch = get_per_channel_layout(p);
+    if (p.default_type == data_types::bf16) {
+        quant_layout.data_type = data_types::f32;
+        quant_per_ch.data_type = data_types::f32;
+    }
+    create_topologies(
+        input_layout("input", get_input_layout(p)),
+        data("in_lo", get_mem(quant_per_ch, min_random, 0)),
+        data("in_hi", get_mem(quant_per_ch, 1, max_random)),
+        data("out_lo", get_mem(quant_layout, 0)),
+        data("out_hi", get_mem(quant_layout, 255)),
+        resample("resample_prim", input_info("input"), sizes, {}, p.axes, {}, {}, 0, -0.75f,
+                 p.type, resample::InterpolateOp::ShapeCalcMode::SIZES),
+        quantize("quantize", input_info("resample_prim"), input_info("in_lo"), input_info("in_hi"),
+                 input_info("out_lo"), input_info("out_hi"), 256, data_types::u8),
+        reorder("reorder_bfyx", input_info("quantize"), p.default_format, data_types::f32)
+    );
+
+    tolerance = 1;
+    execute(p);
+}
+
+#define RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT 2, 3
+INSTANTIATE_TEST_SUITE_P(fusings_gpu, resample_bicubic_pillow_axes_quantize,
+    ::testing::ValuesIn(std::vector<resample_axes_test_params>{
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_1, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_2, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_3, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_4, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_5, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F16_6, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_1, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_2, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_3, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_4, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_5, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_BF16_6, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_1, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_2, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_3, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_4, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_5, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
+        resample_axes_test_params{ CASE_RESAMPLE_BICUBIC_PILLOW_AXES_F32_6, RESAMPLE_BICUBIC_PILLOW_AXES_QUANTIZE_CNT },
 }));

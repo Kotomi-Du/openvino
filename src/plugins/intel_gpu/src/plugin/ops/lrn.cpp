@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,9 +15,8 @@ namespace ov::intel_gpu {
 static cldnn::lrn_norm_region GetNormRegion(std::vector<int64_t> axis_value) {
     if (axis_value.size() == 1 && axis_value[0] == 1) {
         return cldnn::lrn_norm_region_across_channel;
-    } else {
-        return cldnn::lrn_norm_region_within_channel;
     }
+    return cldnn::lrn_norm_region_within_channel;
 }
 
 static void CreateLRNOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v0::LRN>& op) {

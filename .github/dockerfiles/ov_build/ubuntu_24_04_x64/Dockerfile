@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 ARG REGISTRY="docker.io"
 FROM ${REGISTRY}/library/ubuntu:24.04
 
@@ -18,36 +21,33 @@ RUN apt-get update && \
     add-apt-repository --yes --no-update ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install \
-        curl \
-        git \
-        gpg-agent \
-        tzdata \
-        # parallel gzip
-        pigz \
-        # Pythons
-        python3.9-dev \
-        python3.9-venv \
-        python3.9-distutils \
-        python3.10-dev \
-        python3.10-venv \
-        python3.10-distutils \
-        python3.11-dev \
-        python3.11-venv \
-        python3.11-distutils \
-        python3.12-dev \
-        python3.12-venv \
-        python3.13-dev \
-        python3.13-venv \
-        python3-dev \
-        python3-venv \
-        python3-pip \
-        python3-full \
-        # For Java API
-        default-jdk \
-        # For clang-tidy validation
-        clang-format-18 \
-        clang-tidy-18 \
-        && \
+    curl \
+    git \
+    gpg-agent \
+    tzdata \
+    # parallel gzip
+    pigz \
+    # Pythons
+    python3.11-dev \
+    python3.11-venv \
+    python3.11-distutils \
+    python3.12-dev \
+    python3.12-venv \
+    python3.13-dev \
+    python3.13-venv \
+    python3-dev \
+    python3-venv \
+    python3-pip \
+    python3-full \
+    python3.14-nogil \
+    python3.14-venv \
+    python3.14-dev \
+    # For Java API
+    default-jdk \
+    # For clang-tidy validation
+    clang-format-18 \
+    clang-tidy-18 \
+    && \
     rm -rf /var/lib/apt/lists/*
 
 # Install build dependencies
@@ -57,7 +57,7 @@ RUN chmod +x /install_build_dependencies.sh && \
     rm -rf /var/lib/apt/lists/*
 
 # Install sccache
-ARG SCCACHE_VERSION="v0.7.5"
+ARG SCCACHE_VERSION="v0.18.0"
 ENV SCCACHE_HOME="/opt/sccache" \
     SCCACHE_PATH="/opt/sccache/sccache"
 
@@ -75,11 +75,14 @@ ENV PATH="/venv/bin:$PATH"
 
 # Setup pip
 ENV PIP_VERSION="24.0"
-RUN /venv/bin/python3 -m pip install --upgrade pip==${PIP_VERSION} && \
-    python3.9 -m pip install --upgrade pip==${PIP_VERSION} && \
-    python3.10 -m pip install --upgrade pip==${PIP_VERSION} && \
+RUN curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
+    /venv/bin/python3 -m pip install --upgrade pip==${PIP_VERSION} && \
     python3.11 -m pip install --upgrade pip==${PIP_VERSION} && \
     python3.12 -m pip install --upgrade pip==${PIP_VERSION} && \
-    python3.13 -m pip install --upgrade pip==${PIP_VERSION}
+    python3.13 -m pip install --upgrade pip==${PIP_VERSION} && \
+    python3.14 -m pip install --upgrade pip==${PIP_VERSION} && \
+    python3.14t get-pip.py --no-cache-dir pip==${PIP_VERSION}
 
-ENV PIP_CACHE_DIR=/mount/caches/pip/linux/${PIP_VERSION}
+# Install newer ninja (apt ships 1.10.1 on 22.04 / 1.11.1 on 24.04; pin for consistency)
+RUN python3 -m pip install --no-cache-dir ninja==1.13.0
+

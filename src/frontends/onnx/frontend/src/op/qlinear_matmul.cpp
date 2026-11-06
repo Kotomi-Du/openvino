@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,20 +7,16 @@
 #include "utils/reshape.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
+namespace ov::frontend::onnx::ai_onnx {
 // Link with an existing translator
-namespace opset_13 {
-namespace detail {
+namespace opset_13::detail {
 extern ov::OutputVector dequantize_linear(const ov::Output<ov::Node>& x,
                                           const ov::Output<ov::Node>& scale,
                                           const std::shared_ptr<ov::Node>& zero_point,
                                           int64_t axis,
-                                          const Node& node);
-}  // namespace detail
-}  // namespace opset_13
+                                          const Node& node,
+                                          const ov::element::Type& precision = ov::element::dynamic);
+}  // namespace opset_13::detail
 namespace detail {
 extern ov::OutputVector matmul(const ov::Output<ov::Node>& a, const ov::Output<ov::Node>& b);
 extern std::shared_ptr<ov::Node> make_fake_quantize(const ov::Output<ov::Node>& y_scale,
@@ -41,20 +37,20 @@ ov::OutputVector qlinear_matmul(const ov::frontend::onnx::Node& node) {
     const auto& y_scale = inputs.at(6);
     const auto& y_zero_point = inputs.at(7);
 
-    const auto& dequnatize_a =
+    const auto& dequantize_a =
         ai_onnx::opset_13::detail::dequantize_linear(a,
                                                      a_scale,
                                                      std::make_shared<v0::Convert>(a_zero_point, ov::element::f32),
                                                      1,
                                                      node);
-    const auto& dequnatize_b =
+    const auto& dequantize_b =
         ai_onnx::opset_13::detail::dequantize_linear(b,
                                                      b_scale,
                                                      std::make_shared<v0::Convert>(b_zero_point, ov::element::f32),
                                                      1,
                                                      node);
 
-    const auto& result = ai_onnx::detail::matmul(dequnatize_a[0], dequnatize_b[0]);
+    const auto& result = ai_onnx::detail::matmul(dequantize_a[0], dequantize_b[0]);
 
     const auto& quantized_result = ai_onnx::detail::make_fake_quantize(y_scale, y_zero_point, result[0]);
 
@@ -62,7 +58,4 @@ ov::OutputVector qlinear_matmul(const ov::frontend::onnx::Node& node) {
 }
 ONNX_OP("QLinearMatMul", OPSET_SINCE(1), ai_onnx::opset_1::qlinear_matmul);
 }  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx

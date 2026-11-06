@@ -7,30 +7,43 @@ on:
         description: 'Machine on which the tests would run'
         type: string
         required: true
-      container:
-        description: 'JSON to be converted to the value of the "container" configuration for the job'
+      image:
+        description: 'Docker image to use for the job'
         type: string
         required: false
-        default: '{"image": null}'
+        default: null
       sccache-azure-key-prefix:
         description: 'Key prefix for the cache folder on the Azure'
         type: string
         required: true
+      cmake-build-parallel-level:
+        description: 'Number of threads for parallel build (hard-coded; nproc and NUMBER_OF_PROCESSORS do not respect container CPU limits)'
+        type: string
+        required: true
 
 permissions: read-all
+
+env:
+  HF_TOKEN_PATH_LIN: /secrets/huggingface/token-secondary
+  HF_TOKEN_PATH_WIN: "C:\\mount\\secrets\\huggingface\\token-secondary"
 
 jobs:
   ONNX_Runtime:
     name: ONNX Runtime Integration
     timeout-minutes: 60
     runs-on: ${{ inputs.runner }}
-    container: ${{ fromJSON(inputs.container) }}
+    container:
+      image: ${{ inputs.image }}
+      volumes:
+        - /mount:/mount
+        - /home/runner/secrets/:/secrets:ro
+        - ${{ github.workspace }}:${{ github.workspace }} # Needed as ${{ github.workspace }} is not working correctly when using Docker
+      options: "-e SCCACHE_AZURE_BLOB_CONTAINER"
     defaults:
       run:
         shell: bash
     env:
       DEBIAN_FRONTEND: noninteractive # to prevent apt-get from waiting user input
-      OPENVINO_REPO: ${{ github.workspace }}/openvino
       INSTALL_DIR: ${{ github.workspace }}/install
       CMAKE_GENERATOR: 'Ninja Multi-Config'
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
@@ -40,52 +53,60 @@ jobs:
       SCCACHE_AZURE_KEY_PREFIX: ${{ inputs.sccache-azure-key-prefix }}
       ONNX_RUNTIME_REPO: ${{ github.workspace }}/onnxruntime
       ONNX_RUNTIME_BUILD_DIR: ${{ github.workspace }}/onnxruntime/build
-      ONNX_RUNTIME_UTILS: ${{ github.workspace }}/openvino/src/frontends/onnx/tests/ci_utils/onnxruntime
+      ONNX_RUNTIME_UTILS: ${{ github.workspace }}/src/frontends/onnx/tests/ci_utils/onnxruntime
+      # Hard-coded at workflow call site; nproc and NUMBER_OF_PROCESSORS do not respect Kubernetes pod CPU limits.
+      # Nested cmake --build (e.g. intel_gpu onednn_gpu ExternalProject) does not inherit --parallel from the top-level build.
+      CMAKE_BUILD_PARALLEL_LEVEL: ${{ inputs.cmake-build-parallel-level }}
 
     steps:
-      - name: Download OpenVINO package
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: openvino_package
-          path: ${{ env.INSTALL_DIR }}
+      - name: Append the environment variable - load SCCACHE_AZURE_CONNECTION_STRING from file
+        shell: bash
+        run: |
+          SCCACHE_AZURE_CONNECTION_STRING="$(cat /secrets/sccache/connection-string)"
+          # OpenDAL 0.58.1 that is used by sccache 0.18.0 no longer trims BlobEndpoint trailing slashes, producing invalid Azure URLs.
+          SCCACHE_AZURE_CONNECTION_STRING="$(sed -E 's#(^|;)(BlobEndpoint=[^;]*[^/;])/+(;|$)#\1\2\3#g' <<< "$SCCACHE_AZURE_CONNECTION_STRING")"
+          # nosemgrep: yaml.github-actions.security.audit.unsafe-add-mask-workflow-command.unsafe-add-mask-workflow-command
+          echo "::add-mask::${SCCACHE_AZURE_CONNECTION_STRING}"
+          echo "SCCACHE_AZURE_CONNECTION_STRING=${SCCACHE_AZURE_CONNECTION_STRING}" >> $GITHUB_ENV
+          echo "✓ Connection string loaded and masked"
 
-      # Needed as ${{ github.workspace }} is not working correctly when using Docker
       - name: Setup Variables
         run: |
-          echo "INSTALL_DIR=$GITHUB_WORKSPACE/install" >> "$GITHUB_ENV"
-          echo "ONNX_RUNTIME_REPO=$GITHUB_WORKSPACE/onnxruntime" >> "$GITHUB_ENV"
-          echo "ONNX_RUNTIME_BUILD_DIR=$GITHUB_WORKSPACE/onnxruntime/build" >> "$GITHUB_ENV"
+          echo "HF_TOKEN_PATH=${{ runner.os == 'Linux' && env.HF_TOKEN_PATH_LIN || env.HF_TOKEN_PATH_WIN }}" >> "$GITHUB_ENV"
 
-      - name: Extract OpenVINO package
-        run: |
-          pushd ${INSTALL_DIR}
-            pigz -dc openvino_package.tar.gz | tar -xf - -C ${INSTALL_DIR}
-          popd
-          
       - name: Fetch ONNX runtime version and skip tests list
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: ababushk/checkout@dd591a6a2ac25618db4eda86e7e0d938f88cf01b # cherry_pick_retries
         timeout-minutes: 15
         with:
           sparse-checkout: |
             src/frontends/onnx/tests/ci_utils/onnxruntime
           sparse-checkout-cone-mode: false
-          path: ${{ env.OPENVINO_REPO }}
-          
+
       - name: Get ONNX runtime version
         run: |
           hash=`tr -s '\n ' < ./version`
           echo "ONNX_RUNTIME_VERSION=$hash" >> "$GITHUB_ENV"
         working-directory: ${{ env.ONNX_RUNTIME_UTILS }}
-        
+
       - name: Clone ONNX Runtime
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: ababushk/checkout@dd591a6a2ac25618db4eda86e7e0d938f88cf01b # cherry_pick_retries
         timeout-minutes: 15
         with:
           repository: 'microsoft/onnxruntime'
           path: ${{ env.ONNX_RUNTIME_REPO }}
           ref: ${{ env.ONNX_RUNTIME_VERSION }}
           submodules: 'recursive'
-          
+
+      - name: Download OpenVINO package
+        uses: akashchi/download-artifact@d59a9c15fec3fdb7c9adf09464124d00f9c11415 # main
+        with:
+          name: openvino_package
+          path: ${{ env.INSTALL_DIR }}
+
+      - name: Extract OpenVINO package
+        run: pigz -dc openvino_package.tar.gz | tar -xf - -v
+        working-directory: ${{ env.INSTALL_DIR }}
+
       #
       # Tests
       #
@@ -98,7 +119,7 @@ jobs:
             --config RelWithDebInfo \
             --use_openvino CPU \
             --build_shared_lib \
-            --parallel $(nproc) \
+            --parallel ${CMAKE_BUILD_PARALLEL_LEVEL} \
             --skip_tests \
             --compile_no_warning_as_error \
             --allow_running_as_root \

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@
 
 namespace cldnn {
 
-typedef std::map<primitive_id, std::shared_ptr<primitive>> topology_map;
+using topology_map = std::map<primitive_id, std::shared_ptr<primitive>>;
 
 struct topology {
 public:

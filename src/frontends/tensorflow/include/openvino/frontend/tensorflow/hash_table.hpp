@@ -1,14 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
-
 #include "openvino/frontend/hash_table.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
+namespace ov::frontend::tensorflow {
 
 // this class describes TensorFlow table produced by operations tf.raw_ops.HashTable, tf.raw_ops.HashTableV2,
 // tf.raw_ops.MutableHashTable and stores a dictionary of keys mapped to values
@@ -16,6 +13,4 @@ namespace tensorflow {
 // Types of keys and values can be different
 using ov::frontend::HashTable;
 
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,9 +10,7 @@
 #include "openvino/frontend/ir/visibility.hpp"
 #include "openvino/openvino.hpp"
 
-namespace ov {
-namespace frontend {
-namespace ir {
+namespace ov::frontend::ir {
 
 class IR_API FrontEnd : public ov::frontend::FrontEnd {
 public:
@@ -52,6 +50,4 @@ private:
     std::shared_ptr<TelemetryExtension> m_telemetry;
 };
 
-}  // namespace ir
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::ir

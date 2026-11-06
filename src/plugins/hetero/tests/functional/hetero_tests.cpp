@@ -1,10 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "hetero_tests.hpp"
 
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include "common_test_utils/file_utils.hpp"
@@ -15,6 +16,8 @@
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/serialize.hpp"
 #include "openvino/runtime/exec_model_info.hpp"
+#include "openvino/runtime/hsm_deferred_writer.hpp"
+#include "openvino/runtime/hsm_reader.hpp"
 #include "openvino/runtime/intel_gpu/properties.hpp"
 #include "openvino/runtime/internal_properties.hpp"
 #include "openvino/runtime/iplugin.hpp"
@@ -28,12 +31,6 @@
 #include "transformations/rt_info/fused_names_attribute.hpp"
 
 namespace {
-
-std::string get_mock_engine_path() {
-    std::string mock_engine_name("mock_engine");
-    return ov::util::make_plugin_library_name(ov::test::utils::getExecutableDirectory(),
-                                              mock_engine_name + OV_BUILD_POSTFIX);
-}
 
 template <class T>
 std::function<T> make_std_function(const std::shared_ptr<void> so, const std::string& functionName) {
@@ -471,7 +468,7 @@ public:
         return std::make_shared<MockCompiledModel>(model, shared_from_this(), properties);
     }
 
-    std::shared_ptr<ov::ICompiledModel> compile_model(const std::string& model_path,
+    std::shared_ptr<ov::ICompiledModel> compile_model(const std::filesystem::path& model_path,
                                                       const ov::AnyMap& properties) const override {
         OPENVINO_NOT_IMPLEMENTED;
     }
@@ -561,6 +558,17 @@ public:
         ov::Core core;
         auto ov_model = core.read_model(xmlString, weights);
         return compile_model(ov_model, properties, context);
+    }
+
+    std::shared_ptr<ov::ICompiledModel> import_model(const ov::Tensor& model,
+                                                     const ov::AnyMap& properties) const override {
+        OPENVINO_NOT_IMPLEMENTED;
+    }
+
+    std::shared_ptr<ov::ICompiledModel> import_model(const ov::Tensor& model,
+                                                     const ov::SoPtr<ov::IRemoteContext>& context,
+                                                     const ov::AnyMap& properties) const override {
+        OPENVINO_NOT_IMPLEMENTED;
     }
 
     ov::SupportedOpsMap query_model(const std::shared_ptr<const ov::Model>& model,
@@ -659,7 +667,7 @@ public:
         } else if (name == ov::internal::exclusive_async_requests) {
             return decltype(ov::internal::exclusive_async_requests)::value_type{exclusive_async_requests};
         } else if (name == ov::device::uuid) {
-            ov::device::UUID uuid;
+            ov::device::UUID uuid{};
             for (size_t i = 0; i < uuid.MAX_UUID_SIZE; i++) {
                 if (device_id == device_ids[0])
                     uuid.uuid[i] = static_cast<uint8_t>(i);
@@ -742,7 +750,7 @@ public:
             return decltype(ov::internal::supported_properties)::value_type(
                 {ov::PropertyName{ov::internal::caching_properties.name(), ov::PropertyMutability::RO}});
         } else if (name == ov::device::uuid) {
-            ov::device::UUID uuid;
+            ov::device::UUID uuid{};
             for (size_t i = 0; i < uuid.MAX_UUID_SIZE; i++) {
                 if (device_id == device_ids[0])
                     uuid.uuid[i] = static_cast<uint8_t>(i * 2);
@@ -768,6 +776,91 @@ public:
         }
         OPENVINO_THROW("Unsupported property: ", name);
     }
+};
+
+class MockPluginNoExportImport : public MockPluginBase {
+public:
+    MockPluginNoExportImport(const std::string& name)
+        : MockPluginBase(name, {"Parameter", "Result", "Add", "Constant", "Reshape"}, true) {}
+
+    const ov::Version& get_const_version() override {
+        static const ov::Version version = {CI_BUILD_NUMBER, "openvino_mock_no_export_import_plugin"};
+        return version;
+    }
+
+    void set_property(const ov::AnyMap& properties) override {
+        for (const auto& it : properties) {
+            if (it.first == ov::num_streams.name())
+                num_streams = it.second.as<int32_t>();
+            else if (it.first == ov::enable_profiling.name())
+                m_profiling = it.second.as<bool>();
+            else if (it.first == ov::internal::exclusive_async_requests.name())
+                exclusive_async_requests = it.second.as<bool>();
+            else if (it.first == ov::device::id.name())
+                continue;
+            else
+                OPENVINO_THROW(get_device_name(), " set config: " + it.first);
+        }
+    }
+
+    ov::Any get_property(const std::string& name, const ov::AnyMap& arguments) const override {
+        const static std::vector<std::string> device_ids = {"0"};
+        const static std::vector<ov::PropertyName> roProperties{
+            RO_property(ov::supported_properties.name()),
+            RO_property(ov::available_devices.name()),
+            RO_property(ov::loaded_from_cache.name()),
+            RO_property(ov::device::capabilities.name()),
+            RO_property(ov::device::uuid.name()),
+        };
+        const static std::vector<ov::PropertyName> rwProperties{
+            RW_property(ov::num_streams.name()),
+            RW_property(ov::enable_profiling.name()),
+        };
+
+        std::string device_id;
+        if (arguments.find(ov::device::id.name()) != arguments.end()) {
+            device_id = arguments.find(ov::device::id.name())->second.as<std::string>();
+        }
+        if (name == ov::supported_properties) {
+            std::vector<ov::PropertyName> supportedProperties;
+            supportedProperties.reserve(roProperties.size() + rwProperties.size());
+            supportedProperties.insert(supportedProperties.end(), roProperties.begin(), roProperties.end());
+            supportedProperties.insert(supportedProperties.end(), rwProperties.begin(), rwProperties.end());
+
+            return decltype(ov::supported_properties)::value_type(supportedProperties);
+        } else if (name == ov::internal::supported_properties) {
+            return decltype(ov::internal::supported_properties)::value_type(
+                {ov::PropertyName{ov::internal::caching_properties.name(), ov::PropertyMutability::RO},
+                 ov::PropertyName{ov::internal::exclusive_async_requests.name(), ov::PropertyMutability::RW}});
+        } else if (name == ov::internal::exclusive_async_requests) {
+            return decltype(ov::internal::exclusive_async_requests)::value_type{exclusive_async_requests};
+        } else if (name == ov::device::uuid) {
+            ov::device::UUID uuid{};
+            for (size_t i = 0; i < uuid.MAX_UUID_SIZE; i++) {
+                if (device_id == device_ids[0])
+                    uuid.uuid[i] = static_cast<uint8_t>(i * 7);
+            }
+            return decltype(ov::device::uuid)::value_type{uuid};
+        } else if (name == ov::available_devices) {
+            return decltype(ov::available_devices)::value_type(device_ids);
+        } else if (name == ov::device::capabilities) {
+            return decltype(ov::device::capabilities)::value_type{};
+        } else if (ov::internal::caching_properties == name) {
+            std::vector<ov::PropertyName> caching_properties = {ov::device::uuid};
+            return decltype(ov::internal::caching_properties)::value_type(caching_properties);
+        } else if (name == ov::loaded_from_cache.name()) {
+            return m_loaded_from_cache;
+        } else if (name == ov::enable_profiling.name()) {
+            return decltype(ov::enable_profiling)::value_type{m_profiling};
+        } else if (name == ov::streams::num.name()) {
+            return decltype(ov::streams::num)::value_type{num_streams};
+        }
+        OPENVINO_THROW("Unsupported property: ", name);
+    }
+
+private:
+    int32_t num_streams{0};
+    bool exclusive_async_requests = false;
 };
 
 class MockPluginGPU : public MockPluginBase {
@@ -829,7 +922,7 @@ public:
         } else if (name == ov::internal::exclusive_async_requests) {
             return decltype(ov::internal::exclusive_async_requests)::value_type{exclusive_async_requests};
         } else if (name == ov::device::uuid) {
-            ov::device::UUID uuid;
+            ov::device::UUID uuid{};
             for (size_t i = 0; i < uuid.MAX_UUID_SIZE; i++) {
                 if (device_id == device_ids[0])
                     uuid.uuid[i] = static_cast<uint8_t>(i);
@@ -881,10 +974,171 @@ private:
     bool exclusive_async_requests = false;
 };
 
+ov::hetero::tests::MockHsmImport& ov::hetero::tests::mock_hsm_import() {
+    static MockHsmImport record;
+    return record;
+}
+
+namespace {
+
+constexpr ov::runtime::hsm::DeviceId mock_hsm_device = 250;
+constexpr auto mock_hsm_weights_tag = ov::runtime::hsm::SectionTag::make_device_tag(1, false);
+constexpr auto mock_hsm_xml_tag = ov::runtime::hsm::SectionTag::make_device_tag(2, false);
+const std::string mock_hsm_requirements = "mock_hsm=1";
+
+// Exports the model as its own HSM container: requirements, page-aligned weights, XML.
+class MockHsmCompiledModel final : public MockCompiledModel {
+public:
+    using MockCompiledModel::MockCompiledModel;
+
+    void export_model(std::ostream& stream) const override {
+        if (ov::hetero::tests::mock_hsm_import().export_not_implemented) {
+            OPENVINO_THROW_NOT_IMPLEMENTED("[MOCKHSM] export_model is not implemented");
+        }
+        std::ostringstream xml;
+        std::ostringstream weights;
+        ov::pass::Serialize(xml, weights).run_on_model(std::const_pointer_cast<ov::Model>(get_model()));
+        const auto xml_text = xml.str();
+        const auto weights_bytes = weights.str();
+
+        auto writer = ov::runtime::hsm::DeferredWriter::open(stream);
+        OPENVINO_ASSERT(writer, "[MOCKHSM] the output stream must be seekable");
+        const auto as_view = [](const std::string& data) {
+            return ov::util::MemoryView{reinterpret_cast<const std::byte*>(data.data()), data.size()};
+        };
+        OPENVINO_ASSERT(writer->add_section(ov::runtime::hsm::any_device_id,
+                                            {ov::runtime::hsm::runtime_requirements_tag, {}},
+                                            as_view(mock_hsm_requirements)));
+        OPENVINO_ASSERT(
+            writer->add_section(mock_hsm_device, {mock_hsm_weights_tag, {}}, as_view(weights_bytes), {4096}));
+        OPENVINO_ASSERT(writer->add_section(mock_hsm_device, {mock_hsm_xml_tag, {}}, as_view(xml_text)));
+        OPENVINO_ASSERT(!writer->finalize(), "[MOCKHSM] export failed");
+    }
+};
+
+class MockPluginHsm : public MockPluginBase {
+public:
+    explicit MockPluginHsm(const std::string& name)
+        : MockPluginBase(name, {"Parameter", "Result", "Add", "Constant"}) {}
+
+    const ov::Version& get_const_version() override {
+        static const ov::Version version = {CI_BUILD_NUMBER, "openvino_mock_hsm_plugin"};
+        return version;
+    }
+
+    void set_property(const ov::AnyMap& properties) override {
+        for (const auto& it : properties) {
+            if (it.first == ov::enable_profiling.name())
+                m_profiling = it.second.as<bool>();
+            else if (it.first == ov::internal::exclusive_async_requests.name() || it.first == ov::device::id.name())
+                continue;
+            else
+                OPENVINO_THROW(get_device_name(), " set config: " + it.first);
+        }
+    }
+
+    ov::Any get_property(const std::string& name, const ov::AnyMap& arguments) const override {
+        const static std::vector<ov::PropertyName> properties{
+            RO_property(ov::supported_properties.name()),
+            RO_property(ov::available_devices.name()),
+            RO_property(ov::loaded_from_cache.name()),
+            RO_property(ov::device::capabilities.name()),
+            RO_property(ov::device::uuid.name()),
+            RW_property(ov::enable_profiling.name()),
+        };
+        if (name == ov::supported_properties) {
+            return decltype(ov::supported_properties)::value_type(properties);
+        } else if (name == ov::internal::supported_properties) {
+            return decltype(ov::internal::supported_properties)::value_type(
+                {ov::PropertyName{ov::internal::caching_properties.name(), ov::PropertyMutability::RO},
+                 ov::PropertyName{ov::internal::caching_with_mmap.name(), ov::PropertyMutability::RO},
+                 ov::PropertyName{ov::internal::exclusive_async_requests.name(), ov::PropertyMutability::RW}});
+        } else if (name == ov::internal::exclusive_async_requests) {
+            return decltype(ov::internal::exclusive_async_requests)::value_type{false};
+        } else if (name == ov::device::uuid) {
+            ov::device::UUID uuid{};
+            for (size_t i = 0; i < uuid.MAX_UUID_SIZE; i++)
+                uuid.uuid[i] = static_cast<uint8_t>(i * 11);
+            return decltype(ov::device::uuid)::value_type{uuid};
+        } else if (name == ov::available_devices) {
+            return decltype(ov::available_devices)::value_type(std::vector<std::string>{"0"});
+        } else if (name == ov::device::capabilities) {
+            return decltype(ov::device::capabilities)::value_type({ov::device::capability::EXPORT_IMPORT});
+        } else if (ov::internal::caching_properties == name) {
+            return decltype(ov::internal::caching_properties)::value_type({ov::PropertyName(ov::device::uuid)});
+        } else if (name == ov::loaded_from_cache.name()) {
+            return m_loaded_from_cache;
+        } else if (name == ov::enable_profiling.name()) {
+            return decltype(ov::enable_profiling)::value_type{m_profiling};
+        }
+        OPENVINO_THROW("Unsupported property: ", name);
+    }
+
+    std::shared_ptr<ov::ICompiledModel> compile_model(const std::shared_ptr<const ov::Model>& model,
+                                                      const ov::AnyMap& properties) const override {
+        OPENVINO_ASSERT(model);
+        if (!support_model(model, query_model(model, properties)))
+            OPENVINO_THROW("Unsupported model");
+        return std::make_shared<MockHsmCompiledModel>(model, shared_from_this(), properties);
+    }
+
+    std::shared_ptr<ov::ICompiledModel> import_model(const ov::Tensor& model,
+                                                     const ov::AnyMap& properties) const override {
+        ++ov::hetero::tests::mock_hsm_import().tensor_imports;
+        auto reader =
+            ov::runtime::hsm::Reader::open(static_cast<const std::byte*>(model.data()), model.get_byte_size());
+        OPENVINO_ASSERT(reader, "[MOCKHSM] invalid container");
+        return import_sections(*reader, properties, ov::hetero::tests::MockHsmImport::Source::tensor);
+    }
+
+    std::shared_ptr<ov::ICompiledModel> import_model(std::istream& model, const ov::AnyMap& properties) const override {
+        ++ov::hetero::tests::mock_hsm_import().stream_imports;
+        auto reader = ov::runtime::hsm::Reader::open(model);
+        OPENVINO_ASSERT(reader, "[MOCKHSM] invalid container");
+        return import_sections(*reader, properties, ov::hetero::tests::MockHsmImport::Source::stream);
+    }
+
+private:
+    std::shared_ptr<ov::ICompiledModel> import_sections(const ov::runtime::hsm::Reader& reader,
+                                                        const ov::AnyMap& properties,
+                                                        ov::hetero::tests::MockHsmImport::Source source) const {
+        const auto read_text = [](const ov::runtime::hsm::Section& section) {
+            std::string text(section.size(), '\0');
+            OPENVINO_ASSERT(section.read(text.data()), "[MOCKHSM] cannot read a section");
+            return text;
+        };
+        const auto requirements =
+            reader.section(ov::runtime::hsm::any_device_id, ov::runtime::hsm::runtime_requirements_tag.id());
+        OPENVINO_ASSERT(requirements && read_text(*requirements) == mock_hsm_requirements,
+                        "[MOCKHSM] incompatible container");
+
+        const auto xml = reader.section(mock_hsm_device, mock_hsm_xml_tag.id());
+        const auto weights = reader.section(mock_hsm_device, mock_hsm_weights_tag.id());
+        OPENVINO_ASSERT(xml && weights, "[MOCKHSM] missing sections");
+
+        ov::Tensor weights_tensor(ov::element::u8, ov::Shape{weights->size()});
+        OPENVINO_ASSERT(weights->read(weights_tensor.data()), "[MOCKHSM] cannot read the weights");
+
+        auto& record = ov::hetero::tests::mock_hsm_import();
+        record.source = source;
+        for (const auto& entry : reader.entries()) {
+            if (entry.device == mock_hsm_device && entry.tag.id() == mock_hsm_weights_tag.id()) {
+                record.weights_offset = entry.offset;
+            }
+        }
+
+        ov::Core core;
+        return compile_model(core.read_model(read_text(*xml), weights_tensor), properties);
+    }
+};
+
+}  // namespace
+
 void ov::hetero::tests::HeteroTests::reg_plugin(std::shared_ptr<ov::IPlugin>& plugin) {
-    std::string library_path = get_mock_engine_path();
-    if (!m_so)
-        m_so = ov::util::load_shared_object(library_path.c_str());
+    const auto library_path = ov::test::utils::get_mock_engine_path();
+    if (!m_so) {
+        m_so = ov::util::load_shared_object(library_path);
+    }
     if (auto mock_plugin = std::dynamic_pointer_cast<MockPluginBase>(plugin))
         mock_plugin->set_version(mock_plugin->get_const_version());
     std::function<void(ov::IPlugin*)> injectProxyEngine = make_std_function<void(ov::IPlugin*)>(m_so, "InjectPlugin");
@@ -905,5 +1159,25 @@ void ov::hetero::tests::HeteroTests::SetUp() {
         reg_plugin_type<MockPluginReshape>("MOCK0");
         reg_plugin_type<MockPluginSubtract>("MOCK1");
         reg_plugin_type<MockPluginGPU>("MOCKGPU");
+        // The mock engine gives out the injected plugins in the order the devices are loaded: by name.
+        reg_plugin_type<MockPluginHsm>("MOCKHSM");
+        reg_plugin_type<MockPluginNoExportImport>("MOCKIR");
     }
+}
+
+void ov::hetero::tests::HeteroTests::TearDown() {
+    for (const auto& plugin : m_mock_plugins) {
+        try {
+            core.unload_plugin(plugin->get_device_name());
+        } catch (...) {
+        }
+    }
+    m_mock_plugins = {};
+    clearMockPlugin();
+    m_so.reset();
+}
+
+void ov::hetero::tests::HeteroTests::clearMockPlugin() {
+    ASSERT_TRUE(m_so);
+    ov::test::utils::make_std_function<void()>(m_so, "ClearTargets")();
 }

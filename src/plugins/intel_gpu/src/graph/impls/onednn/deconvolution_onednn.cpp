@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,13 +26,13 @@ static std::shared_ptr<dnnl::deconvolution_forward::primitive_desc> get_deconvol
     auto output_layout = impl_params.get_output_layout();
 
     dnnl::memory::dims stride(prim->stride.begin(), prim->stride.end());
-    dnnl::memory::dims dilation(stride.size(), 1);
+    auto dilations_ov = prim->dilations;
+    dilations_ov.resize(stride.size(), 1);
+    dnnl::memory::dims dilation(dilations_ov.begin(), dilations_ov.end());
     dnnl::memory::dims pad_l(prim->pad.begin(), prim->pad.end());
     dnnl::memory::dims pad_r(prim->pad.begin(), prim->pad.end());
 
-    auto input_md = onednn::layout_to_memory_desc(input_layout, tag_in_out);
-    auto weights_md = onednn::layout_to_memory_desc(weights_layout, dnnl::memory::format_tag::any);
-    auto output_md = onednn::layout_to_memory_desc(output_layout, tag_in_out);
+    auto [input_md, weights_md, output_md] = onednn::get_conv_memory_descs(input_layout, weights_layout, output_layout, tag_in_out);
     auto grouped_weights = format::is_grouped(weights_layout.format) || prim->grouped_weights_shape;
 
     for (size_t i = 0; i < dilation.size(); i++) {
@@ -55,7 +55,7 @@ static std::shared_ptr<dnnl::deconvolution_forward::primitive_desc> get_deconvol
     }
 
     if (prim->bias.is_valid()) {
-        auto bias_md = onednn::layout_to_memory_desc(impl_params.get_input_layout(2), dnnl::memory::format_tag::any, true);
+        auto bias_md = onednn::layout_to_memory_desc_flatten(impl_params.get_input_layout(2), dnnl::memory::format_tag::any);
         return std::make_shared<dnnl::deconvolution_forward::primitive_desc>(
             engine.get_onednn_engine(),
             dnnl::prop_kind::forward_inference,
@@ -69,20 +69,18 @@ static std::shared_ptr<dnnl::deconvolution_forward::primitive_desc> get_deconvol
             pad_l,
             pad_r,
             attr);
-    } else {
-        return std::make_shared<dnnl::deconvolution_forward::primitive_desc>(
-            engine.get_onednn_engine(),
-            dnnl::prop_kind::forward_inference,
-            dnnl::algorithm::deconvolution_direct,
-            input_md,
-            weights_md,
-            output_md,
-            stride,
-            dilation,
-            pad_l,
-            pad_r,
-            attr);
     }
+    return std::make_shared<dnnl::deconvolution_forward::primitive_desc>(engine.get_onednn_engine(),
+                                                                         dnnl::prop_kind::forward_inference,
+                                                                         dnnl::algorithm::deconvolution_direct,
+                                                                         input_md,
+                                                                         weights_md,
+                                                                         output_md,
+                                                                         stride,
+                                                                         dilation,
+                                                                         pad_l,
+                                                                         pad_r,
+                                                                         attr);
 }
 
 struct deconvolution_onednn : typed_primitive_onednn_impl<deconvolution> {
@@ -156,9 +154,7 @@ public:
         ob << typed_pd->get_padding_r();
         ob << typed_pd->bias_desc().is_zero();
 
-        std::vector<uint8_t> prim_cache;
-        prim_cache = _prim.get_cache_blob();
-        ob << prim_cache;
+        ob << get_cache_blob();
 #endif
     }
 
@@ -168,9 +164,10 @@ public:
 
         const kernel_impl_params* impl_params = reinterpret_cast<kernel_impl_params*>(ib.getKernelImplParams());
 
-        auto input_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(0), dnnl::memory::format_tag::undef);
-        auto weights_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(1), dnnl::memory::format_tag::any);
-        auto output_md = onednn::layout_to_memory_desc(impl_params->get_output_layout(), dnnl::memory::format_tag::undef);
+        auto [input_md, weights_md, output_md] = onednn::get_conv_memory_descs(impl_params->get_input_layout(0),
+                                                                            impl_params->get_input_layout(1),
+                                                                            impl_params->get_output_layout(),
+                                                                            dnnl::memory::format_tag::undef);
 
         dnnl::memory::dims strides;
         dnnl::memory::dims dilates;
@@ -193,7 +190,7 @@ public:
                                     *_attrs.get());
             _pd = *prim_desc;
         } else {
-            auto bias_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(2), dnnl::memory::format_tag::any, true);
+            auto bias_md = onednn::layout_to_memory_desc_flatten(impl_params->get_input_layout(2), dnnl::memory::format_tag::any);
             auto prim_desc = std::make_shared<dnnl::deconvolution_forward::primitive_desc>(
                                     ib.get_engine().get_onednn_engine(),
                                     dnnl::prop_kind::forward_inference, dnnl::algorithm::deconvolution_direct,
@@ -208,13 +205,13 @@ public:
 
         _scratchpad_md = _pd.scratchpad_desc();
 
-        _prim = dnnl::primitive(_pd, prim_cache);
+        _prim = make_primitive_from_blob(prim_cache);
 #endif
     }
 
     static std::unique_ptr<primitive_impl> create(const deconvolution_node& arg, const kernel_impl_params& impl_params) {
         auto& engine = impl_params.prog->get_engine();
-        auto& config = impl_params.prog->get_config();
+        const auto& config = impl_params.prog->get_config();
         auto attr = impl_params.attrs_onednn;
         auto prim_desc = get_deconvolution_primitive_descriptor(impl_params, *attr);
 
@@ -236,8 +233,9 @@ in_out_fmts_t DeconvolutionImplementationManager::query_formats(const program_no
     auto prim_desc = onednn::get_deconvolution_primitive_descriptor(*node.get_kernel_impl_params(), dnnl::primitive_attr(), dnnl::memory::format_tag::any);
 
     for (size_t idx = 0 ; idx < node.get_dependencies().size() ; idx++) {
-        if (node.get_dependency(idx).is_constant())
+        if (node.get_dependency(idx).is_constant()) {
             continue;
+        }
 
         // Conv or deconv gets a preferred format for its data input based on source memory description
         // But an input format for fused post-ops should be same with an output format of conv/deconv
@@ -255,8 +253,9 @@ in_out_fmts_t DeconvolutionImplementationManager::query_formats(const program_no
         }
 
         // WA: Avoid b_fs_yx_fsv2 because Onednn tag aBcd2b is not declared.
-        if (src_fmt == format::b_fs_yx_fsv2)
+        if (src_fmt == format::b_fs_yx_fsv2) {
             src_fmt = format::byxf;
+        }
 
         in_fmts[idx] = src_fmt;
     }
@@ -264,8 +263,9 @@ in_out_fmts_t DeconvolutionImplementationManager::query_formats(const program_no
     out_fmts[0] = onednn::find_data_format(prim_desc->dst_desc());
 
     // WA: Avoid b_fs_yx_fsv2 because Onednn tag aBcd2b is not declared.
-    if (out_fmts[0] == format::b_fs_yx_fsv2)
+    if (out_fmts[0] == format::b_fs_yx_fsv2) {
         out_fmts[0] = format::byxf;
+    }
 
     return {in_fmts, out_fmts};
 }

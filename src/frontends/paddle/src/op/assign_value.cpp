@@ -1,13 +1,10 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/opsets/opset6.hpp"
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 NamedOutputs assign_value(const NodeContext& node) {
     std::vector<int32_t> shape = node.get_attribute<std::vector<int32_t>>("shape");
     auto dtype = node.get_attribute<ov::element::Type>("dtype");
@@ -48,8 +45,13 @@ NamedOutputs assign_value(const NodeContext& node) {
         break;
     }
     case element::boolean: {
-        auto values = node.get_attribute<std::vector<int32_t>>("bool_values");
-        const_node = {opset6::Constant::create(dtype, Shape{shape.begin(), shape.end()}, values)};
+        if (node.has_attribute("bool_values")) {
+            auto values = node.get_attribute<std::vector<int32_t>>("bool_values");
+            const_node = {opset6::Constant::create(dtype, Shape{shape.begin(), shape.end()}, values)};
+        } else {
+            auto values = node.get_attribute<std::vector<bool>>("values");
+            const_node = {opset6::Constant::create(dtype, Shape{shape.begin(), shape.end()}, values)};
+        }
         break;
     }
     case element::i64: {
@@ -70,7 +72,4 @@ NamedOutputs assign_value(const NodeContext& node) {
     return node.default_single_output_mapping({const_node}, {"Out"});
 }
 
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

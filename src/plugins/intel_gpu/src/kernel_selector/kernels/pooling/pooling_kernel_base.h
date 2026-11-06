@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -49,7 +49,7 @@ struct pooling_params : public base_params {
 class PoolingKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~PoolingKernelBase() {}
+    ~PoolingKernelBase() override = default;
 
     struct DispatchData : public CommonDispatchData {
         bool needsBoundary;

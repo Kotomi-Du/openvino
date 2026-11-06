@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class Convolution_kernel_imad_bs_fs_yx_bsv16_fsv16_1x1 : public ConvolutionKerne
 public:
     using Parent = ConvolutionKernelBase;
     Convolution_kernel_imad_bs_fs_yx_bsv16_fsv16_1x1() : ConvolutionKernelBase("convolution_gpu_imad_bs_fs_yx_bsv16_fsv16_1x1") {}
-    virtual ~Convolution_kernel_imad_bs_fs_yx_bsv16_fsv16_1x1() {}
+    ~Convolution_kernel_imad_bs_fs_yx_bsv16_fsv16_1x1() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

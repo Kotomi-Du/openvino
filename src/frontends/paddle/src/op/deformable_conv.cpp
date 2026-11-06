@@ -1,14 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "conv2d_utils.hpp"
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/opsets/opset8.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 NamedOutputs deformable_conv(const NodeContext& node) {
     auto input = node.get_input("Input");
     auto filter = node.get_input("Filter");
@@ -60,7 +57,4 @@ NamedOutputs deformable_conv(const NodeContext& node) {
     return node.default_single_output_mapping({output_node}, {"Output"});
 }
 
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

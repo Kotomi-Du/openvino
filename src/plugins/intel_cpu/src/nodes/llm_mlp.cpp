@@ -1,44 +1,49 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "llm_mlp.h"
 
-#include <oneapi/dnnl/dnnl_types.h>
-
-#include <algorithm>
-#include <atomic>
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <string>
-#include <type_traits>
-#include <utility>
 #include <vector>
 
-#include "cpu/x64/cpu_isa_traits.hpp"
-#include "cpu_memory.h"
 #include "dnnl_scratch_pad.h"
 #include "graph_context.h"
-#include "memory_desc/blocked_memory_desc.h"
-#include "memory_desc/cpu_blocked_memory_desc.h"
 #include "memory_desc/cpu_memory_desc.h"
 #include "node.h"
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node.hpp"
-#include "openvino/core/parallel.hpp"
-#include "openvino/core/shape.hpp"
 #include "openvino/core/type.hpp"
-#include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/element_type.hpp"
-#include "openvino/core/type/float16.hpp"
+#include "openvino/runtime/system_conf.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "transformations/cpu_opset/x64/op/llm_mlp.hpp"
 #include "utils/debug_capabilities.h"
-#include "utils/plain_tensor.hpp"
+#include "utils/general_utils.h"
+
+#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
+#    include <oneapi/dnnl/dnnl_types.h>
+
+#    include <algorithm>
+#    include <atomic>
+#    include <cstddef>
+#    include <type_traits>
+#    include <utility>
+
+#    include "cpu_memory.h"
+#    include "memory_desc/blocked_memory_desc.h"
+#    include "memory_desc/cpu_blocked_memory_desc.h"
+#    include "openvino/core/parallel.hpp"
+#    include "openvino/core/shape.hpp"
+#    include "openvino/core/type/bfloat16.hpp"
+#    include "openvino/core/type/float16.hpp"
+#    include "utils/plain_tensor.hpp"
+#endif
 
 #if defined(OPENVINO_ARCH_X86_64)
 #    include "kernels/x64/mlp_kernel.hpp"
@@ -112,7 +117,7 @@ public:
                     work.k0 = start_blkK * reg_blk_K_size;
                     work.k1 = (start_blkK + blk_K) * reg_blk_K_size;
                     work.quant_i8 = is_quantized;
-                    work.is_f16 = std::is_same<T, ov::float16>::value;
+                    work.is_f16 = std::is_same_v<T, ov::float16>;
 
                     start_blkK += blk_K;
                     used_nthr++;
@@ -147,7 +152,7 @@ public:
              const LLMMLPNode::Config& config,
              MatrixDynQuantPerRow& src_dq,
              float* w_scale) {
-        static ReduceAdd2bh jit_reduce2cvt(true, std::is_same<T, ov::float16>::value);
+        static ReduceAdd2bh jit_reduce2cvt(true, std::is_same_v<T, ov::float16>);
 
         ov::parallel_nt_static(m_threads_num, [&](const size_t ithr, [[maybe_unused]] const size_t nthr) {
             auto& work = works[ithr];
@@ -202,15 +207,15 @@ public:
 
     WeightBuffer wbuffer;
 
-    GateUpCombine* jit_gateup;
+    GateUpCombine* jit_gateup = nullptr;
 
     // weight [N, K]
     // Gate & Up are interleaved in N dimension: 16-gate / 16-up
     // and post-ops will compute  silu(gate)*up in unit of 16 elements
     // and store out as bfloat16.
     void setup(void* p_weight_gate, void* p_weight_up, int stride, int N, int K, const LLMMLPNode::Config& config) {
-        static GateUpCombine jit_gateup_silu(dnnl_eltwise_swish, std::is_same<T, ov::float16>::value);
-        static GateUpCombine jit_gateup_gelu(dnnl_eltwise_gelu_tanh, std::is_same<T, ov::float16>::value);
+        static GateUpCombine jit_gateup_silu(dnnl_eltwise_swish, std::is_same_v<T, ov::float16>);
+        static GateUpCombine jit_gateup_gelu(dnnl_eltwise_gelu_tanh, std::is_same_v<T, ov::float16>);
 
         if (config.act == LLMMLPNode::ACT_FN::GELU) {
             jit_gateup = &jit_gateup_gelu;
@@ -258,7 +263,7 @@ public:
                 work.k0 = 0;
                 work.k1 = K;
                 work.quant_i8 = quantized_int8;
-                work.is_f16 = std::is_same<T, ov::float16>::value;
+                work.is_f16 = std::is_same_v<T, ov::float16>;
                 used_nthr++;
             }
 
@@ -365,7 +370,7 @@ struct LLMMLP::Executor : public LLMMLP::ExecutorBase {
         : m_pnode(pnode),
           m_config(config),
           m_scrachPad(std::move(scrachPad)),
-          m_rt_prec_f16(std::is_same<T, ov::float16>::value) {
+          m_rt_prec_f16(std::is_same_v<T, ov::float16>) {
         PlainTensor w_gate(pnode->getSrcMemoryAtPort(1));
         PlainTensor w_up(pnode->getSrcMemoryAtPort(2));
         PlainTensor w_down(pnode->getSrcMemoryAtPort(3));
@@ -374,9 +379,15 @@ struct LLMMLP::Executor : public LLMMLP::ExecutorBase {
         auto K = w_gate.size(1);
         auto N = w_gate.size(0);
         OPENVINO_ASSERT(w_gate.stride_bytes(0) == w_up.stride_bytes(0));
-        if (m_config.gate_up_combined) {
+        if (m_config.gate_up_type != LLMMLPNode::GATE_UP_TYPE::SEPARATE) {
             N = w_gate.size(0) / 2;
-            gate_up.setup(w_gate.ptr_v(), w_up.ptr_v(N, 0), w_up.stride_bytes(0), N * 2, K, config);
+            if (m_config.gate_up_type == LLMMLPNode::GATE_UP_TYPE::COMBINED_UP_GATE) {
+                // COMBINED_UP_GATE: VariadicSplit output[0] connects to up, output[1] connects to gate
+                gate_up.setup(w_gate.ptr_v(N, 0), w_gate.ptr_v(), w_gate.stride_bytes(0), N * 2, K, config);
+            } else {
+                // COMBINED_GATE_UP: VariadicSplit output[0] connects to gate, output[1] connects to up
+                gate_up.setup(w_gate.ptr_v(), w_gate.ptr_v(N, 0), w_gate.stride_bytes(0), N * 2, K, config);
+            }
         } else {
             gate_up.setup(w_gate.ptr_v(), w_up.ptr_v(), w_up.stride_bytes(0), N * 2, K, config);
         }
@@ -387,13 +398,21 @@ struct LLMMLP::Executor : public LLMMLP::ExecutorBase {
             auto* w_scale_gate = pnode->getSrcMemoryAtPort(4)->getDataAs<float>();
             auto* w_scale_up = pnode->getSrcMemoryAtPort(5)->getDataAs<float>();
             auto* dst = m_w_scale_gateup.ptr<float>();
-            if (m_config.gate_up_combined) {
+            if (m_config.gate_up_type != LLMMLPNode::GATE_UP_TYPE::SEPARATE) {
                 w_scale_up = w_scale_gate + N;
             }
+
+            // When gate_up_type is COMBINED_UP_GATE, we need to swap the scales
+            // to match the swapped weight layout
+            auto* scale_first = w_scale_gate;
+            auto* scale_second = w_scale_up;
+            if (m_config.gate_up_type == LLMMLPNode::GATE_UP_TYPE::COMBINED_UP_GATE) {
+                std::swap(scale_first, scale_second);
+            }
             for (size_t i = 0; i < N; i += 16) {
-                memcpy(dst, w_scale_gate + i, 16 * sizeof(float));
+                memcpy(dst, scale_first + i, 16 * sizeof(float));
                 dst += 16;
-                memcpy(dst, w_scale_up + i, 16 * sizeof(float));
+                memcpy(dst, scale_second + i, 16 * sizeof(float));
                 dst += 16;
             }
         }
@@ -516,8 +535,13 @@ private:
 #else
 template <typename T>
 struct LLMMLP::Executor : public LLMMLP::ExecutorBase {
-    Executor(LLMMLP*, const LLMMLPNode::Config&, const DnnlScratchPadPtr&) {}
-    void execute() {}
+    Executor(LLMMLP* node, const LLMMLPNode::Config& config, const DnnlScratchPadPtr& scratchPad) {
+        (void)node;
+        (void)config;
+        (void)scratchPad;
+    }
+
+    void execute() override {}
 };
 #endif
 
@@ -544,16 +568,14 @@ void LLMMLP::initSupportedPrimitiveDescriptors() {
 
     if (rtPrecision == ov::element::f32) {
         // fallback to supported precision if possible
-        if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_amx_fp16)) {
+        if (ov::with_cpu_x86_avx512_core_amx_fp16()) {
             rtPrecision = ov::element::f16;
-        } else if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_amx)) {
+        } else if (ov::with_cpu_x86_avx512_core_amx()) {
             rtPrecision = ov::element::bf16;
         }
     }
 
-    OPENVINO_ASSERT(rtPrecision == ov::element::bf16 || rtPrecision == ov::element::f16,
-                    "Unexpected rtPrecision:",
-                    rtPrecision);
+    OPENVINO_ASSERT(any_of(rtPrecision, ov::element::bf16, ov::element::f16), "Unexpected rtPrecision:", rtPrecision);
 
     if (m_mlp_config.gate_up_quantized) {
         auto weightPrecision = ov::element::i8;
@@ -612,7 +634,7 @@ void LLMMLP::createPrimitive() {
     }
 #endif
     if (!m_executor) {
-        THROW_CPU_NODE_ERR("Executor creation fails with precision " + rtPrecision.to_string());
+        CPU_NODE_THROW("Executor creation fails with precision " + rtPrecision.to_string());
     }
 }
 
@@ -620,9 +642,9 @@ void LLMMLP::execute([[maybe_unused]] const dnnl::stream& strm) {
     m_executor->execute();
 }
 
-bool LLMMLP::isSupportedOperation(const std::shared_ptr<const ov::Node>& op,
-                                  std::string& errorMessage,
-                                  uint64_t fcDynamicQuantizationGroupSize) noexcept {
+bool LLMMLP::isSupportedOperation([[maybe_unused]] const std::shared_ptr<const ov::Node>& op,
+                                  [[maybe_unused]] std::string& errorMessage,
+                                  [[maybe_unused]] uint64_t fcDynamicQuantizationGroupSize) noexcept {
 #if defined(OPENVINO_ARCH_X86_64)
     try {
         const auto node_mlp = ov::as_type_ptr<const LLMMLPNode>(op);

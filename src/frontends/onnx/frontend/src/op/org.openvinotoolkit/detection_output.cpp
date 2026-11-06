@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,11 +9,7 @@
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace org_openvinotoolkit {
-namespace opset_1 {
+namespace ov::frontend::onnx::org_openvinotoolkit::opset_1 {
 ov::OutputVector detection_output(const ov::frontend::onnx::Node& node) {
     auto inputs = node.get_ov_inputs();
 
@@ -67,8 +63,4 @@ ov::OutputVector detection_output(const ov::frontend::onnx::Node& node) {
 }
 
 ONNX_OP("DetectionOutput", OPSET_SINCE(1), org_openvinotoolkit::opset_1::detection_output, OPENVINO_ONNX_DOMAIN);
-}  // namespace opset_1
-}  // namespace org_openvinotoolkit
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::org_openvinotoolkit::opset_1

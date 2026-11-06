@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,7 @@
 
 #pragma once
 
-namespace ov {
-namespace frontend {
-namespace jax {
+namespace ov::frontend::jax {
 class JaxFrameworkNode : public ov::op::util::FrameworkNode {
 public:
     OPENVINO_OP("JaxFrameworkNode", "util", ::ov::op::util::FrameworkNode);
@@ -74,6 +72,4 @@ private:
     std::shared_ptr<JaxDecoder> m_decoder;
 };
 
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax

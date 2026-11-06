@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -61,10 +61,10 @@ struct RNNParams : public primitive_base<PType> {
         activation_params(activation_params),
         offset_order(offset_order),
         direction(direction) {
-        std::vector<std::string> pids{initial_hidden_state.pid, initial_cell_state.pid, W.pid, R.pid, B.pid, seq_lenghts.pid};
-        for (auto pid : pids) {
-            if (!pid.empty()) {
-                primitive_base<PType>::input.push_back(pid);
+        std::vector<input_info> infos{initial_hidden_state, initial_cell_state, W, R, B, seq_lenghts};
+        for (const auto& info : infos) {
+            if (!info.pid.empty()) {
+                primitive_base<PType>::input.push_back(info);
             }
         }
     }
@@ -103,7 +103,7 @@ struct RNNParams : public primitive_base<PType> {
         seed = hash_combine(seed, !B.pid.empty());
         seed = hash_combine(seed, clip);
         seed = hash_range(seed, activations.begin(), activations.end());
-        for (auto& act_param : activation_params) {
+        for (const auto& act_param : activation_params) {
             seed = hash_combine(seed, act_param.a);
             seed = hash_combine(seed, act_param.b);
         }
@@ -113,8 +113,9 @@ struct RNNParams : public primitive_base<PType> {
     }
 
     bool operator==(const primitive& rhs) const override {
-        if (!primitive::compare_common_params(rhs))
+        if (!primitive::compare_common_params(rhs)) {
             return false;
+        }
 
         auto rhs_casted = downcast<const PType>(rhs);
         bool act_params_eq = activation_params.size() == rhs_casted.activation_params.size();
@@ -177,7 +178,7 @@ struct lstm_seq : public RNNParams<lstm_seq> {
     using vec_activation = std::vector<activation_func>;
     using vec_activation_param = std::vector<activation_additional_params>;
     using RNNParams::RNNParams;
-    lstm_seq() : RNNParams() {
+    lstm_seq() {
         weights = W.pid;
         input = x.pid;
     }

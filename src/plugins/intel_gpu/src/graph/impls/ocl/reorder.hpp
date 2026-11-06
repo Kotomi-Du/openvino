@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -22,10 +22,7 @@ struct ReorderImplementationManager : public ImplementationManager {
 
         const auto& output_layout = node.get_output_layout(0);
         auto output_fmt = output_layout.format;
-        if (output_fmt == format::custom)
-            return false;
-
-        return true;
+        return output_fmt != format::custom;
     }
 };
 

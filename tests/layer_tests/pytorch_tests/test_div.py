@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import platform
@@ -15,18 +15,15 @@ class TestDiv(PytorchLayerTest):
         return (self.input_array.astype(self.input_type), self.other_array.astype(self.other_type))
 
     def create_model(self, rounding_mode):
-
         class aten_div(torch.nn.Module):
             def __init__(self, rounding_mode):
-                super(aten_div, self).__init__()
+                super().__init__()
                 self.rounding_mode = rounding_mode
 
             def forward(self, input_tensor, other_tensor):
                 return torch.div(input_tensor, other_tensor, rounding_mode=self.rounding_mode)
 
-        ref_net = None
-
-        return aten_div(rounding_mode), ref_net, "aten::div"
+        return aten_div(rounding_mode), "aten::div"
 
     @pytest.mark.parametrize(("input_array", "other_array"), [
         [np.array([0.7620, 2.5548, -0.5944, -0.7438, 0.9274]), np.array(0.5)],
@@ -54,18 +51,67 @@ class TestDiv(PytorchLayerTest):
                    ie_device, precision, ir_version, use_convert_model=True)
 
 
+class TestDivTrunc(PytorchLayerTest):
+    def _prepare_input(self):
+        return (self.input_array, self.other_array)
+
+    def create_model(self):
+        class aten_div(torch.nn.Module):
+            def forward(self, input_tensor, other_tensor):
+                return torch.div(input_tensor, other_tensor, rounding_mode="trunc")
+
+        return aten_div(), "aten::div"
+
+    @pytest.mark.parametrize(("input_array", "other_array"), [
+        # quotients outside the i32 range, infinities and NaN
+        [np.array([1e10, -1e10, 3e9, np.inf, -np.inf, np.nan, -7.5, 0.5], dtype=np.float32),
+         np.array([3, 3, 1, 2, 2, 1, 2, -2], dtype=np.float32)],
+        [np.array([-7, 7, -9, 9, -1], dtype=np.int64),
+         np.array([2, -2, 4, 4, 3], dtype=np.int64)],
+    ])
+    @pytest.mark.nightly
+    @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
+    def test_div_trunc(self, input_array, other_array, ie_device, precision, ir_version):
+        if precision == "FP16" and input_array.dtype == np.float32:
+            pytest.skip("Values exceed the f16 range")
+        self.input_array = input_array
+        self.other_array = other_array
+        self._test(*self.create_model(), ie_device, precision, ir_version)
+
+
+class TestDivTruncConstant(PytorchLayerTest):
+    def _prepare_input(self):
+        return (np.zeros(3, dtype=np.int64),)
+
+    def create_model(self):
+        class aten_div(torch.nn.Module):
+            def forward(self, x):
+                a = torch.tensor([-7, 7, -9])
+                b = torch.tensor([2, -2, 4])
+                return torch.div(a, b, rounding_mode="trunc") + x
+
+        return aten_div(), "aten::div"
+
+    @pytest.mark.nightly
+    @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
+    def test_div_trunc_constant(self, ie_device, precision, ir_version):
+        # Constant folding follows the Divide spec, so the division must not use python division here
+        self._test(*self.create_model(), ie_device, precision, ir_version, freeze_model=False)
+
+
 class TestDivTypes(PytorchLayerTest):
 
     def _prepare_input(self):
         if len(self.lhs_shape) == 0:
-            return (torch.randint(2, 5, self.rhs_shape).to(self.rhs_type).numpy(),)
+            return (self.random.randint(2, 5, size=self.rhs_shape, dtype=self.rhs_dtype),)
         elif len(self.rhs_shape) == 0:
-            return (10 * torch.randn(self.lhs_shape).to(self.lhs_type).numpy(),)
-        return (10 * torch.randn(self.lhs_shape).to(self.lhs_type).numpy(),
-                torch.randint(2, 5, self.rhs_shape).to(self.rhs_type).numpy())
+            return (10 * self.random.randn(*self.lhs_shape, dtype=self.lhs_dtype),)
+        return (10 * self.random.randn(*self.lhs_shape, dtype=self.lhs_dtype),
+                self.random.randint(2, 5, size=self.rhs_shape, dtype=self.rhs_dtype))
 
     def create_model(self, lhs_type, lhs_shape, rhs_type, rhs_shape, rounding_mode):
-
         class aten_div(torch.nn.Module):
             def __init__(self, lhs_type, lhs_shape, rhs_type, rhs_shape, rounding_mode):
                 super().__init__()
@@ -88,9 +134,7 @@ class TestDivTypes(PytorchLayerTest):
             def forward3(self, lhs, rhs):
                 return torch.div(lhs.to(self.lhs_type), rhs.to(self.rhs_type), rounding_mode=self.rm)
 
-        ref_net = None
-
-        return aten_div(lhs_type, lhs_shape, rhs_type, rhs_shape, rounding_mode), ref_net, "aten::div"
+        return aten_div(lhs_type, lhs_shape, rhs_type, rhs_shape, rounding_mode), "aten::div"
 
     @pytest.mark.parametrize(("lhs_type", "rhs_type"),
                              [[torch.int32, torch.int64],
@@ -130,6 +174,14 @@ class TestDivTypes(PytorchLayerTest):
         self.lhs_shape = lhs_shape
         self.rhs_type = rhs_type
         self.rhs_shape = rhs_shape
+        # Map torch dtypes to numpy for _prepare_input
+        dtype_map = {
+            torch.int32: np.int32, torch.int64: np.int64,
+            torch.float32: np.float32, torch.float64: np.float64,
+            torch.float16: np.float16, torch.uint8: np.uint8
+        }
+        self.lhs_dtype = dtype_map.get(lhs_type, np.float32)
+        self.rhs_dtype = dtype_map.get(rhs_type, np.float32)
         if rounding_mode == "floor" and not lhs_type.is_floating_point and not rhs_type.is_floating_point:
             pytest.skip("Floor rounding mode and int inputs produce wrong results")
         self._test(*self.create_model(lhs_type, lhs_shape, rhs_type, rhs_shape, rounding_mode),

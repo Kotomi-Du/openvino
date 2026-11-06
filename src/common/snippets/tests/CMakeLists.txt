@@ -1,12 +1,15 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
 set(TARGET_NAME ov_snippets_func_tests)
 
+include(sources.cmake)
+
 ov_add_test_target(
         NAME ${TARGET_NAME}
-        ROOT ${CMAKE_CURRENT_SOURCE_DIR}
+        SOURCES
+            ${SNIPPETS_TESTS_SRCS}
         INCLUDES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             $<TARGET_PROPERTY:openvino::snippets,INTERFACE_INCLUDE_DIRECTORIES>
@@ -14,9 +17,9 @@ ov_add_test_target(
             openvino::runtime::dev
             common_test_utils
             ov_snippets_models
-        ADD_CPPLINT
         LABELS
             OV UNIT SNIPPETS
+        CHECK_SOURCES_LISTED
 )
 
 # LTO
@@ -29,9 +32,13 @@ ov_build_target_faster(${TARGET_NAME}
 
 add_library(snippets_test_utils STATIC ${CMAKE_CURRENT_SOURCE_DIR}/include/lowering_utils.hpp
                                        ${CMAKE_CURRENT_SOURCE_DIR}/include/lir_test_utils.hpp
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/include/utils.hpp
                                        ${CMAKE_CURRENT_SOURCE_DIR}/include/lir_comparator.hpp
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/include/lowered/pass/buffer_allocation.hpp
                                        ${CMAKE_CURRENT_SOURCE_DIR}/src/lowering_utils.cpp
                                        ${CMAKE_CURRENT_SOURCE_DIR}/src/lir_test_utils.cpp
-                                       ${CMAKE_CURRENT_SOURCE_DIR}/src/lir_comparator.cpp)
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/src/utils.cpp
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/src/lir_comparator.cpp
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/src/lowered/pass/buffer_allocation.cpp)
 target_include_directories(snippets_test_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(snippets_test_utils PRIVATE common_test_utils ov_snippets_models)

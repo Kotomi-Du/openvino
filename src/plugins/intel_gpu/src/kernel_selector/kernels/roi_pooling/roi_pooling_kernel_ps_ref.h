@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ namespace kernel_selector {
 class PSROIPoolingKernelRef : public ROIPoolingKernelBase {
 public:
     PSROIPoolingKernelRef() : ROIPoolingKernelBase("roi_pooling_ps_ref") {}
-    virtual ~PSROIPoolingKernelRef() {}
+    ~PSROIPoolingKernelRef() override = default;
 
     using DispatchData = CommonDispatchData;
 

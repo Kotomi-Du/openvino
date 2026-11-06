@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,7 +23,7 @@ public:
     std::shared_ptr<ov::Model> create_dynamic_output_model();
     std::shared_ptr<ov::Model> create_stateful_model();
     std::shared_ptr<ov::Model> create_stateful_dynamic_model();
-    static std::string getTestCaseName(testing::TestParamInfo<StatefulModelConfigParams> obj);
+    static std::string getTestCaseName(const testing::TestParamInfo<StatefulModelConfigParams>& obj);
     void SetUp() override;
 
 protected:
@@ -36,21 +36,14 @@ protected:
     std::string expectedExecuteDev;
 };
 
-std::string StatefulModelSupportedTest::getTestCaseName(testing::TestParamInfo<StatefulModelConfigParams> obj) {
-    bool isDynamicModel;
-    bool isStatefulModel;
-    bool isActualSuccessful;
-    bool isCumulative;
-    std::vector<std::pair<std::string, int>> expectedCalledTimes;
-    std::string devicesList;
-    std::string expectedExecuteDev;
-    std::tie(devicesList,
-             isDynamicModel,
-             isStatefulModel,
-             isCumulative,
-             isActualSuccessful,
-             expectedCalledTimes,
-             expectedExecuteDev) = obj.param;
+std::string StatefulModelSupportedTest::getTestCaseName(const testing::TestParamInfo<StatefulModelConfigParams>& obj) {
+    const auto& [devicesList,
+                 isDynamicModel,
+                 isStatefulModel,
+                 isCumulative,
+                 isActualSuccessful,
+                 expectedCalledTimes,
+                 expectedExecuteDev] = obj.param;
     std::ostringstream result;
     result << "_devicesList_" << devicesList;
     result << "_isDynamic_" << isDynamicModel;
@@ -232,6 +225,10 @@ TEST_P(StatefulModelSupportedTest, CanFilterOutCorrectTargetDeviceWithStatefulMo
         OV_ASSERT_NO_THROW(exeNetwork = plugin->compile_model(model, config));
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         EXPECT_EQ(exeNetwork->get_property(ov::execution_devices.name()).as<std::string>(), expectedExecuteDev);
+    }
+    // clean up
+    for (auto& item : metaDevices) {
+        plugin->unregister_priority(item.device_priority, item.unique_name);
     }
 }
 

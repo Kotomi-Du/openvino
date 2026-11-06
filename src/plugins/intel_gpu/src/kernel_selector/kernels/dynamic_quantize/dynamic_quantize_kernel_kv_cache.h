@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ namespace kernel_selector {
 class DynamicQuantizeKernelKVCache : public KernelBaseOpenCL {
 public:
     DynamicQuantizeKernelKVCache() : KernelBaseOpenCL("dynamic_quantize_gpu_kv_cache") {}
-    virtual ~DynamicQuantizeKernelKVCache() {}
+    ~DynamicQuantizeKernelKVCache() override = default;
 
     virtual JitConstants GetJitConstants(const dynamic_quantize_params& params) const;
     virtual CommonDispatchData SetDefault(const dynamic_quantize_params& params) const;

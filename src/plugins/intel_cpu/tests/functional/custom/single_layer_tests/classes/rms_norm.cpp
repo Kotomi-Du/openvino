@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,12 +18,7 @@ namespace ov {
 namespace test {
 
 std::string RMSNormLayerCPUTest::getTestCaseName(const testing::TestParamInfo<RMSNormCPUTestParams>& obj) {
-    CPUSpecificParams cpuParams;
-    ElementType inType;
-    std::vector<InputShape> inputShapes;
-    std::string targetDevice;
-    std::tie(inType, inputShapes, targetDevice, cpuParams) = obj.param;
-
+    const auto& [inType, inputShapes, targetDevice, cpuParams] = obj.param;
     std::ostringstream result;
     result << "netPRC=" << inType << "_";
     result << "IS=";
@@ -79,22 +74,21 @@ void RMSNormLayerCPUTest::generate_inputs(const std::vector<ov::Shape>& targetIn
         }
     };
     create_input(function->get_parameters()[0], targetInputStaticShapes[0], 1.0f);
-    create_input(function->get_parameters()[1], targetInputStaticShapes[1], 0.0f);
-    for (size_t i = 0; i < targetInputStaticShapes[1].size() - 1; i++) {
-        if (targetInputStaticShapes[1][i] != 1) {
-            // decomposed rms expected
-            m_rms_decomposed = true;
-            break;
+    if (function->get_parameters().size() > 1) {
+        create_input(function->get_parameters()[1], targetInputStaticShapes[1], 0.0f);
+        for (size_t i = 0; i < targetInputStaticShapes[1].size() - 1; i++) {
+            if (targetInputStaticShapes[1][i] != 1) {
+                // decomposed rms expected
+                m_rms_decomposed = true;
+                break;
+            }
         }
     }
 }
 
 void RMSNormLayerCPUTest::SetUp() {
-    ElementType inType;
-    CPUSpecificParams cpuParams;
-    std::vector<InputShape> inputShapes;
-    std::tie(inType, inputShapes, targetDevice, cpuParams) = this->GetParam();
-
+    const auto& [inType, inputShapes, _targetDevice, cpuParams] = this->GetParam();
+    targetDevice = _targetDevice;
     std::tie(inFmts, outFmts, priority, selectedType) = cpuParams;
     if (selectedType.empty()) {
         selectedType = getPrimitiveType();
@@ -107,14 +101,19 @@ void RMSNormLayerCPUTest::SetUp() {
     selectedType = makeSelectedTypeStr(selectedType, inType);
     init_input_shapes(inputShapes);
     ov::ParameterVector inputParams;
-    // data, scale
+    // data, optional scale
     auto data = std::make_shared<ov::op::v0::Parameter>(inType, inputDynamicShapes[0]);
     inputParams.push_back(data);
-    auto scale = std::make_shared<ov::op::v0::Parameter>(inType, inputDynamicShapes[1]);
-    inputParams.push_back(scale);
-    auto rms = std::make_shared<ov::op::internal::RMS>(data, scale, 0.1f);
+    std::shared_ptr<ov::op::internal::RMS> rms;
+    if (inputDynamicShapes.size() > 1) {
+        auto scale = std::make_shared<ov::op::v0::Parameter>(inType, inputDynamicShapes[1]);
+        inputParams.push_back(scale);
+        rms = std::make_shared<ov::op::internal::RMS>(data, scale, 0.1f);
+    } else {
+        rms = std::make_shared<ov::op::internal::RMS>(data, 0.1f);
+    }
     rms->set_friendly_name("rms");
-    function = makeNgraphFunction(inType, inputParams, rms, "rms");
+    function = create_ov_model(inType, inputParams, rms, "rms");
 }
 
 TEST_P(RMSNormLayerCPUTest, CompareWithRefs) {

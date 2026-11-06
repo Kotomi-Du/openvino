@@ -1,440 +1,425 @@
-// Copyright (C) 2024-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "serialization.hpp"
 
+#include "attention.hpp"
+#include "host_flash_attention.hpp"
 #include "intel_npu/config/config.hpp"
+#include "intel_npu/config/npuw.hpp"
 #include "lazy_tensor.hpp"
 #include "logging.hpp"
+#include "moe_transformations/moe_transformation.hpp"
+#include "openvino/core/rt_info/weightless_caching_attributes.hpp"
+#include "openvino/core/version.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/util/op_types.hpp"
+#include "openvino/reference/convert.hpp"
 #include "openvino/runtime/shared_buffer.hpp"
+#include "openvino/util/file_util.hpp"
 #include "openvino/util/mmap_object.hpp"
+#include "pyramid_attention.hpp"
 #include "spatial.hpp"
 #include "util.hpp"
 
-// NOTE: This construtor should only be used when exporting blobs
+std::shared_ptr<ov::MappedMemory> ov::npuw::s11n::mmap_weights(const ov::FileHandleProvider& handle_provider) {
+    NPUW_ASSERT(handle_provider && "No weights handle provider to map the weights from!");
+    const ov::FileHandle handle = handle_provider();
+    // Where the provider left the handle is where the weights begin (see the declaration).
+    // Unknown position (a non-seekable handle) is the same as "from the start".
+    const auto region_offset = ov::util::get_file_position(handle).value_or(0u);
+    LOG_DEBUG("Mapping weights from the provided file handle at offset " << region_offset << " up to EOF.");
+    // auto_size: to EOF. The region is only an upper bound on the weights - individual weights are
+    // range-checked against it in Const::validate_weight_range().
+    return ov::load_mmap_object(handle, static_cast<std::size_t>(region_offset));
+}
+
+// NOTE: This constructor should only be used when exporting blobs.
 ov::npuw::s11n::WeightsContext::WeightsContext(bool _is_weightless,
                                                const std::unordered_map<const void*, std::size_t>& _const_to_offset)
     : is_weightless(_is_weightless),
       const_to_offset(_const_to_offset) {}
 
-// NOTE: This construtor can and should only be used when importing weightless blobs
-ov::npuw::s11n::WeightsContext::WeightsContext(const ov::npuw::s11n::Weights& _weights,
-                                               const s11n::WeightsContext::ConstsCache& _consts_cache)
-    : is_weightless(true),
-      weights(_weights),
-      consts_cache(_consts_cache) {
-    NPUW_ASSERT(_weights || !_consts_cache.empty());
+// NOTE: This constructor is used when importing blobs.
+ov::npuw::s11n::WeightsContext::WeightsContext(const ov::npuw::s11n::WeightsPtr& _weights,
+                                               const std::string& _weights_path,
+                                               const s11n::WeightsContext::ConstsCache& _consts_cache,
+                                               const BF16Cache& _bf16_consts,
+                                               const ov::FileHandleProvider& _handle_provider)
+    : weights(_weights),
+      weights_path(_weights_path),
+      consts_cache(_consts_cache),
+      bf16_consts(_bf16_consts),
+      handle_provider(_handle_provider) {
+    is_weightless = _weights || !_consts_cache.empty();
 }
 
-void ov::npuw::s11n::write(std::ostream& stream, const std::streampos& var) {
-    stream.write(reinterpret_cast<const char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const std::string& var) {
-    auto var_size = var.size();
-    stream.write(reinterpret_cast<const char*>(&var_size), sizeof var_size);
-    stream.write(&var[0], var.size());
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const bool& var) {
-    stream.write(reinterpret_cast<const char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const float& var) {
-    stream.write(reinterpret_cast<const char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::npuw::compiled::Spatial& var) {
-    using ov::npuw::s11n::write;
-
-    write(stream, var.params.size());
-    for (const auto& p : var.params) {
-        write(stream, p.idx);
-        write(stream, p.dim);
+ov::npuw::s11n::BF16Cache ov::npuw::s11n::get_bf16_consts(const std::shared_ptr<ov::Model>& model) {
+    ov::npuw::s11n::BF16Cache bf16_cache;
+    for (auto&& node_ptr : model->get_ordered_ops()) {
+        if (const auto c = ov::as_type_ptr<ov::op::v0::Constant>(node_ptr)) {
+            if (c->get_element_type() != ov::element::bf16) {
+                continue;
+            }
+            auto rt_info = c->get_rt_info();
+            auto weightless_cache_attr = rt_info.find(ov::WeightlessCacheAttribute::get_type_info_static());
+            if (weightless_cache_attr == rt_info.end()) {
+                continue;
+            }
+            std::size_t offset = weightless_cache_attr->second.as<ov::WeightlessCacheAttribute>().bin_offset;
+            bf16_cache.insert({offset, c->get_byte_size()});
+        }
     }
-    write(stream, var.range);
-    write(stream, var.nway);
-    write(stream, var.out_dim);
-    write(stream, var.nway_iters);
-    write(stream, var.tail_size);
+    return bf16_cache;
 }
 
-void ov::npuw::s11n::write(std::ostream& stream, const ov::Tensor& var) {
-    using ov::npuw::s11n::write;
+void ov::npuw::orc::serialize(Stream& stream, std::streampos& var) {
+    stream.bytes(&var, sizeof var);
+}
 
-    if (!var) {
-        write(stream, false);
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::Spatial& var) {
+    stream & var.params & var.range & var.nway & var.out_dim & var.nway_iters & var.tail_size;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::Spatial::Param& var) {
+    stream & var.idx & var.dim;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::Attention& var) {
+    stream & var.query_size & var.context_size & var.params & var.mask_idx & var.attend_all;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::Attention::Param& var) {
+    stream & var.idx & var.dim;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::PyramidAttentionContiguous& var) {
+    stream & var.original_query_length & var.full_context_size & var._context_lengths & var._attention_infos &
+        var.global_mask_idx & var._data_left_aligned;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::PyramidAttentionBlock& var) {
+    stream & var.original_query_length & var.full_context_size & var._context_lengths & var._attention_infos &
+        var.past_key_block_global_param_indices & var.past_value_block_global_param_indices & var.global_mask_idx &
+        var._data_left_aligned;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::PyramidAttention& var) {
+    // Output only — dynamic_cast dispatch; input path handled by make_pyramid_from_stream.
+    if (auto* c = dynamic_cast<ov::npuw::compiled::PyramidAttentionContiguous*>(&var)) {
+        serialize(stream, *c);
+    } else if (auto* b = dynamic_cast<ov::npuw::compiled::PyramidAttentionBlock*>(&var)) {
+        serialize(stream, *b);
+    }
+}
+
+std::shared_ptr<ov::npuw::compiled::PyramidAttention> ov::npuw::orc::make_pyramid_from_stream(Stream& stream,
+                                                                                              uint8_t tag) {
+    if (tag == 0u) {
+        auto obj = std::make_shared<ov::npuw::compiled::PyramidAttentionContiguous>();
+        serialize(stream, *obj);
+        return obj;
+    } else {
+        NPUW_ASSERT(tag == 1u && "Unknown PyramidAttention serialization tag");
+        auto obj = std::make_shared<ov::npuw::compiled::PyramidAttentionBlock>();
+        serialize(stream, *obj);
+        // Rebuild the O(1) membership sets — not serialized directly, derived from the
+        // (serialized) ordered global block index vectors.
+        obj->_key_block_global_set = std::unordered_set<size_t>(obj->past_key_block_global_param_indices.begin(),
+                                                                obj->past_key_block_global_param_indices.end());
+        obj->_value_block_global_set = std::unordered_set<size_t>(obj->past_value_block_global_param_indices.begin(),
+                                                                  obj->past_value_block_global_param_indices.end());
+        return obj;
+    }
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::PyramidAttentionContiguousInfo& var) {
+    stream & var.params & var.mask_idx_local & var.compiled_query_size & var.context_length;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::PyramidAttentionContiguousInfo::Param& var) {
+    stream & var.idx & var.dim;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::PyramidAttentionBlockInfo& var) {
+    stream & var.mask_idx_local & var.compiled_query_size & var.context_length & var.param_port_map &
+        var.past_key_block_port_set & var.past_value_block_port_set;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::HostFlashAttention& var) {
+    auto& info = var._sdpa_attention_info;
+    stream & info._query_size & info._context_size & info._k_seq_dim & info._v_seq_dim & info._sdpa_indices.query &
+        info._sdpa_indices.past_key_blocks & info._sdpa_indices.past_value_blocks & info._sdpa_indices.present_key &
+        info._sdpa_indices.present_value & info._sdpa_indices.attention_mask & info._tile_input_indices.q &
+        info._tile_input_indices.k & info._tile_input_indices.v & info._tile_input_indices.mask &
+        info._tile_input_indices.acc & info._tile_input_indices.max & info._tile_input_indices.d &
+        info._tile_output_indices.acc & info._tile_output_indices.max & info._tile_output_indices.d &
+        var._past_tile_size & var._final_tile_size & var._can_use_tensor_view;
+    if (stream.input()) {
+        // Port indices are model-specific but must fit in a sane range; SIZE_MAX indicates a corrupted blob.
+        constexpr std::size_t kMaxPortIndex = static_cast<std::size_t>(std::numeric_limits<uint16_t>::max());
+        OPENVINO_ASSERT(
+            info._tile_input_indices.q <= kMaxPortIndex && info._tile_input_indices.k <= kMaxPortIndex &&
+                info._tile_input_indices.v <= kMaxPortIndex && info._tile_input_indices.mask <= kMaxPortIndex &&
+                info._tile_input_indices.acc <= kMaxPortIndex && info._tile_input_indices.max <= kMaxPortIndex &&
+                info._tile_input_indices.d <= kMaxPortIndex,
+            "HFA tile input index out of range in deserialized blob");
+        OPENVINO_ASSERT(info._tile_output_indices.acc <= kMaxPortIndex &&
+                            info._tile_output_indices.max <= kMaxPortIndex &&
+                            info._tile_output_indices.d <= kMaxPortIndex,
+                        "HFA tile output index out of range in deserialized blob");
+    }
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::MoEExperts& var) {
+    stream & var.num_experts & var.expert_hidden_dim & var.num_active_experts & var.input_token_count &
+        var._router_scores.original & var._router_scores.compiled & var._expert_input.original &
+        var._expert_input.compiled & var._param_mapping;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::npuw::compiled::MoEDownstream& var) {
+    stream & var.total_experts_num & var.active_experts_num & var.expert_output_param_idx;
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::Tensor& var) {
+    transfer_tensor(stream, var);
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ::intel_npu::Config& var) {
+    std::string str;
+    if (stream.output()) {
+        str = var.toString();
+    }
+    stream & str;
+    if (stream.input()) {
+        var.fromString(str);
+    }
+}
+
+void ov::npuw::orc::serialize(Stream& stream, ov::Output<const ov::Node>& var) {
+    if (stream.output()) {
+        auto elem_type = var.get_element_type().to_string();
+        auto shape = var.get_partial_shape().to_string();
+        auto names = var.get_names();
+        stream & elem_type & shape & names;
+    } else {
+        OPENVINO_THROW("ov::Output<const ov::Node> is write-only in NPUW serialization");
+    }
+}
+
+void ov::npuw::orc::transfer_tensor(Stream& stream, ov::Tensor& var, const s11n::TensorAllocator& allocator) {
+    if (stream.output()) {
+        bool is_initialized = static_cast<bool>(var);
+        stream & is_initialized;
+        if (!is_initialized) {
+            return;
+        }
+
+        auto type_str = var.get_element_type().to_string();
+        auto shape = var.get_shape();
+        auto byte_size = var.get_byte_size();
+        stream & type_str & shape & byte_size;
+
+        ov::Tensor tensor = var;
+        if (!var.is_continuous()) {
+            tensor = ov::Tensor(var.get_element_type(), var.get_shape());
+            var.copy_to(tensor);
+        }
+        NPUW_ASSERT(tensor);
+        stream.bytes(tensor.data(), tensor.get_byte_size());
         return;
     }
-    write(stream, true);
 
-    auto type_str = var.get_element_type().to_string();
-    write(stream, type_str);
-    write(stream, var.get_shape());
-    write(stream, var.get_byte_size());
-
-    ov::Tensor tensor;
-    if (var.is_continuous()) {
-        tensor = var;
-    } else {
-        // Just copy strided tensor to a non-strided one
-        tensor = ov::Tensor(var.get_element_type(), var.get_shape());
-        var.copy_to(tensor);
-    }
-    NPUW_ASSERT(tensor);
-    size_t blob_size = var.get_byte_size();
-    if (blob_size > static_cast<decltype(blob_size)>(std::numeric_limits<std::streamsize>::max())) {
-        OPENVINO_THROW("Blob size is too large to be represented on a std::streamsize!");
-    }
-    stream.write(reinterpret_cast<const char*>(var.data()), static_cast<std::streamsize>(blob_size));
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ::intel_npu::Config& var) {
-    write(stream, var.toString());
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::Output<const ov::Node>& var) {
-    write(stream, var.get_element_type().to_string());
-    write(stream, var.get_partial_shape().to_string());
-    write(stream, var.get_names());
-}
-
-enum class AnyType : int {
-    STRING = 0,
-    CHARS,
-    INT,
-    UINT32,
-    INT64,
-    UINT64,
-    SIZET,
-    FLOAT,
-    BOOL,
-    CACHE_MODE,
-    ELEMENT_TYPE,
-    ANYMAP,
-    PERFMODE
-};
-
-void ov::npuw::s11n::write_any(std::ostream& stream, const ov::Any& var) {
-    // FIXME: figure out a proper way to serialize Any (for config)
-    if (var.is<std::string>()) {
-        write(stream, static_cast<int>(AnyType::STRING));
-        write(stream, var.as<std::string>());
-    } else if (var.is<const char*>()) {
-        // FIXME: handle properly
-        write(stream, static_cast<int>(AnyType::CHARS));
-        write(stream, std::string(var.as<const char*>()));
-    } else if (var.is<std::size_t>()) {
-        write(stream, static_cast<int>(AnyType::SIZET));
-        write(stream, var.as<std::size_t>());
-    } else if (var.is<int>()) {
-        write(stream, static_cast<int>(AnyType::INT));
-        write(stream, var.as<int>());
-    } else if (var.is<int64_t>()) {
-        write(stream, static_cast<int>(AnyType::INT64));
-        write(stream, var.as<int64_t>());
-    } else if (var.is<uint32_t>()) {
-        write(stream, static_cast<int>(AnyType::UINT32));
-        write(stream, var.as<uint32_t>());
-    } else if (var.is<uint64_t>()) {
-        write(stream, static_cast<int>(AnyType::UINT64));
-        write(stream, var.as<uint64_t>());
-    } else if (var.is<float>()) {
-        write(stream, static_cast<int>(AnyType::FLOAT));
-        write(stream, var.as<float>());
-    } else if (var.is<bool>()) {
-        write(stream, static_cast<int>(AnyType::BOOL));
-        write(stream, var.as<bool>());
-    } else if (var.is<ov::CacheMode>()) {
-        write(stream, static_cast<int>(AnyType::CACHE_MODE));
-        write(stream, var.as<ov::CacheMode>());
-    } else if (var.is<ov::element::Type>()) {
-        write(stream, static_cast<int>(AnyType::ELEMENT_TYPE));
-        write(stream, var.as<ov::element::Type>());
-    } else if (var.is<ov::AnyMap>()) {
-        write(stream, static_cast<int>(AnyType::ANYMAP));
-        write(stream, var.as<ov::AnyMap>());
-    } else if (var.is<ov::hint::PerformanceMode>()) {
-        write(stream, static_cast<int>(AnyType::PERFMODE));
-        write(stream, var.as<ov::hint::PerformanceMode>());
-    } else {
-        NPUW_ASSERT(false && "Unsupported type");
-    }
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::npuw::weights::LazyTensor& var) {
-    var.serialize(stream);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::CacheMode& var) {
-    stream.write(reinterpret_cast<const char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::element::Type& var) {
-    stream.write(reinterpret_cast<const char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::hint::PerformanceMode& var) {
-    stream.write(reinterpret_cast<const char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::write(std::ostream& stream, const ov::AnyMap& var) {
-    write(stream, var.size());
-    for (const auto& el : var) {
-        write(stream, el.first);
-        write_any(stream, el.second);
-    }
-}
-
-void ov::npuw::s11n::read(std::istream& stream, std::streampos& var) {
-    stream.read(reinterpret_cast<char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::read(std::istream& stream, std::string& var) {
-    std::size_t var_size = 0;
-    stream.read(reinterpret_cast<char*>(&var_size), sizeof var_size);
-    var.resize(var_size);
-    stream.read(&var[0], var_size);
-}
-
-void ov::npuw::s11n::read(std::istream& stream, bool& var) {
-    stream.read(reinterpret_cast<char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::read(std::istream& stream, float& var) {
-    stream.read(reinterpret_cast<char*>(&var), sizeof var);
-}
-
-void ov::npuw::s11n::read(std::istream& stream, ov::npuw::compiled::Spatial& var) {
-    using ov::npuw::s11n::read;
-
-    std::size_t params_size = 0;
-    read(stream, params_size);
-    for (std::size_t i = 0; i < params_size; ++i) {
-        ov::npuw::compiled::Spatial::Param p;
-        read(stream, p.idx);
-        read(stream, p.dim);
-        var.params.push_back(p);
-    }
-    read(stream, var.range);
-    read(stream, var.nway);
-    read(stream, var.out_dim);
-    read(stream, var.nway_iters);
-    read(stream, var.tail_size);
-}
-
-void ov::npuw::s11n::read(std::istream& stream, ov::Tensor& var) {
     bool is_initialized = false;
-    read(stream, is_initialized);
-
+    stream & is_initialized;
     if (!is_initialized) {
+        var = ov::Tensor();
         return;
     }
 
     std::string type_str;
-    read(stream, type_str);
+    stream & type_str;
     ov::element::Type type(type_str);
 
     ov::Shape shape;
-    read(stream, shape);
+    stream & shape;
 
     std::size_t byte_size = 0;
-    read(stream, byte_size);
+    stream & byte_size;
 
-    var = ov::Tensor(type, shape);
+    if (allocator) {
+        var = allocator(type, shape);
+    } else {
+        var = ov::Tensor(type, shape);
+    }
+    NPUW_ASSERT(var && "Tensor allocator returned an empty tensor");
+    NPUW_ASSERT(var.get_element_type() == type && var.get_shape() == shape &&
+                "Tensor allocator returned tensor with unexpected type or shape");
+    NPUW_ASSERT(var.get_byte_size() == byte_size && "Tensor allocator returned tensor with unexpected byte size");
 
-    stream.read(reinterpret_cast<char*>(var.data()), byte_size);
+    stream.bytes(var.data(), byte_size);
 }
 
-void ov::npuw::s11n::read(std::istream& stream, ::intel_npu::Config& var) {
-    std::string str;
-    read(stream, str);
-    var.fromString(str);
-}
+void ov::npuw::orc::serialize(Stream& stream, std::shared_ptr<ov::op::v0::Parameter>& var) {
+    if (stream.output()) {
+        OPENVINO_THROW(
+            "Serializing shared_ptr<ov::op::v0::Parameter> is not supported, serialize an output port instead");
+    }
 
-void ov::npuw::s11n::read(std::istream& stream, std::shared_ptr<ov::op::v0::Parameter>& var) {
     std::string elem_type_str;
     std::string part_shape_str;
     std::unordered_set<std::string> names;
-    read(stream, elem_type_str);
-    read(stream, part_shape_str);
-    read(stream, names);
-    // NOTE: the code below is taken from NPU plugin's create_dummy_model()
+    stream & elem_type_str & part_shape_str & names;
     var = std::make_shared<op::v0::Parameter>(ov::element::Type(elem_type_str), ov::PartialShape(part_shape_str));
-    var->set_friendly_name(*names.begin());  // FIXME: any_name ?
+    if (!names.empty()) {
+        var->set_friendly_name(*names.begin());
+    }
     var->output(0).get_tensor().set_names(names);
 }
 
-void ov::npuw::s11n::read(std::istream& stream, std::shared_ptr<ov::Node>& var) {
+void ov::npuw::orc::serialize(Stream& stream, std::shared_ptr<ov::Node>& var) {
+    if (stream.output()) {
+        OPENVINO_THROW("Serializing shared_ptr<ov::Node> is not supported, serialize an output port instead");
+    }
+
     std::string elem_type_str;
     std::string part_shape_str;
     std::unordered_set<std::string> names;
-    read(stream, elem_type_str);
-    read(stream, part_shape_str);
-    read(stream, names);
-    // NOTE: the code below is taken from NPU plugin's create_dummy_model()
+    stream & elem_type_str & part_shape_str & names;
     std::shared_ptr<ov::Node> res =
         std::make_shared<ov::op::v0::Constant>(ov::element::Type(elem_type_str), std::vector<size_t>{1});
-    // FIXME: serialize names as well?
     const std::shared_ptr<ov::descriptor::Tensor>& tensor_dummy =
         std::make_shared<ov::descriptor::Tensor>(ov::element::Type(elem_type_str),
                                                  ov::PartialShape(part_shape_str),
                                                  names);
     var = std::make_shared<ov::op::v0::Result>(res);
     var->output(0).set_tensor_ptr(tensor_dummy);
-    var->set_friendly_name(*names.begin());  // any_name ?
-}
-
-void ov::npuw::s11n::read_any(std::istream& stream, ov::Any& var) {
-    // FIXME: ugly, but cannot use .read(stream) here due to its usage of operator>>()
-    int type_int;
-    read(stream, type_int);
-    AnyType type = static_cast<AnyType>(type_int);
-    if (type == AnyType::STRING) {
-        std::string val;
-        read(stream, val);
-        var = std::move(val);
-    } else if (type == AnyType::CHARS) {
-        // FIXME: handle properly
-        std::string val;
-        read(stream, val);
-        var = std::move(val);
-    } else if (type == AnyType::SIZET) {
-        std::size_t val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::INT) {
-        int val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::INT64) {
-        int64_t val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::UINT32) {
-        uint32_t val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::UINT64) {
-        uint64_t val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::FLOAT) {
-        float val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::BOOL) {
-        bool val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::CACHE_MODE) {
-        ov::CacheMode val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::ELEMENT_TYPE) {
-        ov::element::Type val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::ANYMAP) {
-        ov::AnyMap val;
-        read(stream, val);
-        var = val;
-    } else if (type == AnyType::PERFMODE) {
-        ov::hint::PerformanceMode val;
-        read(stream, val);
-        var = val;
-    } else {
-        NPUW_ASSERT(false && "Unsupported type");
+    if (!names.empty()) {
+        var->set_friendly_name(*names.begin());
     }
 }
 
-void ov::npuw::s11n::read(std::istream& stream, ov::npuw::weights::LazyTensor& var) {
-    var = ov::npuw::weights::LazyTensor::deserialize(stream);
+void ov::npuw::orc::serialize(Stream& stream, ov::Any& var) {
+    std::string str;
+    if (stream.output()) {
+        str = ov::npuw::s11n::anyToString(var);
+    }
+    stream & str;
+    if (stream.input()) {
+        var = ov::npuw::s11n::stringToAny(str);
+    }
 }
 
-void ov::npuw::s11n::read(std::istream& stream, ov::CacheMode& var) {
-    stream.read(reinterpret_cast<char*>(&var), sizeof var);
+void ov::npuw::orc::serialize(Stream& stream, ov::CacheMode& var) {
+    stream.bytes(&var, sizeof var);
 }
 
-void ov::npuw::s11n::read(std::istream& stream, ov::element::Type& var) {
-    stream.read(reinterpret_cast<char*>(&var), sizeof var);
+void ov::npuw::orc::serialize(Stream& stream, ov::element::Type& var) {
+    stream.bytes(&var, sizeof var);
 }
 
-void ov::npuw::s11n::read(std::istream& stream, ov::hint::PerformanceMode& var) {
-    stream.read(reinterpret_cast<char*>(&var), sizeof var);
+void ov::npuw::orc::serialize(Stream& stream, ov::hint::PerformanceMode& var) {
+    stream.bytes(&var, sizeof var);
 }
 
-void ov::npuw::s11n::read(std::istream& stream, ov::AnyMap& var) {
-    std::size_t var_size = 0;
-    read(stream, var_size);
-    for (std::size_t i = 0; i < var_size; ++i) {
-        std::string k;
-        read(stream, k);
-        ov::Any v;
-        read_any(stream, v);
-        var[k] = v;
+void ov::npuw::orc::serialize(Stream& stream, ov::AnyMap& var) {
+    std::string str;
+    if (stream.output()) {
+        str = ov::npuw::s11n::anyMapToString(var);
+    }
+    stream & str;
+    if (stream.input()) {
+        var = ov::npuw::s11n::stringToAnyMap(str);
     }
 }
 
 // Weightless
 // FIXME: all serialization needs a good rewriting
-void ov::npuw::s11n::write_weightless(std::ostream& stream,
-                                      const std::vector<ov::Tensor>& var,
-                                      const ov::npuw::s11n::WeightsContext& ctx) {
-    write(stream, var.size());
-    for (const auto& t : var) {
-        if (!t) {
-            write(stream, false);
-            continue;
+void ov::npuw::orc::serialize_weightless(Stream& stream,
+                                         std::vector<ov::Tensor>& var,
+                                         const ov::npuw::s11n::WeightsContext& ctx) {
+    if (stream.output()) {
+        auto size = var.size();
+        serialize(stream, size);
+        for (auto& t : var) {
+            if (!t) {
+                bool is_initialized = false;
+                serialize(stream, is_initialized);
+                continue;
+            }
+            bool is_initialized = true;
+            serialize(stream, is_initialized);
+            auto data = t.data();
+            auto iter = ctx.const_to_offset.find(data);
+            if (iter == ctx.const_to_offset.end()) {
+                bool is_weightless = false;
+                serialize(stream, is_weightless);
+                auto tensor = t;
+                serialize(stream, tensor);
+            } else {
+                bool is_weightless = true;
+                serialize(stream, is_weightless);
+                auto elem_type = t.get_element_type().to_string();
+                serialize(stream, elem_type);
+                auto shape = t.get_shape();
+                serialize(stream, shape);
+                auto byte_size = t.get_byte_size();
+                serialize(stream, byte_size);
+                auto offset = iter->second;
+                serialize(stream, offset);
+            }
         }
-        write(stream, true);
-        auto data = t.data();
-        auto iter = ctx.const_to_offset.find(data);
-        if (iter == ctx.const_to_offset.end()) {
-            write(stream, false);
-            write(stream, t);
-        } else {
-            write(stream, true);
-            write(stream, t.get_element_type().to_string());
-            write(stream, t.get_shape());
-            write(stream, t.get_byte_size());
-            write(stream, iter->second);  // offset in weights file
-        }
+        return;
     }
-}
 
-void ov::npuw::s11n::read_weightless(std::istream& stream,
-                                     std::vector<ov::Tensor>& var,
-                                     const ov::npuw::s11n::WeightsContext& ctx) {
     var.clear();
     std::size_t size;
-    read(stream, size);
+    serialize(stream, size);
     for (std::size_t i = 0; i < size; ++i) {
         bool is_initialized = false;
-        read(stream, is_initialized);
+        serialize(stream, is_initialized);
         if (!is_initialized) {
             var.push_back(ov::Tensor());
             continue;
         }
         bool is_weightless = false;
-        read(stream, is_weightless);
+        serialize(stream, is_weightless);
         if (is_weightless) {
             std::string type_str;
-            read(stream, type_str);
+            serialize(stream, type_str);
             ov::element::Type type(type_str);
             ov::Shape shape;
-            read(stream, shape);
+            serialize(stream, shape);
             std::size_t byte_size = 0;
-            read(stream, byte_size);
+            serialize(stream, byte_size);
             std::size_t offset = 0;
-            read(stream, offset);
+            serialize(stream, offset);
             ov::Tensor t(type, shape);
 
+            OPENVINO_ASSERT(byte_size == t.get_byte_size(), "[NPU] ORC weight byte_size does not match tensor shape");
+
             if (ctx.weights) {
-                std::memcpy(t.data(), ctx.weights->get_ptr(offset), byte_size);
+                const auto wsz = ctx.weights->size();
+                OPENVINO_ASSERT(offset <= wsz && byte_size <= wsz - offset,
+                                "[NPU] ORC weight offset/size out of range");
+                if (ctx.bf16_consts.find({offset, byte_size}) != ctx.bf16_consts.end()) {
+                    NPUW_ASSERT(type == ov::element::f16);
+                    // Read original bf16 weight
+                    auto bf16_tensor = ov::Tensor(ov::element::bf16, shape);
+                    NPUW_ASSERT(bf16_tensor.get_byte_size() == byte_size);
+                    std::memcpy(bf16_tensor.data(), ctx.weights->get_ptr(offset), byte_size);
+
+                    NPUW_ASSERT(bf16_tensor.get_size() == t.get_size());
+
+                    // Transform bf16 to f16 tensor
+                    using dst_type = typename element_type_traits<ov::element::Type_t::f16>::value_type;
+                    auto src_data = bf16_tensor.data<ov::bfloat16>();
+                    auto dst_data = t.data<dst_type>();
+                    ov::reference::convert_from_bf16_to_f16_with_clamp(src_data, dst_data, t.get_size());
+                } else {
+                    std::memcpy(t.data(), ctx.weights->get_ptr(offset), byte_size);
+                }
             } else {
                 auto it = ctx.consts_cache.find({offset, byte_size});
                 NPUW_ASSERT(it != ctx.consts_cache.end() && "Couldn't find Constant in cache!");
@@ -445,8 +430,71 @@ void ov::npuw::s11n::read_weightless(std::istream& stream,
             var.push_back(t);
         } else {
             ov::Tensor t;
-            read(stream, t);
+            serialize(stream, t);
             var.push_back(t);
         }
+    }
+}
+
+void ov::npuw::s11n::write_header(std::ostream& stream, const IndicatorType& model_indicator) {
+    write(stream, NPUW_SERIALIZATION_INDICATOR);
+    write(stream, model_indicator);
+    write(stream, OPENVINO_VERSION_MAJOR);
+    write(stream, OPENVINO_VERSION_MINOR);
+    write(stream, OPENVINO_VERSION_PATCH);
+    write(stream, std::string(NPUW_SERIALIZATION_VERSION));
+}
+
+void ov::npuw::s11n::read_and_check_header(std::istream& stream,
+                                           const IndicatorType& expected,
+                                           const std::string& what) {
+    IndicatorType serialization_indicator;
+    read(stream, serialization_indicator);
+    OPENVINO_ASSERT(serialization_indicator == NPUW_SERIALIZATION_INDICATOR, "This blob wasn't serialized via NPUW!");
+
+    IndicatorType model_indicator;
+    read(stream, model_indicator);
+    OPENVINO_ASSERT(model_indicator == expected, "This blob wasn't serialized via ", what, "!");
+
+    int vmajor = 0, vminor = 0, vpatch = 0;
+    std::string s11n_version;
+    read(stream, vmajor);
+    read(stream, vminor);
+    read(stream, vpatch);
+
+    // Generous cap so any past/future version string still reaches the mismatch report below.
+    constexpr std::size_t MAX_S11N_VERSION_SIZE = 64u;
+    auto stream_io = Stream::reader(stream);
+    std::size_t s11n_version_size = 0u;
+    stream_io & s11n_version_size;
+    OPENVINO_ASSERT(s11n_version_size <= MAX_S11N_VERSION_SIZE,
+                    "Corrupted NPUW blob: serialization version string is ",
+                    s11n_version_size,
+                    " bytes, the maximum is ",
+                    MAX_S11N_VERSION_SIZE);
+    s11n_version.resize(s11n_version_size);
+    if (s11n_version_size != 0u) {
+        stream_io.bytes(s11n_version.data(), s11n_version_size);
+    }
+
+    if (vmajor != OPENVINO_VERSION_MAJOR || vminor != OPENVINO_VERSION_MINOR || vpatch != OPENVINO_VERSION_PATCH ||
+        s11n_version != std::string(NPUW_SERIALIZATION_VERSION)) {
+        OPENVINO_THROW("This blob was serialized with a different OV version!",
+                       "\nSerialized by OV ",
+                       vmajor,
+                       '.',
+                       vminor,
+                       '.',
+                       vpatch,
+                       "\nCurrent OV version ",
+                       OPENVINO_VERSION_MAJOR,
+                       '.',
+                       OPENVINO_VERSION_MINOR,
+                       '.',
+                       OPENVINO_VERSION_PATCH,
+                       "\nNPUW serialized by version ",
+                       s11n_version,
+                       "\nNPUW current serialization version ",
+                       NPUW_SERIALIZATION_VERSION);
     }
 }

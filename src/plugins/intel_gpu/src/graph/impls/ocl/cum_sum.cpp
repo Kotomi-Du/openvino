@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,24 +20,27 @@ kernel_selector::cum_sum_axis convert_axis(int64_t axis, size_t rank) {
         case 0: return kernel_selector::cum_sum_axis::BATCH;
         case 1: return kernel_selector::cum_sum_axis::FEATURE;
         case 2:
-            if (rank == 6)
+            if (rank == 6) {
                 return kernel_selector::cum_sum_axis::W;
-            else if (rank == 5)
+            } else if (rank == 5) {
                 return kernel_selector::cum_sum_axis::Z;
-            else
+            } else {
                 return kernel_selector::cum_sum_axis::Y;
+            }
         case 3:
-            if (rank == 6)
+            if (rank == 6) {
                 return kernel_selector::cum_sum_axis::Z;
-            else if (rank == 5)
+            } else if (rank == 5) {
                 return kernel_selector::cum_sum_axis::Y;
-            else
+            } else {
                 return kernel_selector::cum_sum_axis::X;
+            }
         case 4:
-            if (rank == 6)
+            if (rank == 6) {
                 return kernel_selector::cum_sum_axis::Y;
-            else
+            } else {
                 return kernel_selector::cum_sum_axis::X;
+            }
         case 5: return kernel_selector::cum_sum_axis::X;
         default: return kernel_selector::cum_sum_axis::BATCH;
     }
@@ -58,7 +61,7 @@ struct cum_sum_impl : typed_primitive_impl_ocl<cum_sum> {
 
     void load(BinaryInputBuffer& ib) override {
         parent::load(ib);
-        if (is_dynamic() && _kernel_data.kernelName.length() != 0) {
+        if (is_dynamic() && !_kernel_data.kernelName.empty()) {
             auto& kernel_selector = kernel_selector_t::Instance();
             auto kernel_impl = kernel_selector.GetImplementation(_kernel_data.kernelName);
             kernel_impl->GetUpdateDispatchDataFunc(_kernel_data);
@@ -92,6 +95,9 @@ namespace detail {
 
 attach_cum_sum_impl::attach_cum_sum_impl() {
     implementation_map<cum_sum>::add(impl_types::ocl, shape_types::any, typed_primitive_impl_ocl<cum_sum>::create<cum_sum_impl>, {
+        std::make_tuple(data_types::u8, format::bfyx),
+        std::make_tuple(data_types::u8, format::bfzyx),
+        std::make_tuple(data_types::u8, format::bfwzyx),
         std::make_tuple(data_types::i32, format::bfyx),
         std::make_tuple(data_types::i32, format::bfzyx),
         std::make_tuple(data_types::i32, format::bfwzyx),

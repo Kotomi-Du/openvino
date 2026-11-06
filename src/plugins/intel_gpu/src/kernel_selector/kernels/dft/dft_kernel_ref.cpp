@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -187,12 +187,12 @@ ParamsKey DFTKernelRef::GetSupportedKey() const {
 
 bool DFTKernelRef::Validate(const Params& p) const {
     if (p.GetType() != KernelType::DFT) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
-    auto& params = dynamic_cast<const dft_params&>(p);
+    const auto& params = dynamic_cast<const dft_params&>(p);
     if (params.inputs.size() != 1) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     return true;
@@ -215,10 +215,11 @@ JitConstants DFTKernelRef::GetJitConstants(const dft_params& params) const {
         // when axis is negative value, convert to positive.
         if (axis < 0) {
             // RDFT has converted by r + a, others r -1 + a by op specification
-            if (params.mode == dft_params::Mode::real && params.direction == dft_params::Direction::forward)
+            if (params.mode == dft_params::Mode::real && params.direction == dft_params::Direction::forward) {
                 axis = out_rank -1 + axis; // (out_rank-1) is in_rank
-            else
+            } else {
                 axis = in_rank -1 + axis;
+            }
         }
 
         auto inverted_axis = dims_size - axis;

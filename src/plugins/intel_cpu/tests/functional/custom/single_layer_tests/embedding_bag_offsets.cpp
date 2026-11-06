@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -34,18 +34,8 @@ class EmbeddingBagOffsetsLayerCPUTest : public testing::WithParamInterface<embed
 public:
     using Reduction = ov::op::util::EmbeddingBagOffsetsBase::Reduction;
     static std::string getTestCaseName(const testing::TestParamInfo<embeddingBagOffsetsLayerTestParamsSet>& obj) {
-        embeddingBagOffsetsParams params;
-        ElementType netPrecision, indPrecision;
-        std::string targetDevice;
-        std::tie(params, netPrecision, indPrecision, targetDevice) = obj.param;
-
-        InputShape inputShapes;
-        std::vector<size_t> indices, offsets;
-        size_t defaultIndex;
-        bool withWeights, withDefIndex;
-        Reduction reduction;
-        std::tie(inputShapes, indices, offsets, defaultIndex, withWeights, withDefIndex, reduction) = params;
-
+        const auto& [params, netPrecision, indPrecision, targetDevice] = obj.param;
+        const auto& [inputShapes, indices, offsets, defaultIndex, withWeights, withDefIndex, reduction] = params;
         std::ostringstream result;
         result << "IS=" << inputShapes << "_";
         result << "I" << ov::test::utils::vec2str(indices) << "_";
@@ -61,17 +51,10 @@ public:
     }
 
     void SetUp() override {
-        embeddingBagOffsetsParams embParams;
-        ElementType indPrecision;
-        std::tie(embParams, inType, indPrecision, targetDevice) = this->GetParam();
-
-        InputShape inputShapes;
-        std::vector<size_t> indices, offsets;
-        bool withWeights, withDefIndex;
-        Reduction reduction;
-        size_t defaultIndex;
-        std::tie(inputShapes, indices, offsets, defaultIndex, withWeights, withDefIndex, reduction) = embParams;
-
+        const auto& [embParams, _inType, indPrecision, _targetDevice] = this->GetParam();
+        inType = _inType;
+        targetDevice = _targetDevice;
+        const auto& [inputShapes, indices, offsets, defaultIndex, withWeights, withDefIndex, reduction] = embParams;
         selectedType = makeSelectedTypeStr("ref", inType);
         targetDevice = ov::test::utils::DEVICE_CPU;
 
@@ -98,6 +81,18 @@ public:
 TEST_P(EmbeddingBagOffsetsLayerCPUTest, CompareWithRefs) {
     run();
     CheckPluginRelatedResults(compiledModel, "embeddingBagOffsets");
+}
+
+class EmbeddingBagOffsetsLayerNegativeTest : public EmbeddingBagOffsetsLayerCPUTest {};
+
+TEST_P(EmbeddingBagOffsetsLayerNegativeTest, CompareWithRefsNegative) {
+    bool exception_caught = false;
+    set_callback_exception([&exception_caught](const std::exception& ex) {
+        exception_caught = true;
+        EXPECT_NE(dynamic_cast<const ov::Exception*>(&ex), nullptr) << "Expected ov::Exception but got: " << ex.what();
+    });
+    run();
+    EXPECT_TRUE(exception_caught) << "Expected an ov::Exception to be thrown for non-monotonic offsets";
 }
 
 namespace {
@@ -158,6 +153,24 @@ INSTANTIATE_TEST_SUITE_P(smoke_EmbeddingBagOffsets_With_Weights,
 INSTANTIATE_TEST_SUITE_P(smoke_EmbeddingBagOffsets_No_Weights,
                          EmbeddingBagOffsetsLayerCPUTest,
                          ::testing::Combine(embBagOffsetArgSetNoWeights,
+                                            ::testing::ValuesIn(netPrecisions),
+                                            ::testing::ValuesIn(indPrecisions),
+                                            ::testing::Values(ov::test::utils::DEVICE_CPU)),
+                         EmbeddingBagOffsetsLayerCPUTest::getTestCaseName);
+
+const auto embBagOffsetArgSetNegative = ::testing::Combine(
+    ::testing::Values(InputShape{{5, 6}, {{5, 6}}}),
+    ::testing::Values(std::vector<size_t>{0, 2, 3, 4}),
+    ::testing::Values(std::vector<size_t>{0, 3, 2}),  // offsets (non-monotonic: 2 < 3)
+    ::testing::Values(0),
+    ::testing::Values(false),
+    ::testing::Values(false),
+    ::testing::Values(ov::op::util::EmbeddingBagOffsetsBase::Reduction::SUM)
+);
+
+INSTANTIATE_TEST_SUITE_P(smoke_EmbeddingBagOffsets_Negative,
+                         EmbeddingBagOffsetsLayerNegativeTest,
+                         ::testing::Combine(embBagOffsetArgSetNegative,
                                             ::testing::ValuesIn(netPrecisions),
                                             ::testing::ValuesIn(indPrecisions),
                                             ::testing::Values(ov::test::utils::DEVICE_CPU)),

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,7 +8,6 @@
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <string>
-#include <vector>
 
 #include "graph_context.h"
 #include "node.h"
@@ -41,8 +40,8 @@ private:
     bool m_adjoint = false;
 
     /// Shape inference
-    static constexpr size_t INPUT_PORT = 0lu;
-    static constexpr size_t OUTPUT_PORT = 0lu;
+    static constexpr size_t INPUT_PORT = 0LU;
+    static constexpr size_t OUTPUT_PORT = 0LU;
     bool m_const_input = false;
 
     /// General algorithm variables

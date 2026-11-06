@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -441,6 +441,13 @@ protected:
     ///
     /// \return true if constant folding disabled otherwise false.
     bool is_const_fold_disabled() const;
+
+private:
+    /// \brief Make `output_index` addressable, called only by the non-const output().
+    virtual void on_output_access(size_t output_index);
+
+    /// \brief Throw if `output_index` is not addressable.
+    virtual void validate_output_index(size_t output_index) const;
 
 private:
     friend class ov::NodeAccessor;

@@ -1,26 +1,25 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include <plugin/transformations/move_fc_reshape_to_weights.hpp>
+#include "transformations/common_optimizations/move_fc_reshape_to_weights.hpp"
 
 #include <gtest/gtest.h>
 
-#include <string>
-#include <memory>
-
-#include <openvino/core/model.hpp>
-#include "openvino/opsets/opset1_decl.hpp"
-#include <intel_gpu/op/fully_connected.hpp>
 #include <intel_gpu/op/placeholder.hpp>
+#include <memory>
+#include <openvino/core/model.hpp>
+#include <string>
 #include <transformations/init_node_info.hpp>
 #include <transformations/utils/utils.hpp>
 
 #include "common_test_utils/ov_test_utils.hpp"
+#include "intel_gpu/op/fully_connected.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/reshape.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/transpose.hpp"
+#include "openvino/opsets/opset1_decl.hpp"
 
 using namespace testing;
 using namespace ov::intel_gpu;
@@ -32,10 +31,7 @@ using MoveFCReshapeToWeightsParams = std::tuple<std::pair<ov::PartialShape, ov::
 class MoveFCReshapeToWeightsTests : public TransformationTestsF, public WithParamInterface<MoveFCReshapeToWeightsParams> {
 public:
     static std::string get_test_case_name(testing::TestParamInfo<MoveFCReshapeToWeightsParams> obj) {
-        std::pair<ov::PartialShape, ov::Shape> input_shapes;
-        bool add_transpose;
-        bool add_subtract;
-        std::tie(input_shapes, add_transpose, add_subtract) = obj.param;
+        const auto& [input_shapes, add_transpose, add_subtract] = obj.param;
 
         std::ostringstream result;
         result << "Input_shape=(" << input_shapes.first << ")_Weights_shape=(" << input_shapes.second
@@ -76,7 +72,7 @@ public:
             auto transpose_const = ov::opset1::Constant::create(ov::element::i32, {2}, {1, 0});
             weights_path = std::make_shared<ov::opset1::Transpose>(weights_path, transpose_const);
         }
-	auto no_bias = std::make_shared<ov::intel_gpu::op::Placeholder>();
+        auto no_bias = std::make_shared<op::Placeholder>();
 
         auto fully_connected = std::make_shared<op::FullyConnected>(data, weights_path, no_bias);
         return std::make_shared<ov::Model>(ov::OutputVector{fully_connected}, ov::ParameterVector{data});
@@ -85,16 +81,14 @@ public:
 protected:
     void SetUp() override {
         TransformationTestsF::SetUp();
-        std::pair<ov::PartialShape, ov::Shape> input_shapes;
-        bool add_transpose;
-        bool add_subtract;
-        std::tie(input_shapes, add_transpose, add_subtract) = this->GetParam();
+
+        const auto& [input_shapes, add_transpose, add_subtract] = this->GetParam();
 
         ov::Shape ref_weights_shape = input_shapes.second;
         ref_weights_shape.erase(ref_weights_shape.begin());
         model = init_model(input_shapes.first, input_shapes.second, add_transpose, add_subtract, true);
         model_ref = init_model(input_shapes.first, ref_weights_shape, add_transpose, add_subtract, false);
-        manager.register_pass<MoveFCReshapeToWeights>();
+        manager.register_pass<ov::pass::MoveFCReshapeToWeights<op::FullyConnected>>();
     }
 };
 

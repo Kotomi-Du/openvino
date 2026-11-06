@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,7 +16,7 @@ public:
 
     space_to_batch_kernel_selector();
 
-    virtual ~space_to_batch_kernel_selector() {}
+    ~space_to_batch_kernel_selector() override = default;
 
     KernelsData GetBestKernels(const Params& params) const override;
 };

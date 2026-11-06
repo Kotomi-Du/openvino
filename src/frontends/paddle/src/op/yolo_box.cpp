@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include <limits>  // std::numeric_limits
@@ -7,10 +7,7 @@
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/opsets/opset6.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 using namespace opset6;
 using namespace element;
 
@@ -37,7 +34,7 @@ NamedOutputs yolo_box(const NodeContext& node_context) {
     auto const_class_num = Constant::create<int64_t>(i64, {1}, {class_num});
 
     // Paddle anchors attribute is of type int32. Convert to float for computing
-    // convinient.
+    // convenient.
     auto _anchors = node_context.get_attribute<std::vector<int32_t>>("anchors");
 
     std::vector<float> anchors(_anchors.size());
@@ -326,7 +323,4 @@ NamedOutputs yolo_box(const NodeContext& node_context) {
     return outputs;
 }
 
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

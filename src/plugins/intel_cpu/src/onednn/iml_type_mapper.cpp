@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,6 +23,7 @@ impl_desc_type parse_impl_name(std::string impl_desc_name) {
     REPLACE_WORD(brg_conv, brgconv);
     REPLACE_WORD(brdgmm, brgconv);
     REPLACE_WORD(avx10_1_512, avx512);
+    REPLACE_WORD(avx10_2, avx512);
     REPLACE_WORD(brg_matmul, brgemm);
 
     REPLACE_WORD(simple, ref);
@@ -58,7 +59,6 @@ impl_desc_type parse_impl_name(std::string impl_desc_name) {
     SEARCH_WORD(sparse);
     SEARCH_WORD(acl);
     SEARCH_WORD(kleidiai);
-    SEARCH_WORD(shl);
     SEARCH_WORD(asimd);
     SEARCH_WORD(gv);
     if ((res & impl_desc_type::avx2) != impl_desc_type::avx2 &&
@@ -153,8 +153,6 @@ const char* impl_type_to_string(impl_desc_type type) {
     CASE(jit_sve256);
     CASE(jit_sve384);
     CASE(jit_sve512);
-    CASE(shl);
-    CASE(gemm_shl);
     CASE(gv);
     CASE(jit_gv);
     CASE(kleidiai);

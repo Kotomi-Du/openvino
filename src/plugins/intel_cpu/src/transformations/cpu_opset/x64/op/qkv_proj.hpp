@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -43,7 +43,7 @@ public:
     }
 
 private:
-    Config m_config;
+    Config m_config{};
 };
 
 }  // namespace ov::intel_cpu

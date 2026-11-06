@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -74,11 +74,11 @@ void ROIAlignRotated::executeImpl() {
     const size_t batch_indices_size = getSrcMemoryAtPort(2)->getShape().getElementsCount();
 
     std::vector<int64_t> batch_indices_vec_scaled_up(batch_indices_size);
-    cpu_convert(getSrcMemoryAtPort(2)->getData(),
-                batch_indices_vec_scaled_up.data(),
-                getSrcMemoryAtPort(2)->getPrecision(),
-                ov::element::i64,
-                batch_indices_size);
+    cpu_parallel_convert(getSrcMemoryAtPort(2)->getData(),
+                         batch_indices_vec_scaled_up.data(),
+                         getSrcMemoryAtPort(2)->getPrecision(),
+                         ov::element::i64,
+                         batch_indices_size);
 
     ov::reference::roi_align<T, ov::reference::roi_policy::ROIAlignRotatedOpDefPolicy>(
         getSrcDataAtPortAs<const T>(0),
@@ -98,7 +98,7 @@ void ROIAlignRotated::executeImpl() {
         clockwiseMode);
 }
 
-void ROIAlignRotated::execute(const dnnl::stream& /*strm*/) {
+void ROIAlignRotated::execute([[maybe_unused]] const dnnl::stream& strm) {
     const ov::element::Type type = getOriginalInputPrecisionAtPort(0);
     executeImpl<ov::element::f32>();
 
@@ -113,7 +113,7 @@ void ROIAlignRotated::execute(const dnnl::stream& /*strm*/) {
         CASE(f32);
         CASE(f64);
     default:
-        THROW_CPU_NODE_ERR("Unhandled data type ", type, " in execute()");
+        CPU_NODE_THROW("Unhandled data type ", type, " in execute()");
     }
 #undef CASE
 }

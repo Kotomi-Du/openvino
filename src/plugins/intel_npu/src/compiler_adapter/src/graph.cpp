@@ -1,50 +1,120 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "graph.hpp"
 
+#include <iterator>
+
 #include "intel_npu/config/options.hpp"
-#include "intel_npu/utils/zero/zero_api.hpp"
-#include "openvino/runtime/make_tensor.hpp"
+#include "intel_npu/utils/utils.hpp"
+#include "intel_npu/utils/zero/zero_cmd_queue_pool.hpp"
+#include "intel_npu/utils/zero/zero_utils.hpp"
 
 namespace intel_npu {
 
 Graph::Graph(const std::shared_ptr<ZeGraphExtWrappers>& zeGraphExt,
              const std::shared_ptr<ZeroInitStructsHolder>& zeroInitStruct,
-             ze_graph_handle_t graphHandle,
+             const GraphDescriptor& graphDesc,
              NetworkMetadata metadata,
              std::optional<ov::Tensor> blob,
-             bool blobAllocatedByPlugin,
-             const Config& config,
-             const ov::SoPtr<ICompiler>& compiler)
-    : IGraph(graphHandle, std::move(metadata), config, std::move(blob)),
+             const std::optional<std::string>& compatibilityDescriptor,
+             const bool blobIsPersistent,
+             const std::shared_ptr<IProfilingDecoder>& profilingDecoder)
+    : IGraph(),
       _zeGraphExt(zeGraphExt),
       _zeroInitStruct(zeroInitStruct),
-      _blobAllocatedByPlugin(blobAllocatedByPlugin),
-      _compiler(compiler),
-      _logger("Graph", config.get<LOG_LEVEL>()) {
-    if (!config.get<CREATE_EXECUTOR>() || config.get<DEFER_WEIGHTS_LOAD>()) {
-        _logger.info("Graph initialize is deferred from the \"Graph\" constructor");
+      _graphDesc(graphDesc),
+      _metadata(std::move(metadata)),
+      _blob(std::move(blob)),
+      _compatibilityDescriptor(compatibilityDescriptor),
+      _profilingDecoder(profilingDecoder),
+      _blobIsPersistent(blobIsPersistent),
+      _logger("Graph", Logger::global().level()) {}
+
+const NetworkMetadata& Graph::get_metadata() const {
+    return _metadata;
+}
+
+void Graph::update_network_name(std::string_view name) {
+    _metadata.name = name;
+}
+
+CommandQueueDesc Graph::get_command_queue_desc() const {
+    std::lock_guard<std::mutex> lock(_commandQueueDescMutex);
+    return _commandQueueDesc;
+}
+
+void Graph::set_workload_type(const ov::WorkloadType workloadType) {
+    OPENVINO_ASSERT(_zeroInitStruct, "Driver is not initialized");
+
+    std::lock_guard<std::mutex> lock(_commandQueueDescMutex);
+    auto zeWorkloadType = zeroUtils::toZeQueueWorkloadType(workloadType);
+
+    // If the graph already holds a command queue, that queue is the one used for execution,
+    // so the workload type must be applied directly on it.
+    if (_commandQueue && zeWorkloadType.has_value()) {
+        // When shared common queue is disabled, workload type is set per command queue.
+        // Update the existing queue if it has already been created.
+        _commandQueue->setWorkloadType(zeWorkloadType.value());
+        _workloadType = workloadType;
         return;
     }
 
-    initialize(config);
+    // Otherwise, the command queue is not created yet. Update the command queue descriptor,
+    // since it will be used to create the command queue later.
+    _commandQueueDesc.setWorkload(zeWorkloadType);
 }
 
-size_t Graph::export_blob(std::ostream& stream) const {
+void Graph::set_model_priority(const ov::hint::Priority modelPriority) {
+    OPENVINO_ASSERT(_zeroInitStruct, "Driver is not initialized");
+
+    std::lock_guard<std::mutex> lock(_commandQueueDescMutex);
+    auto zeModelPriority = zeroUtils::toZeQueuePriority(modelPriority);
+
+    // If the graph already holds a command queue, that queue is the one used for execution,
+    // so the priority must be applied on it (directly, or by recreating it on legacy drivers).
+    if (_commandQueue) {
+        if (_zeroInitStruct->isCommandQueueSetPrioritySupported()) {
+            _commandQueue->setPriority(zeModelPriority);
+            return;
+        }
+
+        // Legacy behavior: Create new command queue if setPriority is not supported.
+        // When shared common queue is disabled, workload type is set per command queue.
+        // Recreate the queue with the new priority while preserving the current workload type.
+        if (_workloadType.has_value()) {
+            auto zeWorkloadType = zeroUtils::toZeQueueWorkloadType(_workloadType.value());
+            _commandQueueDesc.setWorkload(zeWorkloadType);
+            _workloadType = std::nullopt;  // Clear the cached workload type after applying it to the new queue
+        }
+
+        _commandQueueDesc.setPriority(zeModelPriority);
+        _commandQueue = ZeroCmdQueuePool::getInstance().getCommandQueue(_zeroInitStruct, _commandQueueDesc);
+    }
+
+    // Otherwise, the command queue is not created yet. Update the command queue descriptor,
+    // since it will be used to create the command queue later.
+    _commandQueueDesc.setPriority(zeModelPriority);
+}
+
+void* Graph::get_handle() const {
+    return _graphDesc._handle;
+}
+
+std::pair<uint64_t, std::optional<std::vector<uint64_t>>> Graph::export_blob(std::ostream& stream) const {
     const uint8_t* blobPtr = nullptr;
     size_t blobSize;
     std::vector<uint8_t> blobVec;  // plugin needs to keep a copy of the blob for older drivers
 
     if (_blobIsReleased) {
-        OPENVINO_THROW("Model was optimized away. Try importing it using `ov::hint::compiled_blob` property to extend "
-                       "its lifetime.");
+        OPENVINO_THROW("Model was imported and released after initialization. Model export is not allowed anymore.");
     }
 
-    if (_blob ==
-        std::nullopt) {  // when compiling the model using Compiler in Driver, the blob is handled by the driver
-        _zeGraphExt->getGraphBinary(_handle, blobVec, blobPtr, blobSize);
+    if (_blob == std::nullopt) {
+        OPENVINO_ASSERT(_zeGraphExt != nullptr, "Zero compiler adapter wasn't initialized");
+        // when compiling the model using Compiler in Driver, the blob is handled by the driver
+        _zeGraphExt->getGraphBinary(_graphDesc, blobVec, blobPtr, blobSize);
     } else {  // in all other cases, the blob is handled by the plugin
         blobPtr = static_cast<const uint8_t*>(_blob->data());
         blobSize = _blob->get_byte_size();
@@ -57,7 +127,7 @@ size_t Graph::export_blob(std::ostream& stream) const {
 
     if (!stream) {
         _logger.error("Write blob to stream failed. Blob is broken!");
-        return 0;
+        return std::make_pair(0, std::nullopt);
     }
 
     if (_logger.level() >= ov::log::Level::INFO) {
@@ -65,93 +135,92 @@ size_t Graph::export_blob(std::ostream& stream) const {
         for (const uint8_t* it = blobPtr; it != blobPtr + blobSize; ++it) {
             result = ((result << 7) + result) + static_cast<uint32_t>(*it);
         }
-
-        std::stringstream str;
-        str << "Blob size: " << blobSize << ", hash: " << std::hex << result;
-        _logger.info(str.str().c_str());
+        _logger.info("Blob size: %zu, hash: %x", blobSize, result);
     }
+
+    size_t size = utils::align_size_to_standard_page_size(blobSize);
+    size_t paddingSize = size - blobSize;
+    if (paddingSize > 0) {
+        std::fill_n(std::ostream_iterator<char>(stream), paddingSize, 0);
+
+        if (!stream) {
+            _logger.error("Write padding to stream failed. Blob is broken!");
+            return std::make_pair(0, std::nullopt);
+        }
+
+        _logger.info("Blob size with padding: %zu", size);
+    }
+
     _logger.info("Write blob to stream successfully.");
-    return blobSize;
+    return std::make_pair(size, std::nullopt);
 }
 
-std::vector<ov::ProfilingInfo> Graph::process_profiling_output(const std::vector<uint8_t>& profData,
-                                                               const Config& config) const {
-    if (_compiler == nullptr) {
-        OPENVINO_THROW("Profiling post-processing is not supported.");
-    }
-
-    std::vector<uint8_t> blob(_blob->get_byte_size());
-    blob.assign(reinterpret_cast<const uint8_t*>(_blob->data()),
-                reinterpret_cast<const uint8_t*>(_blob->data()) + _blob->get_byte_size());
-    return _compiler->process_profiling_output(profData, blob, config);
+std::vector<ov::ProfilingInfo> Graph::process_profiling_output(const std::vector<uint8_t>& profData) const {
+    OPENVINO_ASSERT(_profilingDecoder != nullptr, "No VCL profiling decoder is available for this graph");
+    OPENVINO_ASSERT(_blob.has_value(), "VCL profiling decoder requires the compiled network blob");
+    return _profilingDecoder->decode(profData, _blob.value());
 }
 
-void Graph::set_argument_value(uint32_t argi, const void* argv) const {
+bool Graph::has_profiling_decoder() const {
+    return _profilingDecoder != nullptr;
+}
+
+void Graph::set_argument_value(uint32_t id, const void* data) const {
     if (_zeGraphExt == nullptr) {
         OPENVINO_THROW("Zero compiler adapter wasn't initialized");
     }
-    _zeGraphExt->setGraphArgumentValue(_handle, argi, argv);
+    _zeGraphExt->setGraphArgumentValue(_graphDesc, id, data);
 }
 
-void Graph::initialize(const Config& config) {
+void Graph::set_argument_value_with_strides(uint32_t id, const void* data, const std::vector<size_t>& strides) const {
+    if (_zeGraphExt == nullptr) {
+        OPENVINO_THROW("Zero compiler adapter wasn't initialized");
+    }
+    _zeGraphExt->setGraphArgumentValueWithStrides(_graphDesc, id, data, strides);
+}
+
+void Graph::initialize_impl(const Config& config) {
     _logger.debug("Graph initialize start");
 
-    if (_zeGraphExt == nullptr || _handle == nullptr) {
+    if (_zeGraphExt == nullptr || _graphDesc._handle == nullptr || _zeroInitStruct == nullptr) {
+        // To ensure that no issues are thrown during subsequent calls.
         return;
     }
 
-    _logger.debug("performing pfnGetProperties");
-    ze_graph_properties_t props{};
-    props.stype = ZE_STRUCTURE_TYPE_GRAPH_PROPERTIES;
-    auto result = _zeroInitStruct->getGraphDdiTable().pfnGetProperties(_handle, &props);
-    THROW_ON_FAIL_FOR_LEVELZERO_EXT("pfnGetProperties", result, _zeroInitStruct->getGraphDdiTable());
-
-    _logger.debug("performing pfnGetArgumentProperties3");
-    for (uint32_t index = 0; index < props.numGraphArgs; ++index) {
-        ze_graph_argument_properties_3_t arg3{};
-        arg3.stype = ZE_STRUCTURE_TYPE_GRAPH_ARGUMENT_PROPERTIES;
-        auto result = _zeroInitStruct->getGraphDdiTable().pfnGetArgumentProperties3(_handle, index, &arg3);
-        THROW_ON_FAIL_FOR_LEVELZERO_EXT("pfnGetArgumentProperties3", result, _zeroInitStruct->getGraphDdiTable());
-
-        if (arg3.type == ZE_GRAPH_ARGUMENT_TYPE_INPUT) {
-            _input_descriptors.push_back(ArgumentDescriptor{arg3, index});
+    bool sharedCommonQueue = config.get<SHARED_COMMON_QUEUE>();
+    uint32_t commandQueueOptions = 0;
+    if (config.get<TURBO>() && _zeroInitStruct->getCommandQueueDdiTable().version() >= ZE_MAKE_VERSION(1, 0)) {
+        _logger.debug("Set ZE_NPU_COMMAND_QUEUE_OPTION_TURBO in command queue options");
+        commandQueueOptions = commandQueueOptions | ZE_NPU_COMMAND_QUEUE_OPTION_TURBO;
+    }
+    if (config.get<RUN_INFERENCES_SEQUENTIALLY>()) {
+        if (_zeroInitStruct->getCommandQueueDdiTable().version() >= ZE_MAKE_VERSION(1, 1)) {
+            _logger.debug("Set ZE_NPU_COMMAND_QUEUE_OPTION_DEVICE_SYNC in command queue options");
+            commandQueueOptions = commandQueueOptions | ZE_NPU_COMMAND_QUEUE_OPTION_DEVICE_SYNC;
         } else {
-            _output_descriptors.push_back(ArgumentDescriptor{arg3, index});
+            OPENVINO_ASSERT(!sharedCommonQueue,
+                            "RUN_INFERENCES_SEQUENTIALLY requires a command queue with device-sync support when "
+                            "SHARED_COMMON_QUEUE is enabled");
         }
     }
 
-    _input_descriptors.shrink_to_fit();
-    _output_descriptors.shrink_to_fit();
+    {
+        std::lock_guard<std::mutex> lock(_commandQueueDescMutex);
+        _commandQueueDesc = CommandQueueDesc{
+            zeroUtils::toZeQueuePriority(config.get<MODEL_PRIORITY>()),
+            config.has<WORKLOAD_TYPE>() ? zeroUtils::toZeQueueWorkloadType(config.get<WORKLOAD_TYPE>()) : std::nullopt,
+            commandQueueOptions,
+            this,
+            sharedCommonQueue,
+        };
 
-    _command_queue_group_ordinal =
-        zeroUtils::findCommandQueueGroupOrdinal(_zeroInitStruct->getDevice(),
-                                                ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE);
-
-    uint32_t command_queue_options = 0;
-
-    if (config.has<TURBO>() && config.get<TURBO>()) {
-        if (_zeroInitStruct->getCommandQueueDdiTable().version() < ZE_MAKE_VERSION(1, 0)) {
-            OPENVINO_THROW("Turbo is not supported by the current driver");
+        if (sharedCommonQueue == false) {
+            // Keep it alive per compiled model when the shared common queue feature is disabled.
+            _commandQueue = ZeroCmdQueuePool::getInstance().getCommandQueue(_zeroInitStruct, _commandQueueDesc);
         }
-        command_queue_options = command_queue_options | ZE_NPU_COMMAND_QUEUE_OPTION_TURBO;
     }
 
-    if (_zeroInitStruct->getCommandQueueDdiTable().version() >= ZE_MAKE_VERSION(1, 1) &&
-        config.has<RUN_INFERENCES_SEQUENTIALLY>() && config.get<RUN_INFERENCES_SEQUENTIALLY>()) {
-        command_queue_options = command_queue_options | ZE_NPU_COMMAND_QUEUE_OPTION_DEVICE_SYNC;
-    }
-
-    _command_queue = std::make_shared<CommandQueue>(_zeroInitStruct,
-                                                    zeroUtils::toZeQueuePriority(config.get<MODEL_PRIORITY>()),
-                                                    _command_queue_group_ordinal,
-                                                    command_queue_options);
-
-    if (config.has<WORKLOAD_TYPE>()) {
-        set_workload_type(config.get<WORKLOAD_TYPE>());
-    }
-
-    _zeGraphExt->initializeGraph(_handle, _command_queue_group_ordinal);
-
+    _zeGraphExt->initializeGraph(_graphDesc);
     _logger.debug("Graph initialize finish");
 
     //  We are allowed to release the original blob because weights were loaded in NPU memory during
@@ -159,31 +228,23 @@ void Graph::initialize(const Config& config) {
     //  releasing it here to avoid unnecessary memory usage.
     _blobIsReleased = release_blob(config);
 
-    _batch_size = get_batch_size(_metadata);
-
-    if (_zeroInitStruct->getCommandQueueDdiTable().version() < ZE_MAKE_VERSION(1, 1) &&
-        config.get<RUN_INFERENCES_SEQUENTIALLY>()) {
-        auto number_of_command_lists = _batch_size.has_value() ? *_batch_size : 1;
-
-        _last_submitted_event.resize(number_of_command_lists);
+    if (!_batchSize.has_value()) {
+        _batchSize = determine_batch_size();
     }
+
+    if (config.get<RUN_INFERENCES_SEQUENTIALLY>() &&
+        _zeroInitStruct->getCommandQueueDdiTable().version() < ZE_MAKE_VERSION(1, 1)) {
+        auto numberOfCommandLists = _batchSize.has_value() ? *_batchSize : 1;
+
+        _lastSubmittedEvent.resize(numberOfCommandLists);
+    }
+    // To ensure that the initialization of the graph does not exit prematurely due to nullptrs
+    _init_completed.store(true, std::memory_order_release);
 }
 
 bool Graph::release_blob(const Config& config) {
-    if (!_blobAllocatedByPlugin) {
-        return false;
-    }
-
-    if (_blob == std::nullopt || _zeroInitStruct->getGraphDdiTable().version() < ZE_GRAPH_EXT_VERSION_1_8 ||
-        config.get<PERF_COUNT>()) {
-        return false;
-    }
-
-    ze_graph_properties_2_t properties = {};
-    properties.stype = ZE_STRUCTURE_TYPE_GRAPH_PROPERTIES;
-    _zeroInitStruct->getGraphDdiTable().pfnGetProperties2(_handle, &properties);
-
-    if (~properties.initStageRequired & ZE_GRAPH_STAGE_INITIALIZE) {
+    if (_blobIsPersistent || _blob == std::nullopt || config.get<PERF_COUNT>() || _zeGraphExt == nullptr ||
+        _zeGraphExt->isBlobDataImported(_graphDesc) || !_zeGraphExt->isInitStageRequired(_graphDesc)) {
         return false;
     }
 
@@ -193,22 +254,122 @@ bool Graph::release_blob(const Config& config) {
     return true;
 };
 
+void Graph::set_last_submitted_event(const std::shared_ptr<Event>& event, size_t indexOfCommandList) {
+    _lastSubmittedEvent[indexOfCommandList] = event;
+}
+
+const std::shared_ptr<Event>& Graph::get_last_submitted_event(size_t indexOfCommandList) const {
+    return _lastSubmittedEvent[indexOfCommandList];
+}
+
+void Graph::resize_last_submitted_event(size_t batch) {
+    _lastSubmittedEvent.resize(batch);
+}
+
+void Graph::set_batch_size(std::size_t batch) {
+    _batchSize = batch;
+}
+
+uint32_t Graph::get_unique_id() {
+    return _uniqueId++;
+}
+
+void Graph::set_last_submitted_id(uint32_t id_index) {
+    _lastSubmittedId = id_index;
+}
+
+uint32_t Graph::get_last_submitted_id() const {
+    return _lastSubmittedId;
+}
+
+std::optional<std::string_view> Graph::get_compatibility_descriptor() const {
+    return _compatibilityDescriptor;
+}
+
+std::optional<bool> Graph::is_profiling_blob() const {
+    std::optional<bool> profilingEnabled;
+
+    if (_zeGraphExt != nullptr) {
+        profilingEnabled = _zeGraphExt->isProfilingEnabled(_graphDesc);
+    }
+
+    if (!profilingEnabled.has_value()) {
+        _logger.debug("Cannot determine if the blob was compiled for profiling");
+    }
+
+    return profilingEnabled;
+}
+
+std::optional<size_t> Graph::determine_batch_size() {
+    if (!_metadata.outputs.at(0).shapeFromIRModel.has_value()) {
+        _logger.debug("Batching on the plugin is not used, batching is handled by the compiler");
+        return std::nullopt;
+    }
+
+    const ov::PartialShape& firstShape = *_metadata.outputs.at(0).shapeFromIRModel;
+    if (firstShape.is_dynamic() || firstShape.rank().get_length() == 0) {
+        return std::nullopt;
+    }
+
+    const size_t candidateBatchSize = firstShape[utils::BATCH_AXIS].get_max_length();
+    if (candidateBatchSize == 0 || candidateBatchSize == utils::DEFAULT_BATCH_SIZE) {
+        _logger.debug("Batching on the plugin is not used, batching is handled by the compiler");
+        return std::nullopt;
+    }
+
+    auto checkDescriptorsUseCandidateBatchSize = [candidateBatchSize](const std::vector<IODescriptor>& descriptors) {
+        for (const IODescriptor& descriptor : descriptors) {
+            OPENVINO_ASSERT(descriptor.shapeFromIRModel.has_value(),
+                            "Missing value for the \"shapeFromIRModel\" attribute, I/O descriptor");
+
+            const ov::PartialShape& shapeFromCompiler = descriptor.shapeFromCompiler;
+            const ov::PartialShape& shapeFromIRModel = *descriptor.shapeFromIRModel;
+
+            if (shapeFromCompiler.is_dynamic() || shapeFromCompiler.rank().get_length() == 0 ||
+                *shapeFromCompiler.begin() != utils::DEFAULT_BATCH_SIZE) {
+                return false;
+            }
+
+            if (!descriptor.isStateInput && !descriptor.isStateOutput && !descriptor.isShapeTensor) {
+                if (shapeFromIRModel.is_dynamic() || shapeFromIRModel.rank().get_length() == 0 ||
+                    *shapeFromIRModel.begin() != candidateBatchSize) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    };
+
+    if (!checkDescriptorsUseCandidateBatchSize(_metadata.inputs) ||
+        !checkDescriptorsUseCandidateBatchSize(_metadata.outputs)) {
+        _logger.debug("Batching on the plugin is not used, batching is handled by the compiler");
+        return std::nullopt;
+    }
+
+    _logger.debug("Batching is handled by the plugin");
+
+    return candidateBatchSize;
+}
+
+const std::optional<std::size_t> Graph::get_batch_size() const {
+    return _batchSize;
+}
+
+void Graph::evict_memory() {
+    if (_zeGraphExt != nullptr) {
+        _zeGraphExt->evict_memory(_graphDesc);
+    }
+}
+
 Graph::~Graph() {
     // make sure all the context-dependent components are destroyed before the zero context is destroyed
-    if (_handle != nullptr) {
-        auto result = _zeGraphExt->destroyGraph(_handle);
-
-        if (ZE_RESULT_SUCCESS == result) {
-            _handle = nullptr;
-        }
+    if (_zeGraphExt != nullptr) {
+        _zeGraphExt->destroyGraph(_graphDesc);
     }
 
-    if (!_last_submitted_event.empty()) {
-        _last_submitted_event.clear();
-    }
-
-    if (_command_queue != nullptr) {
-        _command_queue.reset();
+    if (!_lastSubmittedEvent.empty()) {
+        _lastSubmittedEvent.clear();
     }
 }
 

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,7 +6,7 @@
 
 #include "openvino/core/type.hpp"
 #include "openvino/opsets/opset.hpp"
-#include "openvino/util/common_util.hpp"
+#include "openvino/util/hash_util.hpp"
 
 TEST(type_info, compare_old_type) {
     ov::DiscreteTypeInfo type1("type1");

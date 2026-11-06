@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,9 +11,7 @@
 #include "openvino/core/runtime_attribute.hpp"
 #include "openvino/frontend/tensorflow_lite/visibility.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow_lite {
+namespace ov::frontend::tensorflow_lite {
 
 class TENSORFLOW_LITE_FRONTEND_API QuantizationInfo : public ov::RuntimeAttribute {
 public:
@@ -56,6 +54,4 @@ private:
     int64_t m_axis{};
     bool m_disabled = false;
 };
-}  // namespace tensorflow_lite
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow_lite

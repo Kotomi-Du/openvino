@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,18 +9,19 @@ namespace kernel_selector {
 
 bool PermuteKernelBase::Validate(const Params& p) const {
     if (p.GetType() != KernelType::PERMUTE) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
     const permute_params& params = static_cast<const permute_params&>(p);
-    for (auto& fused_op : params.fused_ops) {
+    for (const auto& fused_op : params.fused_ops) {
         if (!IsFusedPrimitiveSupported(fused_op)) {
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 
-    auto supported_dyn_layouts = {DataLayout::bfyx, DataLayout::bfzyx, DataLayout::bfwzyx};
-    if (params.has_dynamic_tensors() && (!layout_is_one_of(params.inputs, supported_dyn_layouts) || !layout_is_one_of(params.outputs, supported_dyn_layouts)))
-        return false;
+    auto supported_dyn_layouts = {DataLayout::bfyx, DataLayout::byxf, DataLayout::bfzyx, DataLayout::bfwzyx, DataLayout::bfuwzyx, DataLayout::bfvuwzyx};
+    if (params.has_dynamic_tensors() && (!layout_is_one_of(params.inputs, supported_dyn_layouts) || !layout_is_one_of(params.outputs, supported_dyn_layouts))) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,6 +18,21 @@ namespace py = pybind11;
 using PyRTMap = ov::Node::RTMap;
 
 PYBIND11_MAKE_OPAQUE(PyRTMap);
+
+// \brief Pybind11 subclass of RTMap used as the return type of ConstOutput::get_rt_info().
+//
+// The C++ base is empty and is never used for data storage; all map operations
+// are forwarded through the `actual` pointer to the real tensor RTMap owned by the node.
+// Storing `owner` (the Python ConstOutput object) keeps the node alive.
+struct ConstRTMapView : public ov::RTMap {
+    ov::RTMap* actual;  // non-owning pointer to the real RTMap
+    py::object owner;   // Python ConstOutput that owns the node
+
+    ConstRTMapView(ov::RTMap& map, py::object owner_obj)
+        : ov::RTMap(), actual(&map), owner(std::move(owner_obj)) {}
+};
+
+void regclass_graph_ConstOutputRTMap(py::module m);
 
 // this function is overloaded in the corresponding cpp file with T=ov::Node
 // it exposes additional functions with T = ov::Node, which are undefined with T = const ov::Node
@@ -92,8 +107,8 @@ void regclass_graph_Output(py::module m, std::string typestring)
                R"(
                 The tensor names associated with this output.
 
-                :return: Set of tensor names.
-                :rtype: Set[str]
+                :return: set of tensor names.
+                :rtype: set[str]
                )");
     output.def("get_element_type",
                &ov::Output<VT>::get_element_type,
@@ -127,8 +142,8 @@ void regclass_graph_Output(py::module m, std::string typestring)
                 A set containing handles for all inputs, targeted by the output,
                 referenced by this output handle.
 
-                :return: Set of Inputs.
-                :rtype: Set[openvino.Input]
+                :return: set of Inputs.
+                :rtype: set[openvino.Input]
                )");
     output.def("_from_node", [](const std::shared_ptr<ov::Node>& node) {
                return ov::Output<ov::Node>(node);
@@ -142,15 +157,6 @@ void regclass_graph_Output(py::module m, std::string typestring)
                 :return: Tensor of the output.
                 :rtype: openvino._pyopenvino.DescriptorTensor
                )");
-    output.def("get_rt_info",
-             (ov::RTMap & (ov::Output<VT>::*)()) &  ov::Output<VT>::get_rt_info,
-             py::return_value_policy::reference_internal,
-             R"(
-                Returns RTMap which is a dictionary of user defined runtime info.
-
-                :return: A dictionary of user defined data.
-                :rtype: openvino.RTMap
-             )");
     output.def("__repr__", [](const ov::Output<VT>& self) {
         std::stringstream shape_type_ss;
 
@@ -169,15 +175,7 @@ void regclass_graph_Output(py::module m, std::string typestring)
     output.def_property_readonly("partial_shape", &ov::Output<VT>::get_partial_shape, py::return_value_policy::copy);
     output.def_property_readonly("target_inputs", &ov::Output<VT>::get_target_inputs);
     output.def_property_readonly("tensor", &ov::Output<VT>::get_tensor);
-    output.def_property_readonly("rt_info",
-                                (ov::RTMap&(ov::Output<VT>::*)()) &
-                                ov::Output<VT>::get_rt_info,
-                                py::return_value_policy::reference_internal);
-    output.def_property_readonly("rt_info",
-                                (const ov::RTMap&(ov::Output<VT>::*)() const) &
-                                ov::Output<VT>::get_rt_info,
-                                py::return_value_policy::reference_internal);
 
-    // define functions avaliable only for specific type
+    // define functions available only for specific type
     def_type_dependent_functions<VT>(output);
 }

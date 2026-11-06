@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,9 +8,7 @@
 #include "openvino/frontend/frontend.hpp"
 #include "openvino/frontend/tensorflow_lite/visibility.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow_lite {
+namespace ov::frontend::tensorflow_lite {
 
 class ConversionExtension : public ConversionExtensionBase {
 public:
@@ -32,6 +30,4 @@ private:
     ov::frontend::CreatorFunction m_converter;
 };
 
-}  // namespace tensorflow_lite
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow_lite

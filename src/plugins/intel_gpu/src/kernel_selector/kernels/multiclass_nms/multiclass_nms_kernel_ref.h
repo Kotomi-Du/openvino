@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -28,7 +28,7 @@ class MulticlassNmsKernelRef : public KernelBaseOpenCL {
 public:
     MulticlassNmsKernelRef() : KernelBaseOpenCL("multiclass_nms_ref") {}
 
-    ~MulticlassNmsKernelRef() = default;
+    ~MulticlassNmsKernelRef() override = default;
 
     using DispatchData = CommonDispatchData;
 

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,6 +8,7 @@
 #include "openvino/core/rt_info.hpp"
 #include "openvino/core/validation_util.hpp"
 #include "openvino/frontend/pytorch/visibility.hpp"
+#include "openvino/frontend/sequence_mark.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/broadcast.hpp"
 #include "openvino/op/concat.hpp"
@@ -28,31 +29,16 @@
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace pass {
+namespace ov::frontend::pytorch::pass {
 
 using namespace ov::op;
 
-namespace {
-Output<Node> generate_zeros_with_convertlike(ov::pass::NodeRegistry& rg,
-                                             const Output<Node> sizes,
-                                             const Output<Node> tensor_of_type) {
-    auto const_0 = v0::Constant::create(element::i32, Shape{}, {0});
-    auto zeros = rg.make<v3::Broadcast>(const_0, sizes);
-    return rg.make<v1::ConvertLike>(zeros, tensor_of_type);
-}
-}  // namespace
-
 AtenIndexPutReplacer::AtenIndexPutReplacer() {
-    auto index_op = ov::pass::pattern::wrap_type<ov::op::util::FrameworkNode>();
+    auto index_op = ov::pass::pattern::wrap_type<ov::op::util::FrameworkNode>(
+        fw_node_predicate({"aten::index_put_", "aten.index_put.default", "aten.index_put_.default"}));
 
     ov::matcher_pass_callback callback = [](ov::pass::pattern::Matcher& m) {
-        auto index_op = cast_fw_node(m.get_match_root(), {"aten::index_put_", "aten.index_put.default"});
-        if (!index_op) {
-            return false;
-        }
+        auto index_op = m.get_match_root();
 
         NodeVector rt_copy_from;
         ov::pass::NodeRegistry rg;
@@ -78,9 +64,11 @@ AtenIndexPutReplacer::AtenIndexPutReplacer() {
 
         int64_t indices_list_len;
         OutputVector indices_inputs;
-        if (auto listconstruct = cast_fw_node(indices.get_node_shared_ptr(), "prim::ListConstruct")) {
-            rt_copy_from.push_back(listconstruct);
-            indices_inputs = listconstruct->input_values();
+
+        // Check for SequenceMark
+        if (auto seq_mark = ov::as_type_ptr<SequenceMark>(indices.get_node_shared_ptr())) {
+            rt_copy_from.push_back(seq_mark);
+            indices_inputs = seq_mark->input_values();
             indices_list_len = static_cast<int64_t>(indices_inputs.size());
         } else {
             auto indices_partial_shape = indices.get_partial_shape();
@@ -120,6 +108,18 @@ AtenIndexPutReplacer::AtenIndexPutReplacer() {
                 dims_with_value_idx.push_back(idx);
                 indices_inputs_without_nones.push_back(indices_inputs[idx]);
             }
+        }
+
+        // In some exported graphs, when index_put_ is used with None indices, shape of values
+        // might be missing the first dimension of 1. For example, a value shape can be provided
+        // as (x,y,z) instead of (1,x,y,z). Both cases are valid for aten.index_put_.default.
+        auto input_rank = input.get_partial_shape().rank();
+        auto values_rank = values.get_partial_shape().rank();
+        if (static_cast<int64_t>(dims_with_none_idx.size()) > 0 && input_rank.is_static() && values_rank.is_static() &&
+            input_rank.get_length() > 1 && input_rank.get_length() == values_rank.get_length() + 1 &&
+            static_cast<int64_t>(dims_with_none_idx.size()) == indices_list_len - 1 &&
+            !(is_none_node(indices_inputs[indices_list_len - 1]))) {
+            values = rg.make<v0::Unsqueeze>(values, const_0);
         }
 
         std::vector<int64_t> perm_vector_before;
@@ -241,9 +241,7 @@ AtenIndexPutReplacer::AtenIndexPutReplacer() {
 
         std::shared_ptr<ov::Node> result;
         if (accumulate) {
-            auto zeros = generate_zeros_with_convertlike(rg, input_shape, input);
-            auto scatter = rg.make<v3::ScatterNDUpdate>(zeros, index, values);
-            result = rg.make<v1::Add>(input, scatter);
+            result = rg.make<v15::ScatterNDUpdate>(input, index, values, v15::ScatterNDUpdate::Reduction::SUM);
         } else {
             result = rg.make<v3::ScatterNDUpdate>(input, index, values);
         }
@@ -263,7 +261,4 @@ AtenIndexPutReplacer::AtenIndexPutReplacer() {
     this->register_matcher(m, callback);
 }
 
-}  // namespace pass
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::pass

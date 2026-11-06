@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -646,15 +646,15 @@ using OVGetMetricPropsTest_CACHING_PROPERTIES = OVClassBaseTestP;
 TEST_P(OVGetMetricPropsTest_CACHING_PROPERTIES, smoke_GetMetricAndPrintNoThrow) {
     ov::Core ie = ov::test::utils::create_core();
     std::vector<ov::PropertyName> caching_properties = {};
-    const std::vector<ov::PropertyName> expected_properties = {
-        ov::device::architecture.name(),
-        ov::intel_gpu::execution_units_count.name(),
-        ov::hint::inference_precision.name(),
-        ov::hint::execution_mode.name(),
-        ov::hint::performance_mode.name(),
-        ov::hint::dynamic_quantization_group_size.name(),
-        ov::hint::activations_scale_factor.name()
-    };
+    const std::vector<ov::PropertyName> expected_properties = {ov::device::architecture.name(),
+                                                               ov::intel_gpu::execution_units_count.name(),
+                                                               ov::hint::inference_precision.name(),
+                                                               ov::hint::execution_mode.name(),
+                                                               ov::hint::performance_mode.name(),
+                                                               ov::hint::dynamic_quantization_group_size.name(),
+                                                               ov::hint::activations_scale_factor.name(),
+                                                               ov::hint::kv_cache_precision.name(),
+                                                               ov::intel_gpu::runtime_type.name()};
 
     OV_ASSERT_NO_THROW(caching_properties = ie.get_property(target_device, ov::internal::caching_properties));
 

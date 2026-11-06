@@ -1,17 +1,16 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "intel_gpu/plugin/program_builder.hpp"
+#include "openvino/op/one_hot.hpp"
+
 #include "intel_gpu/plugin/common_utils.hpp"
+#include "intel_gpu/plugin/program_builder.hpp"
+#include "intel_gpu/primitives/one_hot.hpp"
 #include "transformations/utils/utils.hpp"
 
-#include "openvino/op/one_hot.hpp"
-#include "intel_gpu/primitives/one_hot.hpp"
-
 namespace ov::intel_gpu {
-
-static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v1::OneHot>& op) {
+static void CreateOneHotOpGeneric(ProgramBuilder& p, const std::shared_ptr<ov::op::util::OneHotBase>& op, bool is_normalize_mode) {
     validate_inputs_count(op, {4});
     auto inputs = p.GetInputInfo(op);
     std::string layerName = layer_type_name_ID(op);
@@ -21,29 +20,37 @@ static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v1::
     auto on_value_node = ov::as_type_ptr<ov::op::v0::Constant>(op->get_input_node_shared_ptr(2));
     auto off_value_node = ov::as_type_ptr<ov::op::v0::Constant>(op->get_input_node_shared_ptr(3));
 
-    OPENVINO_ASSERT(on_value_node != nullptr || off_value_node != nullptr || depth_value_node != nullptr,
-                    "[GPU] Unsupported on/off/depth nodes type in ", op->get_friendly_name(), " (", op->get_type_name(), ")");
+    // A non-constant depth is handled below by the two input primitive variant,
+    // but on/off are read as compile time values right away, so they must be constants.
+    // Non-constant ones are expected to have been rewritten into a mask + Select by DecomposeOneHotNonConstValues.
+    OPENVINO_ASSERT(on_value_node != nullptr && off_value_node != nullptr,
+                    "[GPU] Unsupported on/off nodes type in ",
+                    op->get_friendly_name(),
+                    " (",
+                    op->get_type_name(),
+                    ")");
 
     float on_value;
     float off_value;
 
-    if (!ov::op::util::get_single_value(on_value_node, on_value) ||
-        !ov::op::util::get_single_value(off_value_node, off_value)) {
+    if (!ov::op::util::get_single_value(on_value_node, on_value) || !ov::op::util::get_single_value(off_value_node, off_value)) {
         OPENVINO_THROW("Unsupported parameter size in ", op->get_friendly_name(), " (", op->get_type_name(), ")");
     }
 
     auto dims = op->get_input_partial_shape(0);
 
-    if (axis < -1 || axis > static_cast<int16_t>(dims.size()))
+    if (axis < -1 || axis > static_cast<int16_t>(dims.size())) {
         OPENVINO_THROW(op->get_friendly_name(), " Incorrect OneHot axis value: ", axis, ". Should be between -1 and ", dims.size());
+    }
 
     if (axis == -1) {
         axis = dims.size();
         for (int i = static_cast<int>(dims.size() - 1); i >= 0; i--) {
-            if (dims[i] == 1)
+            if (dims[i] == 1) {
                 axis--;
-            else
+            } else {
                 break;
+            }
         }
     }
 
@@ -58,6 +65,7 @@ static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v1::
                                          cldnn::element_type_to_data_type(op->get_output_element_type(0)),
                                          axis,
                                          depth,
+                                         is_normalize_mode,
                                          on_value,
                                          off_value);
 
@@ -69,6 +77,7 @@ static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v1::
                                          out_tensor,
                                          cldnn::element_type_to_data_type(op->get_output_element_type(0)),
                                          axis,
+                                         is_normalize_mode,
                                          on_value,
                                          off_value);
 
@@ -76,6 +85,17 @@ static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v1::
     }
 }
 
+static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v1::OneHot>& op) {
+    CreateOneHotOpGeneric(p, op, false);
+}
+
 REGISTER_FACTORY_IMPL(v1, OneHot);
+
+static void CreateOneHotOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v16::OneHot>& op) {
+    const bool is_normalize_mode = (op->get_negative_indices_mode() == ov::op::v16::OneHot::NegativeIndicesMode::NORMALIZE);
+    CreateOneHotOpGeneric(p, op, is_normalize_mode);
+}
+
+REGISTER_FACTORY_IMPL(v16, OneHot);
 
 }  // namespace ov::intel_gpu

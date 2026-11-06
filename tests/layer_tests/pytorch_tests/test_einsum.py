@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -8,9 +8,7 @@ from pytorch_layer_test_class import PytorchLayerTest
 
 class TestEinsumBatchMatMul(PytorchLayerTest):
     def _prepare_input(self):
-        import numpy as np
-
-        return (np.random.randn(5, 2, 3).astype(np.float32), np.random.randn(5, 3, 4).astype(np.float32),)
+        return (self.random.randn(5, 2, 3), self.random.randn(5, 3, 4),)
 
     def create_model(self):
         import torch
@@ -20,21 +18,19 @@ class TestEinsumBatchMatMul(PytorchLayerTest):
                 eqn = "bij, bjk -> bik"
                 return torch.einsum(eqn, x, y)
 
-        ref_net = None
 
-        return EinsumModelBatchMatmul(), ref_net, "aten::einsum"
+        return EinsumModelBatchMatmul(), "aten::einsum"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     def test_einsum_batch_matmul(self, ie_device, precision, ir_version):
         self._test(*self.create_model(), ie_device, precision, ir_version)
 
 
 class TestEinsumBatchDiagonal(PytorchLayerTest):
     def _prepare_input(self):
-        import numpy as np
-
-        return (np.random.randn(3, 5, 5).astype(np.float32),)
+        return (self.random.randn(3, 5, 5),)
 
     def create_model(self):
         import torch
@@ -44,12 +40,12 @@ class TestEinsumBatchDiagonal(PytorchLayerTest):
                 eqn = "kii -> ki"
                 return torch.einsum(eqn, x)
 
-        ref_net = None
 
-        return EinsumModelBatchDiagonal(), ref_net, "aten::einsum"
+        return EinsumModelBatchDiagonal(), "aten::einsum"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     @pytest.mark.xfail(reason='OpenVINO CPU plugin does not support einsum diagonal')
     def test_einsum_batch_diagonal(self, ie_device, precision, ir_version):
         self._test(*self.create_model(), ie_device, precision, ir_version, dynamic_shapes=False)
@@ -57,9 +53,7 @@ class TestEinsumBatchDiagonal(PytorchLayerTest):
 
 class TestEinsumInnerProd(PytorchLayerTest):
     def _prepare_input(self):
-        import numpy as np
-
-        return (np.random.randn(5).astype(np.float32), np.random.randn(5).astype(np.float32))
+        return (self.random.randn(5), self.random.randn(5))
 
     def create_model(self):
         import torch
@@ -69,21 +63,19 @@ class TestEinsumInnerProd(PytorchLayerTest):
                 eqn = "i,i"
                 return torch.einsum(eqn, x, y)
 
-        ref_net = None
 
-        return EinsumModelInnerProd(), ref_net, "aten::einsum"
+        return EinsumModelInnerProd(), "aten::einsum"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     def test_einsum_inner_prod(self, ie_device, precision, ir_version):
         self._test(*self.create_model(), ie_device, precision, ir_version)
 
 
 class TestEinsumTranspose(PytorchLayerTest):
     def _prepare_input(self):
-        import numpy as np
-
-        return (np.random.randn(3, 5).astype(np.float32),)
+        return (self.random.randn(3, 5),)
 
     def create_model(self):
         import torch
@@ -93,11 +85,11 @@ class TestEinsumTranspose(PytorchLayerTest):
                 eqn = "ij->ji"
                 return torch.einsum(eqn, x)
 
-        ref_net = None
 
-        return EinsumModelTranspose(), ref_net, "aten::einsum"
+        return EinsumModelTranspose(), "aten::einsum"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     def test_einsum_transpose(self, ie_device, precision, ir_version):
         self._test(*self.create_model(), ie_device, precision, ir_version)

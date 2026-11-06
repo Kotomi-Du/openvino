@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -12,9 +12,13 @@ if(NOT DEFINED CMAKE_POSITION_INDEPENDENT_CODE)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
+# the only place to change the project default standard
+set(OV_CXX_STANDARD_DEFAULT 17)
+
 # to allows to override CMAKE_CXX_STANDARD from command line
 if(NOT DEFINED CMAKE_CXX_STANDARD)
-    set(CMAKE_CXX_STANDARD 17)
+    set(OV_CXX_STANDARD_IS_DEFAULT ON)
+    set(CMAKE_CXX_STANDARD ${OV_CXX_STANDARD_DEFAULT})
 endif()
 
 if(NOT DEFINED CMAKE_CXX_EXTENSIONS)
@@ -25,9 +29,14 @@ if(NOT DEFINED CMAKE_CXX_STANDARD_REQUIRED)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
+# checks that the toolchain supports the requested CMAKE_CXX_STANDARD
+include(compile_flags/cxx_standard)
+
 if(ENABLE_COVERAGE)
     ov_add_compiler_flags(--coverage)
+    ov_add_compiler_flags(-fprofile-update=atomic)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
 endif()
 
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
@@ -141,13 +150,7 @@ elseif(OV_COMPILER_IS_INTEL_LLVM AND WIN32)
     #
     # Warnings as errors
     #
-
     ov_add_compiler_flags(/WX)
-
-    #
-    # Disable noisy warnings
-    #
-    ov_disable_deprecated_warnings()
 else()
     #
     # Common enabled warnings
@@ -160,6 +163,7 @@ else()
 
     # This enables all the warnings about constructions that some users consider questionable, and that are easy to avoid
     ov_add_compiler_flags(-Wall)
+    ov_add_compiler_flags(-Wignored-qualifiers)
     # Warn if an undefined identifier is evaluated in an #if directive. Such identifiers are replaced with zero.
     ov_add_compiler_flags(-Wundef)
 
@@ -187,7 +191,6 @@ else()
 
     if(OV_COMPILER_IS_INTEL_LLVM)
         ov_add_compiler_flags(-Wno-tautological-constant-compare)
-        ov_disable_deprecated_warnings()
     endif()
 
     #

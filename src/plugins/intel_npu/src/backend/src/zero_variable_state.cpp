@@ -1,54 +1,128 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "zero_variable_state.hpp"
 
-#include "intel_npu/config/options.hpp"
+#include "intel_npu/utils/utils.hpp"
+#include "intel_npu/utils/zero/zero_host_tensor.hpp"
 #include "intel_npu/utils/zero/zero_remote_tensor.hpp"
 #include "intel_npu/utils/zero/zero_utils.hpp"
+#include "openvino/core/except.hpp"
+#include "openvino/core/shape.hpp"
+#include "openvino/core/type/element_type.hpp"
 
 namespace intel_npu {
 
 ZeroVariableState::ZeroVariableState(const std::shared_ptr<ZeroInitStructsHolder>& init_structs,
                                      const std::string& name,
-                                     const ov::SoPtr<ov::ITensor>& tensor,
+                                     const std::shared_ptr<ZeroTensor>& zero_tensor,
                                      size_t tensor_index,
-                                     size_t related_tensor_index,
-                                     const Config& config)
+                                     size_t related_tensor_index)
     : ov::IVariableState(name),
       _init_structs(init_structs),
       _tensor_index(tensor_index),
       _related_tensor_index(related_tensor_index),
-      _logger("ZeroVariableState", config.get<LOG_LEVEL>()) {
-    m_state = tensor;
+      _zero_state(zero_tensor),
+      _logger("ZeroVariableState", Logger::global().level()) {
+    m_state = _zero_state;
 }
 
 void ZeroVariableState::set_state(const ov::SoPtr<ov::ITensor>& new_state) {
-    m_state = new_state;
-    _tensor_updated = true;
+    if (m_state._ptr == new_state._ptr) {
+        // set_tensor called with the same tensor object; no action needed
+        _logger.debug("ZeroVariableState::set_state - got the same state, do nothing");
+        return;
+    }
 
-    if (_init_structs->getMutableCommandListExtVersion() >= ZE_MAKE_VERSION(1, 0)) {
-        if (!is_remote_tensor(new_state._ptr)) {
-            if (zeroUtils::memory_was_allocated_in_the_same_l0_context(_init_structs->getContext(),
-                                                                       new_state->data())) {
-                _logger.debug("ZeroVariableState::set_state - tensor was created in the same L0 context");
-                _zero_tensor_updated = true;
-            }
+    OPENVINO_ASSERT(new_state._ptr != nullptr, "The tensor set for state '", get_name(), "' is null.");
 
-            return;
+    // m_state currently holds the model's state buffer: the initial allocation, or a previously accepted replacement
+    // that this same validation proved matches it. The state input and its state output share that Level Zero buffer
+    // and the compiled graph interprets it with the model's state metadata, so a replacement must match the state's
+    // element type and shape, not merely be large enough: a differently shaped or typed tensor would be read and
+    // written with the wrong layout, and a smaller one would let the state output write past the shared buffer.
+    if (m_state._ptr != nullptr) {
+        const auto expected_element_type = m_state->get_element_type();
+        const auto expected_shape = m_state->get_shape();
+        const auto required_byte_size = m_state->get_byte_size();
+
+        const auto new_element_type = new_state->get_element_type();
+        if (new_element_type != expected_element_type) {
+            // Exception case for boolean treated as u8 by the NPU driver (mirrors ZeroInferRequest::check_tensor).
+            OPENVINO_ASSERT(
+                (new_element_type == ov::element::boolean || new_element_type == ov::element::u8) &&
+                    (expected_element_type == ov::element::boolean || expected_element_type == ov::element::u8),
+                "The tensor set for state '",
+                get_name(),
+                "' has element type ",
+                new_element_type,
+                " but the model's state requires ",
+                expected_element_type,
+                ".");
         }
 
-        _zero_tensor_updated = true;
+        OPENVINO_ASSERT(new_state->get_shape() == expected_shape,
+                        "The tensor set for state '",
+                        get_name(),
+                        "' has shape ",
+                        new_state->get_shape(),
+                        " but the model's state requires ",
+                        expected_shape,
+                        ".");
+
+        OPENVINO_ASSERT(new_state->get_byte_size() >= required_byte_size,
+                        "The tensor set for state '",
+                        get_name(),
+                        "' is smaller than the model's state requires.");
+    }
+
+    m_state = new_state;
+    _is_state_updated = true;
+
+    try {
+        _logger.debug("ZeroVariableState::set_state - create zero tensor");
+        // Try to use the user tensor directly if its underlying data is already allocated in the same Level Zero
+        // context.
+        _zero_state = std::make_shared<ZeroTensor>(_init_structs, m_state);
+        _is_zero_state_update_needed = true;
+    } catch (const ZeroMemException&) {
+        // Check if the current Level Zero tensor was previously shared with the user. If so, it cannot be reused;
+        // allocate a new tensor to back up the user tensor (which cannot be imported or used directly).
+        if (_zero_state == nullptr || !_zero_state->can_be_reused()) {
+            _logger.debug("ZeroVariableState::set_state - allocate locally L0 tensor");
+            _zero_state =
+                std::make_shared<ZeroTensor>(_init_structs, m_state->get_element_type(), m_state->get_shape(), false);
+            _is_zero_state_update_needed = true;
+        } else {
+            _logger.debug("ZeroVariableState::set_state - reusing the level zero tensor since it is not shared "
+                          "with the user");
+        }
     }
 }
 
+ov::SoPtr<ov::ITensor> ZeroVariableState::get_state() const {
+    auto zero_tensor = std::dynamic_pointer_cast<ZeroTensor>(m_state._ptr);
+    if (zero_tensor != nullptr) {
+        zero_tensor->prevent_reuse();
+    }
+
+    return m_state;
+}
+
+ov::SoPtr<ov::ITensor> ZeroVariableState::get_user_state() const {
+    return m_state;
+}
+
+std::shared_ptr<ZeroTensor> ZeroVariableState::get_zero_state() const {
+    return _zero_state;
+}
+
 void ZeroVariableState::reset() {
-    auto remoteTensor = std::dynamic_pointer_cast<ZeroRemoteTensor>(m_state._ptr);
+    auto remote_tensor = std::dynamic_pointer_cast<ZeroRemoteTensor>(m_state._ptr);
 
-    void* userBuffer = !remoteTensor ? m_state->data() : remoteTensor->get_original_memory();
-
-    std::memset(userBuffer, 0, m_state->get_byte_size());
+    void* user_buffer = !remote_tensor ? m_state->data() : remote_tensor->get_original_memory();
+    std::memset(user_buffer, 0, m_state->get_byte_size());
 }
 
 size_t ZeroVariableState::get_tensor_index() const {
@@ -59,20 +133,20 @@ size_t ZeroVariableState::get_related_tensor_index() const {
     return _related_tensor_index;
 }
 
-bool ZeroVariableState::tensor_was_updated() const {
-    return _tensor_updated;
+bool ZeroVariableState::state_update_pending() const {
+    return _is_state_updated;
 }
 
-void ZeroVariableState::reset_tensor_updated_flag() {
-    _tensor_updated = false;
+void ZeroVariableState::clear_state_update_pending() {
+    _is_state_updated = false;
 }
 
-bool ZeroVariableState::zero_tensor_should_be_updated() const {
-    return _zero_tensor_updated;
+bool ZeroVariableState::zero_state_update_pending() const {
+    return _is_zero_state_update_needed;
 }
 
-void ZeroVariableState::reset_zero_tensor_updated_flag() {
-    _zero_tensor_updated = false;
+void ZeroVariableState::clear_zero_state_update_pending() {
+    _is_zero_state_update_needed = false;
 }
 
 }  // namespace intel_npu

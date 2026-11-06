@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,10 +6,7 @@
 
 #include "openvino/pass/pass.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace pass {
+namespace ov::frontend::tensorflow::pass {
 
 // This transformation fuses Switch-Merge sub-graphs into If operation
 // After control flow markers propagation, Switch and Merge nodes
@@ -26,7 +23,4 @@ public:
     bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
 };
 
-}  // namespace pass
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::pass

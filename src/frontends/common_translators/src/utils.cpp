@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,7 @@
 #include "openvino/frontend/complex_type_mark.hpp"
 #include "openvino/frontend/exception.hpp"
 
-namespace ov {
-namespace frontend {
-namespace common_translators {
+namespace ov::frontend::common_translators {
 
 void num_inputs_check(const NodeContext& context, size_t min_inputs, size_t max_inputs, bool allow_complex) {
     auto num_inputs = context.get_input_size();
@@ -32,6 +30,4 @@ void num_inputs_check(const NodeContext& context, size_t min_inputs, size_t max_
     }
 }
 
-}  // namespace common_translators
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::common_translators

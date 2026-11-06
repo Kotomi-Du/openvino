@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -27,7 +27,7 @@ public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
     using DispatchData = CommonDispatchData;
 
-    virtual ~ReduceKernelBase() {}
+    ~ReduceKernelBase() override = default;
 
 protected:
     bool Validate(const Params&) const override;

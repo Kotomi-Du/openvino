@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,9 +6,7 @@
 
 #include "openvino/op/op.hpp"
 
-namespace ov {
-namespace op {
-namespace internal {
+namespace ov::op::internal {
 class TensorArrayWrite : public Op {
 public:
     OPENVINO_OP("TensorArrayWrite", "internal");
@@ -26,6 +24,4 @@ public:
 private:
 };
 
-}  // namespace internal
-}  // namespace op
-}  // namespace ov
+}  // namespace ov::op::internal

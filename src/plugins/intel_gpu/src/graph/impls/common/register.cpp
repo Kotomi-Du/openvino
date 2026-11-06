@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,6 +15,9 @@ void register_implementations() {
     REGISTER_COMMON(data);
     REGISTER_COMMON(input_layout);
     REGISTER_COMMON(loop);
+#ifdef ENABLE_MLIR_FOR_GPU
+    REGISTER_COMMON(mlir_primitive);
+#endif
 }
 
 }  // namespace common

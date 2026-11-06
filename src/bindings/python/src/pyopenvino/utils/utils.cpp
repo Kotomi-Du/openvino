@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,6 +7,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/stl/filesystem.h>
 
+#include <cmath>
 #include <map>
 #include <set>
 #include <string>
@@ -18,6 +19,8 @@
 #include "openvino/core/meta_data.hpp"
 #include "openvino/frontend/decoder.hpp"
 #include "openvino/frontend/graph_iterator.hpp"
+#include "openvino/runtime/intel_cpu/properties.hpp"
+#include "openvino/runtime/intel_npu/properties.hpp"
 #include "openvino/runtime/properties.hpp"
 
 using Version = ov::pass::Serialize::Version;
@@ -104,6 +107,10 @@ py::object from_ov_any_map(const ov::AnyMap& map) {
 }
 
 py::object from_ov_any(const ov::Any& any) {
+    // Empty Any (e.g. write-only property queried via get_property)
+    if (any.empty()) {
+        return py::none();
+    }
     // Check for py::object
     if (any.is<std::shared_ptr<py::object>>()) {
         return *any.as<std::shared_ptr<py::object>>();
@@ -178,6 +185,10 @@ py::object from_ov_any(const ov::Any& any) {
     else if (any.is<std::map<std::string, std::string>>()) {
         return py::cast(any.as<std::map<std::string, std::string>>());
     }
+    // Check for std::map<std::string, unsigned>
+    else if (any.is<std::map<std::string, unsigned>>()) {
+        return py::cast(any.as<std::map<std::string, unsigned>>());
+    }
     // Check for std::map<std::string, int>
     else if (any.is<std::map<std::string, int>>()) {
         return py::cast(any.as<std::map<std::string, int>>());
@@ -185,6 +196,10 @@ py::object from_ov_any(const ov::Any& any) {
     // Check for std::map<std::string, uint64_t>
     else if (any.is<std::map<std::string, uint64_t>>()) {
         return py::cast(any.as<std::map<std::string, uint64_t>>());
+    }
+    // Check for ov::intel_auto::PerfCurveTable (std::map<std::string, std::map<unsigned, float>>)
+    else if (any.is<ov::intel_auto::PerfCurveTable>()) {
+        return py::cast(any.as<ov::intel_auto::PerfCurveTable>());
     }
     // Check for std::map<element::Type, float>
     else if (any.is<std::map<ov::element::Type, float>>()) {
@@ -245,6 +260,8 @@ py::object from_ov_any(const ov::Any& any) {
         return py::cast(any.as<ov::hint::ExecutionMode>());
     } else if (any.is<ov::log::Level>()) {
         return py::cast(any.as<ov::log::Level>());
+    } else if (any.is<ov::intel_cpu::TbbPartitioner>()) {
+        return py::cast(any.as<ov::intel_cpu::TbbPartitioner>());
     } else if (any.is<ov::device::Type>()) {
         return py::cast(any.as<ov::device::Type>());
     } else if (any.is<ov::streams::Num>()) {
@@ -263,6 +280,8 @@ py::object from_ov_any(const ov::Any& any) {
         return py::cast(luid_stream.str());
     } else if (any.is<ov::device::PCIInfo>()) {
         return py::cast(any.as<ov::device::PCIInfo>());
+    } else if (any.is<ov::intel_npu::CompilerType>()) {
+        return py::cast(any.as<ov::intel_npu::CompilerType>());
         // Custom FrontEnd Types
     } else if (any.is<ov::frontend::type::List>()) {
         return py::cast(any.as<ov::frontend::type::List>());
@@ -323,29 +342,39 @@ std::map<std::string, ov::Any> properties_to_any_map(const std::map<std::string,
         } else if (property.first == ov::hint::model.name()) {
             auto model = Common::utils::convert_to_model(property.second);
             properties_to_cpp[property.first] = std::static_pointer_cast<const ov::Model>(model);
+        } else if (property.first == ov::intel_auto::devices_utilization_threshold.name() &&
+                   py::isinstance<py::dict>(property.second)) {
+            std::map<std::string, unsigned> thresholds;
+            auto dict = py::cast<py::dict>(property.second);
+            for (const auto& item : dict) {
+                if (!py::isinstance<py::str>(item.first)) {
+                    OPENVINO_THROW("The key type of ",
+                                   ov::intel_auto::devices_utilization_threshold.name(),
+                                   " should be dict[str, int in [0, 100]] with string keys");
+                }
+                if (!py::isinstance<py::int_>(item.second) || py::isinstance<py::bool_>(item.second)) {
+                    OPENVINO_THROW("The value type of ",
+                                   ov::intel_auto::devices_utilization_threshold.name(),
+                                   " should be dict[str, int in [0, 100]] with integer values");
+                }
+                const auto key = py::str(item.first).cast<std::string>();
+                const auto value = py::cast<long long>(item.second);
+                if (value < 0 || value > 100) {
+                    OPENVINO_THROW("The value type of ",
+                                   ov::intel_auto::devices_utilization_threshold.name(),
+                                   " should be dict[str, int in [0, 100]]");
+                }
+                thresholds[key] = static_cast<unsigned>(value);
+            }
+            properties_to_cpp[property.first] = thresholds;
+        } else if (property.first == ov::intel_auto::perf_curve_table.name() &&
+                   py::isinstance<py::dict>(property.second)) {
+            properties_to_cpp[property.first] = property.second.cast<ov::intel_auto::PerfCurveTable>();
         } else {
             properties_to_cpp[property.first] = Common::utils::py_object_to_any(property.second);
         }
     }
     return properties_to_cpp;
-}
-
-std::string convert_path_to_string(const py::object& path) {
-    // import pathlib.Path
-    py::object Path = py::module_::import("pathlib").attr("Path");
-    // check if model path is either a string or pathlib.Path
-    if (py::isinstance(path, Path) || py::isinstance<py::str>(path)) {
-        return py::str(path);
-    }
-    // Convert bytes to string
-    if (py::isinstance<py::bytes>(path)) {
-        return path.cast<std::string>();
-    }
-    std::stringstream str;
-    str << "Path: '" << path << "'"
-        << " does not exist. Please provide valid model's path either as a string, bytes or pathlib.Path. "
-           "Examples:\n(1) '/home/user/models/model.onnx'\n(2) Path('/home/user/models/model/model.onnx')";
-    OPENVINO_THROW(str.str());
 }
 
 std::shared_ptr<ov::Model> convert_to_model(const py::object& obj) {
@@ -447,8 +476,9 @@ std::tuple<Args...> tuple_from_py_tuple(const py::tuple& py_tuple) {
 ov::Any py_object_to_any(const py::object& py_obj) {
     // Python types
     py::object float_32_type = py::module_::import("numpy").attr("float32");
-    if (py::isinstance<py::str>(py_obj)) {
-        return py_obj.cast<std::string>();
+    py::object Path = py::module_::import("pathlib").attr("Path");
+    if (py::isinstance<py::str>(py_obj) || py::isinstance(py_obj, Path)) {
+        return py::str(py_obj).cast<std::string>();
     } else if (py::isinstance<py::bool_>(py_obj)) {
         return py_obj.cast<bool>();
     } else if (py::isinstance<py::bytes>(py_obj)) {
@@ -544,12 +574,16 @@ ov::Any py_object_to_any(const py::object& py_obj) {
         return py::cast<ov::hint::ExecutionMode>(py_obj);
     } else if (py::isinstance<ov::log::Level>(py_obj)) {
         return py::cast<ov::log::Level>(py_obj);
+    } else if (py::isinstance<ov::intel_cpu::TbbPartitioner>(py_obj)) {
+        return py::cast<ov::intel_cpu::TbbPartitioner>(py_obj);
     } else if (py::isinstance<ov::device::Type>(py_obj)) {
         return py::cast<ov::device::Type>(py_obj);
     } else if (py::isinstance<ov::streams::Num>(py_obj)) {
         return py::cast<ov::streams::Num>(py_obj);
     } else if (py::isinstance<ov::WorkloadType>(py_obj)) {
         return py::cast<ov::WorkloadType>(py_obj);
+    } else if (py::isinstance<ov::intel_npu::CompilerType>(py_obj)) {
+        return py::cast<ov::intel_npu::CompilerType>(py_obj);
     } else if (py::isinstance<ov::Tensor>(py_obj)) {
         return py::cast<ov::Tensor>(py_obj);
     } else if (py::isinstance<ov::Output<ov::Node>>(py_obj)) {
@@ -584,10 +618,18 @@ ov::Any py_object_to_any(const py::object& py_obj) {
 }
 std::shared_ptr<py::function> wrap_pyfunction(py::function f_callback) {
     auto callback_sp = std::shared_ptr<py::function>(new py::function(std::move(f_callback)), [](py::function* c) {
+        // For free-threaded Python, gil_scoped_acquire still ensures thread is attached
         py::gil_scoped_acquire acquire;
         delete c;
     });
     return callback_sp;
+}
+
+std::shared_ptr<py::object> wrap_pyobject_to_sp(py::object obj) {
+    return std::shared_ptr<py::object>(new py::object(std::move(obj)), [](py::object* o) {
+        py::gil_scoped_acquire acquire;
+        delete o;
+    });
 }
 
 std::filesystem::path to_fs_path(const py::object& path) {

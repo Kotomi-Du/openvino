@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,10 +8,7 @@
 #include "internal/op/while.hpp"
 #include "openvino/frontend/paddle/node_context.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 NamedOutputs conditional_block(const NodeContext& node) {
     const auto cond = node.get_input("Cond");
     const auto sub_block = node.get_attribute<int32_t>("sub_block");
@@ -44,7 +41,4 @@ NamedOutputs conditional_block(const NodeContext& node) {
     return named_outputs;
 }
 
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

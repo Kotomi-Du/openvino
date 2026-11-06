@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class ConvolutionKernel_yxfb_yxio_b1_block_multiple_x : public ConvolutionKernel
 public:
     ConvolutionKernel_yxfb_yxio_b1_block_multiple_x()
         : ConvolutionKernelBase("convolution_gpu_yxfb_yxio_b1_block_multiple_x_fp32") {}
-    virtual ~ConvolutionKernel_yxfb_yxio_b1_block_multiple_x() {}
+    ~ConvolutionKernel_yxfb_yxio_b1_block_multiple_x() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

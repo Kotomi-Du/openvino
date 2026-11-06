@@ -19,6 +19,7 @@ For an in-depth description of the GPU plugin, see:
 
 - `GPU plugin developer documentation <https://github.com/openvinotoolkit/openvino/blob/master/src/plugins/intel_gpu/README.md>`__
 - `OpenVINO Runtime GPU plugin source files <https://github.com/openvinotoolkit/openvino/tree/master/src/plugins/intel_gpu/>`__
+- `GPU plugin Level Zero support (experimental) <https://github.com/openvinotoolkit/openvino/blob/master/src/plugins/intel_gpu/docs/gpu_plugin_with_level_zero.md>`__
 - `Start AI Development with Intel <https://www.intel.com/content/www/us/en/developer/topic-technology/artificial-intelligence/overview.html>`__
 
 The GPU plugin is a part of the Intel® Distribution of OpenVINO™ toolkit. For more information on how to configure a system to use it, see the :doc:`GPU configuration <../../../get-started/install-openvino/configurations/configurations-intel-gpu>`.
@@ -26,11 +27,12 @@ The GPU plugin is a part of the Intel® Distribution of OpenVINO™ toolkit. For
 Device Naming Convention
 #######################################
 
-* Devices are enumerated as ``GPU.X``, where ``X={0, 1, 2,...}`` (only Intel® GPU devices are considered).
-* If the system has an integrated GPU, its ``id`` is always 0 (``GPU.0``).
-* The order of other GPUs is not predefined and depends on the GPU driver.
+* Devices are enumerated as ``GPU.X``, where ``X={0, 1, 2,...}`` (both Intel® and non-Intel GPUs are considered).
+* The order of GPUs is predefined: integrated Intel® GPUs first, followed by discrete Intel® GPUs, and then non-Intel® GPUs. The order of non-Intel® GPUs is not guaranteed.
+* A physical GPU exposed through multiple OpenCL® runtime platforms may appear as more than one device entry. When the same GPU is exposed by both the Intel® and another OpenCL® platform, the Intel®-platform entry is enumerated first. The order of non-Intel® OpenCL® platforms is not guaranteed.
+* If the system has an integrated Intel® GPU, its ``id`` is always 0 (``GPU.0``).
+* If the system does not have an integrated Intel® GPU, devices are enumerated, starting from 0.
 * The ``GPU`` is an alias for ``GPU.0``.
-* If the system does not have an integrated GPU, devices are enumerated, starting from 0.
 * For GPUs with multi-tile architecture (multiple sub-devices in OpenCL terms), a specific tile may be addressed as ``GPU.X.Y``, where ``X,Y={0, 1, 2,...}``, ``X`` - id of the GPU device, ``Y`` - id of the tile within device ``X``
 
 For demonstration purposes, see the :doc:`Hello Query Device C++ Sample <../../../get-started/learn-openvino/openvino-samples/hello-query-device>` that can print out the list of available devices with associated indices. Below is an example output (truncated to the device names only):
@@ -396,7 +398,8 @@ Supported Properties
 #######################################
 
 The plugin supports the properties listed below.
-- For more details on the properties, see the `Device Properties <../../../api/c_cpp_api/group__ov__runtime__cpp__prop__api.html>`.
+
+- For more details on the properties, see the `Device Properties <https://docs.openvino.ai/2026/api/c_cpp_api/group__ov__runtime__cpp__prop__api.html>`__.
 - For more details on usage of the properties, see the :doc:`Query Device Properties - Configuration <query-device-properties>`.
 - To check the exact list of available properties on target device, you can run :doc:`Hello Query Device C++ Sample <../../../get-started/learn-openvino/openvino-samples/hello-query-device>`.
 
@@ -426,10 +429,17 @@ All parameters must be set before calling ``ov::Core::compile_model()`` in order
 - ``ov::hint::performance_mode``
 - ``ov::intel_gpu::disable_winograd_convolution``
 - ``ov::intel_gpu::enable_loop_unrolling``
+- ``ov::intel_gpu::offload_ratio``
 - ``ov::intel_gpu::hint::enable_sdpa_optimization``
 - ``ov::intel_gpu::hint::host_task_priority``
 - ``ov::intel_gpu::hint::queue_priority``
 - ``ov::intel_gpu::hint::queue_throttle``
+
+Setting ``ov::intel_gpu::offload_ratio`` above zero automatically enables weightless
+caching and selects ``ov::CacheMode::OPTIMIZE_SIZE``. Explicitly disabling weightless
+caching or selecting ``ov::CacheMode::OPTIMIZE_SPEED`` is not supported with offloading,
+including when importing a compiled model or loading it from cache.
+MoE offloading requires a valid weights file and the corresponding constant offsets.
 
 
 Read-only Properties
@@ -449,9 +459,19 @@ Read-only Properties
 - ``ov::device::type``
 - ``ov::device::uuid``
 - ``ov::intel_gpu::device_total_mem_size``
+- ``ov::intel_gpu::device_max_alloc_mem_size``
 - ``ov::intel_gpu::execution_units_count``
 - ``ov::intel_gpu::memory_statistics``
 - ``ov::intel_gpu::uarch_version``
+
+.. note::
+
+   ``ov::intel_gpu::device_total_mem_size`` and ``ov::intel_gpu::device_max_alloc_mem_size``
+   (``GPU_DEVICE_TOTAL_MEM_SIZE`` and ``GPU_DEVICE_MAX_ALLOC_MEM_SIZE``) report the
+   device's total and maximum single-allocation memory limits. For guidance on
+   avoiding and troubleshooting out-of-memory and allocation errors on GPU,
+   including iGPU-specific platform considerations, see
+   :doc:`Managing iGPU Memory Allocation for OpenVINO Inference <../optimize-inference/managing-igpu-memory-usage>`.
 
 
 Limitations

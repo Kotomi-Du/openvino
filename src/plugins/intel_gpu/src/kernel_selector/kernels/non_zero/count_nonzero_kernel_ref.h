@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2022 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,7 +18,7 @@ struct count_nonzero_params : public base_params {
 class CountNonzeroKernelRef : public KernelBaseOpenCL {
 public:
     CountNonzeroKernelRef() : KernelBaseOpenCL("count_nonzero_ref") {}
-    virtual ~CountNonzeroKernelRef() {}
+    ~CountNonzeroKernelRef() override = default;
 
     struct DispatchData : public CommonDispatchData {
         size_t dataSize;

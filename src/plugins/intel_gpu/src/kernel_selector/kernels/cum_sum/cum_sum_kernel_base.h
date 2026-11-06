@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -22,7 +22,7 @@ struct cum_sum_params : public base_params {
 class CumSumKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~CumSumKernelBase() = default;
+    ~CumSumKernelBase() override = default;
 
     struct DispatchData : public CommonDispatchData {
         size_t sum_items_num;

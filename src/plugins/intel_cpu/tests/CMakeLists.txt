@@ -1,6 +1,23 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
+
+# Static oneDNN exports use the CPU-plugin-prefixed symbols. Apply the matching
+# definitions to all CPU test targets without leaking them to third-party targets.
+if(NOT BUILD_SHARED_LIBS)
+    add_compile_definitions(${onednn_renamed_definitions})
+endif()
+
+# Suppress warnings in all test code (applies to unit and functional tests)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    ov_add_compiler_flags(/wd4018)  # signed/unsigned mismatch
+    ov_add_compiler_flags(/wd4267)  # conversion from 'size_t' to smaller type
+    ov_add_compiler_flags(/wd4334)  # 'argument': cannot convert from 'type1' to 'type2'
+    ov_add_compiler_flags(/wd4244)  # narrowing conversion
+    ov_add_compiler_flags(/wd5051)  # attribute warning
+elseif (OV_COMPILER_IS_INTEL_LLVM AND WIN32)
+    ov_add_compiler_flags("/Wno-microsoft-include")
+endif()
 
 add_subdirectory(unit)
 

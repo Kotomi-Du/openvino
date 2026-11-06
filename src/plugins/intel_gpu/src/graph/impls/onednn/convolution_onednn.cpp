@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,6 +9,7 @@
 #include "intel_gpu/runtime/layout.hpp"
 #include "intel_gpu/runtime/utils.hpp"
 #include "primitive_onednn_base.h"
+#include "convolution_shape_inference.hpp"
 
 #include "utils.hpp"
 
@@ -30,11 +31,7 @@ static std::shared_ptr<dnnl::convolution_forward::primitive_desc> get_convolutio
     auto input_layout = impl_params.get_input_layout(0);
     auto weights_layout = impl_params.get_input_layout(1);
     auto output_layout = impl_params.get_output_layout();
-
-    dnnl::memory::dims stride(prim->stride.begin(), prim->stride.end());
-    dnnl::memory::dims dilation(prim->dilation.begin(), prim->dilation.end());
-    dnnl::memory::dims pad_l(prim->padding_begin.begin(), prim->padding_begin.end());
-    dnnl::memory::dims pad_r(prim->padding_end.begin(), prim->padding_end.end());
+    auto auto_pad = prim->auto_pad;
 
     // issue: it could not find the implementation for 1d kernel GroupConvolution from onednn.
     // root-cause: 3d tensor of input/output is changed to 4d via ngraph.
@@ -58,20 +55,51 @@ static std::shared_ptr<dnnl::convolution_forward::primitive_desc> get_convolutio
         weights_layout.format = format::get_default_format(weights_layout.get_rank() + 1, true, true);
     }
 
-    auto input_md = onednn::layout_to_memory_desc(input_layout, tag_in_out);
-    auto weights_md = onednn::layout_to_memory_desc(weights_layout, dnnl::memory::format_tag::any);
-    auto output_md = onednn::layout_to_memory_desc(output_layout, tag_in_out);
+    auto [input_md, weights_md, output_md] = onednn::get_conv_memory_descs(input_layout, weights_layout, output_layout, tag_in_out);
 
-    // adjust_conv_dilation_pad(dilation, stride, pad_l, pad_r, input_md, output_md, weights_md, grouped_weights);
-    for (size_t i = 0; i < dilation.size(); i++) {
-        dilation[i]--;
-        int weights_offset = (grouped_weights ? 3 : 2) + static_cast<int>(i);
-        auto os = output_md.get_dims()[2 + i];
-        auto is = input_md.get_dims()[2 + i];
-        auto ks = weights_md.get_dims()[weights_offset];
-        auto kernel_range = 1 + (ks - 1) * (dilation[i] + 1);
-        pad_r[i] = (os - 1) * stride[i] - is + kernel_range - pad_l[i];
+    dnnl::memory::dims stride(prim->stride.begin(), prim->stride.end());
+    dnnl::memory::dims dilation(prim->dilation.begin(), prim->dilation.end());
+    dnnl::memory::dims pad_l(prim->padding_begin.begin(), prim->padding_begin.end());
+    dnnl::memory::dims pad_r(prim->padding_end.begin(), prim->padding_end.end());
+
+    if (auto_pad == ov::op::PadType::SAME_UPPER || auto_pad == ov::op::PadType::SAME_LOWER) {
+        // Plain 1D descriptors have one spatial axis; grouped or blocked ones may
+        // retain a trailing singleton axis. Calculate padding in descriptor order.
+        const auto input_dims = input_md.get_dims();
+        const auto weights_dims = weights_md.get_dims();
+        const auto spatial_rank = input_dims.size() - 2;
+        auto auto_pad_stride = prim->stride;
+        auto auto_pad_dilation = prim->dilation;
+        auto_pad_stride.resize(spatial_rank, 1);
+        auto_pad_dilation.resize(spatial_rank, 1);
+        stride.resize(spatial_rank, 1);
+        dilation.resize(spatial_rank, 1);
+        pad_l.resize(spatial_rank, 0);
+        pad_r.resize(spatial_rank, 0);
+
+        ov::op::v1::Convolution op;
+        op.set_dilations(auto_pad_dilation);
+        op.set_strides(auto_pad_stride);
+        op.set_auto_pad(auto_pad);
+
+        ov::op::convolution::apply_auto_pad(&op, ov::PartialShape(input_dims), ov::PartialShape(weights_dims), pad_l.begin(), pad_r.begin());
+        for (size_t i = 0; i < dilation.size(); i++) {
+            dilation[i]--;
+        }
+    } else {
+        // adjust_conv_dilation_pad(dilation, stride, pad_l, pad_r, input_md, output_md, weights_md, grouped_weights);
+        for (size_t i = 0; i < dilation.size(); i++) {
+            dilation[i]--;
+            int weights_offset = (grouped_weights ? 3 : 2) + static_cast<int>(i);
+            auto os = output_md.get_dims()[2 + i];
+            auto is = input_md.get_dims()[2 + i];
+            auto ks = weights_md.get_dims()[weights_offset];
+            auto kernel_range = 1 + (ks - 1) * (dilation[i] + 1);
+            pad_r[i] = (os - 1) * stride[i] - is + kernel_range - pad_l[i];
+        }
     }
+
+
 
     // Extend conv parameters in case if spatials rank of output memory doesn't match size of parameters
     int64_t insert_count = static_cast<int64_t>(output_md.get_dims().size()) - 2 - stride.size();
@@ -83,7 +111,7 @@ static std::shared_ptr<dnnl::convolution_forward::primitive_desc> get_convolutio
     }
 
     if (prim->bias.is_valid()) {
-        auto bias_md = onednn::layout_to_memory_desc(impl_params.get_input_layout(2), dnnl::memory::format_tag::any, true);
+        auto bias_md = onednn::layout_to_memory_desc_flatten(impl_params.get_input_layout(2), dnnl::memory::format_tag::any);
         return std::make_shared<dnnl::convolution_forward::primitive_desc>(
             engine.get_onednn_engine(),
             dnnl::prop_kind::forward_inference,
@@ -97,20 +125,18 @@ static std::shared_ptr<dnnl::convolution_forward::primitive_desc> get_convolutio
             pad_l,
             pad_r,
             attr);
-    } else {
-        return std::make_shared<dnnl::convolution_forward::primitive_desc>(
-            engine.get_onednn_engine(),
-            dnnl::prop_kind::forward_inference,
-            dnnl::algorithm::convolution_direct,
-            input_md,
-            weights_md,
-            output_md,
-            stride,
-            dilation,
-            pad_l,
-            pad_r,
-            attr);
     }
+    return std::make_shared<dnnl::convolution_forward::primitive_desc>(engine.get_onednn_engine(),
+                                                                       dnnl::prop_kind::forward_inference,
+                                                                       dnnl::algorithm::convolution_direct,
+                                                                       input_md,
+                                                                       weights_md,
+                                                                       output_md,
+                                                                       stride,
+                                                                       dilation,
+                                                                       pad_l,
+                                                                       pad_r,
+                                                                       attr);
 }
 
 struct convolution_onednn : typed_primitive_onednn_impl<convolution> {
@@ -149,12 +175,12 @@ protected:
             // In the case of dynamic model, if choose_impl was executed in runtime,
             // a_zp could be remained as u8 or i8.
             if (a_zp->get_layout().data_type != data_types::i32) {
-                auto& conv_node = instance.get_node().as<convolution>();
+                const auto& conv_node = instance.get_node().as<convolution>();
                 auto& a_zp_node = conv_node.activations_zero_points().as<data>();
                 a_zp = a_zp_node.get_attached_memory_ptr();
             }
 
-            dnnl::memory::desc desc = onednn::layout_to_memory_desc(a_zp->get_layout(), dnnl::memory::format_tag::a, true);
+            dnnl::memory::desc desc = onednn::layout_to_memory_desc_flatten(a_zp->get_layout(), dnnl::memory::format_tag::a);
             args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, a_zp->get_onednn_memory(desc)});
 
             GPU_DEBUG_TRACE_DETAIL << instance.id() << " activations_zero_points: "
@@ -163,7 +189,7 @@ protected:
 
         if (instance.weights_zero_points_term()) {
             auto w_zp = instance.weights_zero_points_memory();
-            dnnl::memory::desc desc = onednn::layout_to_memory_desc(w_zp->get_layout(), dnnl::memory::format_tag::a, true);
+            dnnl::memory::desc desc = onednn::layout_to_memory_desc_flatten(w_zp->get_layout(), dnnl::memory::format_tag::a);
             args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, w_zp->get_onednn_memory(desc)});
 
             GPU_DEBUG_TRACE_DETAIL << instance.id() << " weights_zero_points: "
@@ -186,7 +212,7 @@ protected:
                                                 cldnn::data_node& node, int& zero_point_mask) {
         int32_t zp_val = DNNL_RUNTIME_S32_VAL;
         bool is_per_tensor = onednn::is_per_tensor<T>(node, zp_val);
-        memory::ptr s32_mem = onednn::convert_zp_data_to_s32<T>(node.get_attached_memory_ptr());
+        memory::ptr s32_mem = onednn::convert_zp_data_to_s32(node.get_attached_memory_ptr());
         node.attach_memory(s32_mem, false);
         zero_point_mask = is_per_tensor ? 0 : 2;
         attrs->set_zero_points_mask(DNNL_ARG_SRC, zero_point_mask);
@@ -197,6 +223,12 @@ protected:
                                                                             int& zero_point_mask,
                                                                             dnnl::memory::data_type& wzp_data_type) {
         auto attrs = impl_params.attrs_onednn;
+
+        // accumulation_mode::any allows oneDNN to use f16 as the accumulation type.
+        if ((impl_params.get_input_layout(0).data_type == data_types::f16) &&
+            (impl_params.prog->get_config().get_execution_mode() != ov::hint::ExecutionMode::ACCURACY)) {
+            attrs->set_accumulation_mode(dnnl::accumulation_mode::any);
+        }
 
         if (arg.activations_zero_points_term()) {
             auto& a_zp = arg.activations_zero_points();
@@ -239,7 +271,7 @@ protected:
         auto shape_consistent = onednn::keep_weights_reorder_shape_consistent(source_weights_layout, target_weights_desc);
         OPENVINO_ASSERT(shape_consistent, "[GPU] Input shape and output shape of weight reorder should be same.");
 
-        auto source_weights_desc = onednn::layout_to_memory_desc(source_weights_layout);
+        auto source_weights_desc = onednn::layout_to_memory_desc(source_weights_layout, dnnl::memory::format_tag::undef);
 
         const bool weights_format = true;
         auto traits = convert_memory_desc_to_traits(target_weights_desc, weights_format, grouped_weights);
@@ -278,9 +310,7 @@ public:
             ob << make_data(&_wzp_data_type, sizeof(dnnl::memory::data_type));
         }
 
-        std::vector<uint8_t> prim_cache;
-        prim_cache = _prim.get_cache_blob();
-        ob << prim_cache;
+        ob << get_cache_blob();
 #endif
     }
 
@@ -295,9 +325,10 @@ public:
 
         const kernel_impl_params* impl_params = reinterpret_cast<kernel_impl_params*>(ib.getKernelImplParams());
 
-        auto input_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(0), dnnl::memory::format_tag::undef);
-        auto weights_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(1), dnnl::memory::format_tag::any);
-        auto output_md = onednn::layout_to_memory_desc(impl_params->get_output_layout(), dnnl::memory::format_tag::undef);
+        auto [input_md, weights_md, output_md] = onednn::get_conv_memory_descs(impl_params->get_input_layout(0),
+                                                                                impl_params->get_input_layout(1),
+                                                                                impl_params->get_output_layout(),
+                                                                                dnnl::memory::format_tag::undef);
 
         dnnl::memory::dims strides;
         dnnl::memory::dims dilates;
@@ -312,6 +343,13 @@ public:
         ib >> zero_bias;
 
         auto prim = impl_params->typed_desc<convolution>();
+        if (prim->activations_zero_points.is_valid()) {
+            auto& a_zp = impl_params->get_program().get_node_ptr(prim->id)->as<convolution>().activations_zero_points().as<data>();
+            memory::ptr s32_mem = onednn::convert_zp_data_to_s32(a_zp.get_attached_memory_ptr());
+            if (s32_mem != nullptr) {
+                a_zp.attach_memory(s32_mem, false);
+            }
+        }
         bool has_wzp = prim->weights_zero_points.is_valid();
         if (has_wzp) {
             ib >> make_data(&_wzp_data_type, sizeof(dnnl::memory::data_type));
@@ -327,7 +365,7 @@ public:
                                     *_attrs.get());
             _pd = *prim_desc;
         } else {
-            auto bias_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(2), dnnl::memory::format_tag::any, true);
+            auto bias_md = onednn::layout_to_memory_desc_flatten(impl_params->get_input_layout(2), dnnl::memory::format_tag::any);
             auto prim_desc = std::make_shared<dnnl::convolution_forward::primitive_desc>(
                                     ib.get_engine().get_onednn_engine(),
                                     dnnl::prop_kind::forward_inference, dnnl::algorithm::convolution_direct,
@@ -342,13 +380,13 @@ public:
         std::vector<uint8_t> prim_cache;
         ib >> prim_cache;
 
-        _prim = dnnl::primitive(_pd, prim_cache);
+        _prim = make_primitive_from_blob(prim_cache);
 #endif
     }
 
     static std::unique_ptr<primitive_impl> create(const convolution_node& arg, const kernel_impl_params& impl_params) {
         auto& engine = impl_params.prog->get_engine();
-        auto& config = impl_params.prog->get_config();
+        const auto& config = impl_params.prog->get_config();
         int zero_point_mask = -1;
         dnnl::memory::data_type wzp_data_type = dnnl::memory::data_type::undef;
 
@@ -381,8 +419,9 @@ in_out_fmts_t ConvolutionImplementationManager::query_formats(const program_node
     auto prim_desc = get_convolution_primitive_descriptor(*node.get_kernel_impl_params(), dnnl::primitive_attr(), dnnl::memory::format_tag::any);
 
     for (size_t idx = 0 ; idx < node.get_dependencies().size() ; idx++) {
-        if (node.get_dependency(idx).is_constant())
+        if (node.get_dependency(idx).is_constant()) {
             continue;
+        }
 
         // Conv or deconv gets a preferred format for its data input based on source memory description
         // But an input format for fused post-ops should be same with an output format of conv/deconv
@@ -400,8 +439,9 @@ in_out_fmts_t ConvolutionImplementationManager::query_formats(const program_node
         }
 
         // WA: Avoid b_fs_yx_fsv2 because Onednn tag aBcd2b is not declared.
-        if (src_fmt == format::b_fs_yx_fsv2)
+        if (src_fmt == format::b_fs_yx_fsv2) {
             src_fmt = format::byxf;
+        }
 
         // WA: shallow convolution needs to set input format by bfyx.
         //     onednn recommended byxf for input format. It will insert reorder before shallow conv.
@@ -416,7 +456,6 @@ in_out_fmts_t ConvolutionImplementationManager::query_formats(const program_node
             if (node.get_output_layout().get_rank() == 4 && node.get_dependency(0).is_type<permute>()) {
                 auto& pnode = node.get_dependency(0).as<permute>();
                 can_optimize_permute = pnode.get_users().size() == 1
-                    && pnode.get_output_layout().data_type == node.get_output_layout().data_type
                     && !pnode.has_fused_primitives()
                     && !pnode.is_output() && pnode.get_input_layout(0).is_static()
                     && pnode.is_reverse_rotating_except_batch();
@@ -441,8 +480,9 @@ in_out_fmts_t ConvolutionImplementationManager::query_formats(const program_node
     }
 
     // WA: Avoid b_fs_yx_fsv2 because Onednn tag aBcd2b is not declared.
-    if (out_fmts[0] == format::b_fs_yx_fsv2)
+    if (out_fmts[0] == format::b_fs_yx_fsv2) {
         out_fmts[0] = format::byxf;
+    }
 
     // Errata: Best impl for shallow input conv with zero-point ops is ocl:xe_lp.
     if (in_fmts[0] == format::bfyx) {

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -62,6 +62,13 @@ struct ProfilingInfo {
      * @brief Node type.
      */
     std::string node_type;
+
+    /**
+     * @brief The node start timestamp, in microseconds, from the backend profiling clock epoch.
+     *
+     * A value of zero indicates an invalid/unavailable timestamp.
+     */
+    std::chrono::microseconds start_time;
 };
 
 }  // namespace ov

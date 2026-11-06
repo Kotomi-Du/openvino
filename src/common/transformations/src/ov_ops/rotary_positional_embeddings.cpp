@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -92,10 +92,14 @@ bool RoPE::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("input_trans0213", m_config.input_trans0213);
     visitor.on_attribute("output_trans0213", m_config.output_trans0213);
     visitor.on_attribute("is_interleaved", m_config.is_interleaved);
+    visitor.on_attribute("input_interleaved", m_config.input_interleaved);
     visitor.on_attribute("rotary_ndims", m_config.rotary_ndims);
     visitor.on_attribute("is_chatglm", m_config.is_chatglm);
     visitor.on_attribute("support_2d_rope", m_config.support_2d_rope);
+    visitor.on_attribute("support_3d_rope", m_config.support_3d_rope);
     visitor.on_attribute("is_qwen", m_config.is_qwen);
+    visitor.on_attribute("use_rope_cache", m_config.use_rope_cache);
+    visitor.on_attribute("is_ltx_video", m_config.is_ltx_video);
     visitor.on_attribute("head_cnt", m_config.head_cnt);
     visitor.on_attribute("head_size", m_config.head_size);
     visitor.on_attribute("gather_position_arg_id", m_config.gather_position_arg_id);

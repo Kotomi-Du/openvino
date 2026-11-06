@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -46,11 +46,8 @@ using RMSNormDecompositionParams = std::tuple<std::vector<InputShape>,          
 class RMSNormDecomposition : public testing::WithParamInterface<RMSNormDecompositionParams>,
                              virtual public ov::test::SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<RMSNormDecompositionParams> obj) {
-        std::vector<InputShape> input_shapes;
-        ov::element::Type input_precision;
-
-        std::tie(input_shapes, input_precision) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<RMSNormDecompositionParams>& obj) {
+        const auto& [input_shapes, input_precision] = obj.param;
 
         std::ostringstream result;
         result << "IS=(";
@@ -115,10 +112,7 @@ protected:
     void SetUp() override {
         targetDevice = ov::test::utils::DEVICE_GPU;
 
-        std::vector<InputShape> input_shapes;
-        ov::element::Type input_precision;
-
-        std::tie(input_shapes, input_precision) = GetParam();
+        const auto& [input_shapes, input_precision] = GetParam();
 
         init_input_shapes(input_shapes);
 
@@ -133,11 +127,7 @@ TEST_P(RMSNormDecomposition, Inference) {
 }
 
 TEST_P(RMSNormDecomposition, Inference_cached) {
-    std::stringstream ss;
-    ss << "gpu_model_cache_" << std::hash<std::string>{}(
-          std::string(::testing::UnitTest::GetInstance()->current_test_info()->test_suite_name()) +
-          std::string(::testing::UnitTest::GetInstance()->current_test_info()->name()));
-    std::string cacheDirName = ss.str();
+    std::string cacheDirName = ov::test::utils::generateTestFilePrefix() + "_gpu_model_cache";
     {
         ov::test::utils::removeFilesWithExt(cacheDirName, "blob");
         ov::test::utils::removeFilesWithExt(cacheDirName, "cl_cache");

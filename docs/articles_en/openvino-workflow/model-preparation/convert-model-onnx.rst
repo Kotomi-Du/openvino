@@ -21,6 +21,18 @@ that enables AI developers to easily transfer models between different framework
    for more details. Using ``openvino.convert_model`` is still recommended if the model
    load latency is important for the inference application.
 
+.. note::
+
+   The ONNX Frontend uses the ``GraphIterator`` interface by default
+   for file, stream, and experimental C++ ``ModelProto`` pointer inputs,
+   including the CLI ``ovc`` tool and the Python
+   ``openvino.convert_model`` function. The importer assigns the friendly
+   name ``onnx_Frontend_IR`` instead of the original ONNX graph name.
+   This also applies to stream and ``ModelProto`` inputs. If you encounter
+   issues, set the environment variable
+   ``ONNX_ITERATOR=0`` to fall back to the legacy path. The legacy
+   path is planned for removal in future releases.
+
 Converting an ONNX Model
 ########################
 

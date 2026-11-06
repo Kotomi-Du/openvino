@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,7 @@
 #include "openvino/pass/matcher_pass.hpp"
 #include "snippets/pass/tokenization.hpp"
 
-namespace ov {
-namespace snippets {
-namespace pass {
+namespace ov::snippets::pass {
 
 /**
  * @interface TokenizeGatedMLPSnippets
@@ -26,12 +24,10 @@ namespace pass {
  *         FullyConnected
  * @ingroup snippets
  */
-class TokenizeGatedMLPSnippets: public ov::pass::MatcherPass {
+class TokenizeGatedMLPSnippets : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("snippets::pass::TokenizeGatedMLPSnippets");
-    TokenizeGatedMLPSnippets(const SnippetsTokenization::Config& config);
+    explicit TokenizeGatedMLPSnippets(const TokenizationConfig& config);
 };
 
-}  // namespace pass
-}  // namespace snippets
-}  // namespace ov
+}  // namespace ov::snippets::pass

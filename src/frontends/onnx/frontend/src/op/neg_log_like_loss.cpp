@@ -1,8 +1,7 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "core/attribute.hpp"
 #include "core/operator_set.hpp"
 #include "exceptions.hpp"
 #include "openvino/op/broadcast.hpp"
@@ -29,13 +28,8 @@
 using namespace ov::op;
 using ov::Shape;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
-namespace opset_1 {
+namespace ov::frontend::onnx::ai_onnx::opset_1 {
 
-namespace detail {
 static std::shared_ptr<ov::Node> get_dynamic_all_axes_range(const ov::Output<ov::Node>& input) {
     const auto shape_of_input = std::make_shared<v3::ShapeOf>(input);
     const auto scalar = v0::Constant::create(ov::element::i32, ov::Shape{1}, {0});
@@ -46,12 +40,12 @@ static std::shared_ptr<ov::Node> get_dynamic_all_axes_range(const ov::Output<ov:
     return std::make_shared<v4::Range>(start, rank_of_input_scalar, step, ov::element::i64);
 }
 
-ov::OutputVector negative_log_likelihood_loss(const ov::OutputVector inputs,
-                                              const std::string reduction,
-                                              bool use_ignore_index = false,
-                                              const int64_t ignore_index_value = 0) {
-    // Operator definition:
-    // https://github.com/onnx/onnx/blob/a90ee0519933bd7412b04a3b7472eb550e78fcaf/onnx/defs/math/old.cc#L14
+// Operator definition:
+// https://github.com/onnx/onnx/blob/a90ee0519933bd7412b04a3b7472eb550e78fcaf/onnx/defs/math/old.cc#L14
+ov::OutputVector negative_log_likelihood_loss_impl(const ov::OutputVector inputs,
+                                                   const std::string reduction,
+                                                   bool use_ignore_index = false,
+                                                   const int64_t ignore_index_value = 0) {
     const auto num_inputs = inputs.size();
     const auto& data = inputs[0];
     const auto& target = inputs[1];
@@ -142,36 +136,22 @@ ov::OutputVector negative_log_likelihood_loss(const ov::OutputVector inputs,
 
     return {loss};
 }
-}  // namespace detail
 
 ov::OutputVector negative_log_likelihood_loss(const ov::frontend::onnx::Node& node) {
     common::default_op_checks(node, 2);
     const auto inputs = node.get_ov_inputs();
 
     const auto reduction = node.get_attribute_value<std::string>("reduction", "mean");
-    bool ignore_index = node.has_attribute("ignore_index") == true;
-    int64_t ignore_index_value = 0;
-
-    // In some cases attributemay exists, but has an "undefined" type, which means for us "not exist"
-    if (ignore_index) {
-        const auto& attr = node.get_attribute("ignore_index");
-        ignore_index = attr.get_type() != Attribute::Type::undefined;
-        if (ignore_index) {
-            ignore_index_value = node.get_attribute_value<int64_t>("ignore_index");
-        }
-    }
+    const bool ignore_index = node.has_attribute("ignore_index");
+    const auto ignore_index_value = ignore_index ? node.get_attribute_value<int64_t>("ignore_index") : 0;
 
     CHECK_VALID_NODE(node,
                      reduction == "none" || reduction == "sum" || reduction == "mean",
                      "NegativeLogLikelihoodLoss expects reduction: none, sum, mean. Got: ",
                      reduction);
 
-    return detail::negative_log_likelihood_loss(inputs, reduction, ignore_index, ignore_index_value);
+    return negative_log_likelihood_loss_impl(inputs, reduction, ignore_index, ignore_index_value);
 }
 
 ONNX_OP("NegativeLogLikelihoodLoss", OPSET_SINCE(1), ai_onnx::opset_1::negative_log_likelihood_loss);
-}  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx::opset_1

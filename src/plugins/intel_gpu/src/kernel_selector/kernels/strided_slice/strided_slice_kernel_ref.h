@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -50,7 +50,7 @@ struct strided_slice_params : public base_params {
 class StridedSliceKernelRef : public KernelBaseOpenCL {
 public:
     StridedSliceKernelRef() : KernelBaseOpenCL("strided_slice_ref") {}
-    virtual ~StridedSliceKernelRef() {}
+    ~StridedSliceKernelRef() override = default;
     virtual JitConstants GetJitConstants(const strided_slice_params& params) const;
     virtual CommonDispatchData SetDefault(const strided_slice_params& params) const;
     KernelsData GetKernelsData(const Params& params) const override;

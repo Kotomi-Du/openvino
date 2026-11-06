@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -19,15 +19,13 @@
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace pass {
+namespace ov::frontend::pytorch::pass {
 
 using namespace ov::op;
 
 MinMaxPrimListConstructReplacer::MinMaxPrimListConstructReplacer() {
-    const auto& op = ov::pass::pattern::wrap_type<ov::op::util::FrameworkNode>();
+    const auto& op =
+        ov::pass::pattern::wrap_type<ov::op::util::FrameworkNode>(fw_node_predicate({"prim::min", "prim::max"}));
 
     ov::matcher_pass_callback callback = [](ov::pass::pattern::Matcher& m) {
         bool is_min = false;
@@ -85,7 +83,4 @@ MinMaxPrimListConstructReplacer::MinMaxPrimListConstructReplacer() {
     this->register_matcher(m, callback);
 };
 
-}  // namespace pass
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::pass

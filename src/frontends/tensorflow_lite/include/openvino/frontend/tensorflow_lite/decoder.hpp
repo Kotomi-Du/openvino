@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #pragma once
@@ -10,9 +10,7 @@
 #include "openvino/frontend/tensorflow_lite/sparsity_info.hpp"
 #include "openvino/frontend/tensorflow_lite/visibility.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow_lite {
+namespace ov::frontend::tensorflow_lite {
 
 struct TENSORFLOW_LITE_FRONTEND_API TensorMetaInfo {
     std::shared_ptr<QuantizationInfo> m_quantization_info;
@@ -20,6 +18,7 @@ struct TENSORFLOW_LITE_FRONTEND_API TensorMetaInfo {
     ov::PartialShape m_partial_shape;
     ov::element::Type m_element_type;
     const uint8_t* m_tensor_data;
+    size_t m_tensor_data_size = 0;
     std::string m_tensor_name;
 };
 
@@ -96,6 +95,4 @@ public:
     ~DecoderBaseTensor() override;
 };
 
-}  // namespace tensorflow_lite
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow_lite

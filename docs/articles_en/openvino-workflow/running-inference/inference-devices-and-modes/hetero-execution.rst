@@ -16,8 +16,8 @@ Its purpose is to:
 
 Execution via the heterogeneous mode can be divided into two independent steps:
 
-1. Setting hardware affinity to operations (`ov::Core::query_model <https://docs.openvino.ai/2025/api/c_cpp_api/classov_1_1_core.html#class-ov-core>`__ is used internally by the Hetero device).
-2. Compiling a model to the Heterogeneous device assumes splitting the model to parts, compiling them on the specified devices (via `ov::device::priorities <https://docs.openvino.ai/2025/api/c_cpp_api/structov_1_1device_1_1_priorities.html>`__), and executing them in the Heterogeneous mode. The model is split to subgraphs in accordance with the affinities, where a set of connected operations with the same affinity is to be a dedicated subgraph. Each subgraph is compiled on a dedicated device and multiple `ov::CompiledModel <https://docs.openvino.ai/2025/api/c_cpp_api/classov_1_1_compiled_model.html#class-ov-compiledmodel>`__ objects are made, which are connected via automatically allocated intermediate tensors.
+1. Setting hardware affinity to operations (`ov::Core::query_model <https://docs.openvino.ai/2026/api/c_cpp_api/classov_1_1_core.html#class-ov-core>`__ is used internally by the Hetero device).
+2. Compiling a model to the Heterogeneous device assumes splitting the model to parts, compiling them on the specified devices (via `ov::device::priorities <https://docs.openvino.ai/2026/api/c_cpp_api/structov_1_1device_1_1_priorities.html>`__), and executing them in the Heterogeneous mode. The model is split to subgraphs in accordance with the affinities, where a set of connected operations with the same affinity is to be a dedicated subgraph. Each subgraph is compiled on a dedicated device and multiple `ov::CompiledModel <https://docs.openvino.ai/2026/api/c_cpp_api/classov_1_1_compiled_model.html#class-ov-compiledmodel>`__ objects are made, which are connected via automatically allocated intermediate tensors.
 
    If you set pipeline parallelism (via ``ov::hint::model_distribution_policy``), the model is split into multiple stages, and each stage is assigned to a different device. The output of one stage is fed as input to the next stage.
 
@@ -51,7 +51,7 @@ Manual and Automatic Modes for Assigning Affinities
 The Manual Mode
 +++++++++++++++++++++
 
-It assumes setting affinities explicitly for all operations in the model using `ov::Node::get_rt_info <https://docs.openvino.ai/2025/api/c_cpp_api/classov_1_1_node.html#class-ov-node>`__ with the ``"affinity"`` key.
+It assumes setting affinities explicitly for all operations in the model using `ov::Node::get_rt_info <https://docs.openvino.ai/2026/api/c_cpp_api/classov_1_1_node.html#class-ov-node>`__ with the ``"affinity"`` key.
 
 If you assign specific operation to a specific device, make sure that the device actually supports the operation.
 Randomly selecting operations and setting affinities may lead to decrease in model accuracy. To avoid that, try to set the related operations or subgraphs of this operation to the same affinity, such as the constant operation that will be folded into this operation.
@@ -158,12 +158,12 @@ Importantly, the automatic mode will not work if any operation in a model has it
 
 .. note::
 
-   `ov::Core::query_model <https://docs.openvino.ai/2025/api/c_cpp_api/classov_1_1_core.html#_CPPv4NK2ov4Core11query_modelERKNSt10shared_ptrIKN2ov5ModelEEERKNSt6stringERK6AnyMap>`__ does not depend on affinities set by a user. Instead, it queries for an operation support based on device capabilities.
+   `ov::Core::query_model <https://docs.openvino.ai/2026/api/c_cpp_api/classov_1_1_core.html#_CPPv4NK2ov4Core11query_modelERKNSt10shared_ptrIKN2ov5ModelEEERKNSt6stringERK6AnyMap>`__ does not depend on affinities set by a user. Instead, it queries for an operation support based on device capabilities.
 
 Configure fallback devices
 ##########################
 
-If you want different devices in Hetero execution to have different device-specific configuration options, you can use the special helper property `ov::device::properties <https://docs.openvino.ai/2025/api/c_cpp_api/structov_1_1device_1_1_properties.html#struct-ov-device-properties>`__:
+If you want different devices in Hetero execution to have different device-specific configuration options, you can use the special helper property `ov::device::properties <https://docs.openvino.ai/2026/api/c_cpp_api/structov_1_1device_1_1_properties.html#struct-ov-device-properties>`__:
 
 
 .. tab-set::
@@ -207,6 +207,29 @@ You can use the GraphViz utility or a file converter to view the images. On the 
 
 * ``sudo apt-get install xdot``
 * ``xdot hetero_subgraphs.dot``
+
+For HETERO compilation-time diagnostics, you can also enable internal performance logging with the
+``OPENVINO_HETERO_PERF`` environment variable:
+
+* ``OPENVINO_HETERO_PERF=1`` enables high-level compilation timing for:
+
+   * ``Plugin::compile_model`` - top-level HETERO compilation flow.
+   * ``CompiledModel::compile_model`` - submodel compilation and overall HETERO compiled-model construction.
+   * ``CompiledModel::compile_model submodel[...]`` - per-subgraph compile time on the target device.
+   * ``Plugin::query_model_update`` - overall multi-device query and graph-partition update time.
+
+* ``OPENVINO_HETERO_PERF=2`` enables all level-1 logs and per-device query/update breakdown for:
+
+   * ``Plugin::query_model_update device timing`` - per-device summary including query, mask, clone, and device-subgraph state.
+
+* ``OPENVINO_HETERO_PERF=3`` enables all level-2 logs and additional subgraph-splitting diagnostics for:
+
+   * ``SubgraphCollector::SubgraphCollector`` - subgraph collector setup.
+   * ``SubgraphCollector::split_cyclic_dependencies`` - affinity-boundary and cycle-resolution work during graph splitting.
+   * ``partition_and_rewrite_model`` - subgraph collection and model rewrite time per partition pass.
+
+These logs are intended for HETERO-specific compilation analysis and are separate from runtime layer profiling such as
+sample application ``-pc`` output.
 
 You can use performance data (in sample applications, it is the option ``-pc``) to get the performance data on each subgraph.
 

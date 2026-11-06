@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,10 +10,7 @@
 
 using namespace std;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 OutputVector translate_write_file(const NodeContext& node) {
     default_op_checks(node, 1, {"WriteFile"});
@@ -27,7 +24,4 @@ OutputVector translate_write_file(const NodeContext& node) {
     // KeepInGraphOp is added to Sink vector in ov::Model and is kept in the graph until the end of conversion.
     return {write_file_node};
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

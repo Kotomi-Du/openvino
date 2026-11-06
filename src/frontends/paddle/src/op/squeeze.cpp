@@ -1,14 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/opsets/opset6.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 NamedOutputs squeeze(const NodeContext& node) {
     auto data = node.get_input("X");
     std::vector<int32_t> axes;
@@ -25,7 +22,4 @@ NamedOutputs squeeze(const NodeContext& node) {
     }
     return node.default_single_output_mapping(out, {"Out"});
 }
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

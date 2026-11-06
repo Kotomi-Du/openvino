@@ -1,11 +1,13 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
 import shutil
 import os
 import sys
-import subprocess
+import subprocess  # nosec B404
+import csv
+import shlex
 from enum import Enum
 import re
 import json
@@ -59,6 +61,13 @@ def getParams():
         help="run utility with specified name",
         default="no_utility",
     )
+    parser.add_argument(
+        "-t",
+        "--template",
+        dest="template",
+        help="launched with template",
+        default="undefined",
+    )
 
     parser.add_argument(
         "-x",
@@ -84,6 +93,20 @@ def getParams():
         presetCfgData = loadJSONToObject(presetCfgPath)
         return argHolder, presetCfgData, presetCfgPath
 
+    if argHolder.template != "undefined":
+        it = iter(additionalArgs)
+        addDict = dict(zip(it, it))
+        mergedArgs = {**(args.__dict__), **addDict}
+        argHolder = DictHolder(mergedArgs)
+        customCfgPath = "custom_cfg_on_run.json"
+        jsonObj = {"template" : {"name" : argHolder.template}}
+        for k, v in addDict.items():
+            jsonObj['template'][k] = v
+            curTempl = jsonObj['template']
+            curTempl[k.replace('-', '')] = v
+            jsonObj['template'] = curTempl
+        saveJSON(jsonObj, customCfgPath)
+
     customCfgData = loadJSONToString(customCfgPath)
     if mulKey in customCfgData:
         customCfgData = multiplyCfgByKey(json.loads(customCfgData))
@@ -108,6 +131,9 @@ def loadJSONToObject(path):
     file.close()
     return obj
 
+def saveJSON(obj, path):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, ensure_ascii=False, indent=4)
 
 def customizeCfg(customCfg, presetCfg: str):
     if isinstance(customCfg, list):
@@ -362,6 +388,14 @@ def runCommandList(commit, cfgData):
 
 
 def fetchAppOutput(cfg, commit):
+    appCmd = cfg["appCmd"]
+    if isinstance(appCmd, list):
+        aggregatedOutput = ""
+        for cmd in appCmd:
+            curCfg = deepCopyJSON(cfg)
+            curCfg["appCmd"] = cmd
+            aggregatedOutput = aggregatedOutput + fetchAppOutput(curCfg, commit)
+        return aggregatedOutput
     commitLogger = getCommitLogger(cfg, commit)
     appPath = cfg["appPath"]
     # format appPath if it was cashed
@@ -378,7 +412,6 @@ def fetchAppOutput(cfg, commit):
             envKey = env["name"]
             envVal = env["val"]
             newEnv[envKey] = envVal
-    appCmd = cfg["appCmd"]
     commitLogger.info("Run command: {command}".format(
         command=appCmd)
     )
@@ -452,8 +485,9 @@ def fetchAppOutput(cfg, commit):
         p.wait()
         p.communicate()
     else:
+        popenCmd = appCmd if shellFlag else shlex.split(appCmd)
         p = subprocess.Popen(
-            appCmd.split(),
+            popenCmd,
             cwd=appPath,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -463,6 +497,101 @@ def fetchAppOutput(cfg, commit):
         output, err = p.communicate()
         output = output.decode("utf-8")
     return output
+
+
+def stripCliOptionWithValue(tokens, options):
+    filtered = []
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in options:
+            idx += 2
+            continue
+        if any(token.startswith(option + "=") for option in options):
+            idx += 1
+            continue
+        filtered.append(token)
+        idx += 1
+    return filtered
+
+
+def stripCliBoolOption(tokens, options):
+    bool_values = {"yes", "true", "t", "y", "1", "no", "false", "f", "n", "0"}
+    filtered = []
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in options:
+            idx += 1
+            if idx < len(tokens) and tokens[idx].lower() in bool_values:
+                idx += 1
+            continue
+        if any(token.startswith(option + "=") for option in options):
+            idx += 1
+            continue
+        filtered.append(token)
+        idx += 1
+    return filtered
+
+
+def prepareBenchmarkMetricCommand(appCmd, reportDir):
+    posix = (os.name != 'nt')
+    tokens = shlex.split(appCmd, posix=posix)
+    tokens = stripCliOptionWithValue(tokens, {"-report_type", "--report_type"})
+    tokens = stripCliOptionWithValue(tokens, {"-report_folder", "--report_folder"})
+    tokens = stripCliBoolOption(tokens, {"-json_stats", "--json_stats"})
+    tokens.extend(["-report_type", "no_counters", "-report_folder", reportDir])
+    return " ".join(shlex.quote(t) for t in tokens) if posix else subprocess.list2cmdline(tokens)
+
+
+def getBenchmarkMetricReportPath(cfg, commit):
+    tmpDir = getActualPath("defaultTmpDir", cfg)
+    os.makedirs(tmpDir, exist_ok=True)
+    reportDir = os.path.join(tmpDir, "benchmark_metrics_{}".format(getMeaningfullCommitTail(commit)))
+    if os.path.exists(reportDir):
+        safeClearDir(reportDir, cfg)
+    else:
+        os.makedirs(reportDir)
+    return reportDir, os.path.join(reportDir, "benchmark_report.csv")
+
+
+def parseBenchmarkMetricReport(reportPath, metric):
+    def is_latency_median_key(key):
+        return key == "median latency (ms)" or key == "latency (ms)" or \
+            re.fullmatch(r"latency \(\d+ percentile\) \(ms\)", key) is not None
+
+    metricMatchers = {
+        "throughput": lambda key: key == "throughput",
+        "latency:average": lambda key: key in {"avg latency", "average latency (ms)"},
+        "latency:min": lambda key: key in {"min latency", "min latency (ms)"},
+        "latency:max": lambda key: key in {"max latency", "max latency (ms)"},
+        "latency:median": is_latency_median_key,
+    }
+    if metric not in metricMatchers:
+        raise CfgError("Benchmark metric {} is not supported".format(metric))
+
+    with open(reportPath, newline='', encoding='utf-8') as reportFile:
+        reader = csv.reader(reportFile, delimiter=';')
+        for row in reader:
+            if len(row) < 2:
+                continue
+            key = row[0].strip().lower()
+            value = row[1].strip()
+            if metricMatchers[metric](key):
+                return float(value)
+
+    raise CfgError("Metric {} was not found in {}".format(metric, reportPath))
+
+
+def fetchBenchmarkMetric(cfg, commit, metric):
+    if isinstance(cfg["appCmd"], list):
+        raise CfgError("Benchmark metric extraction expects a single benchmark_app command")
+
+    runCfg = deepCopyJSON(cfg)
+    reportDir, reportPath = getBenchmarkMetricReportPath(runCfg, commit)
+    runCfg["appCmd"] = prepareBenchmarkMetricCommand(runCfg["appCmd"], reportDir)
+    output = fetchAppOutput(runCfg, commit)
+    return output, parseBenchmarkMetricReport(reportPath, metric)
 
 
 def handleCommit(commit, cfgData):
@@ -727,6 +856,12 @@ def checkAndGetSubclass(clName, parentClass):
     else:
         return cl[0]
 
+def getClassByMethod(method, methodRes, parentClass):
+    cl = [cl for cl in parentClass.__subclasses__() if getattr(cl, method)() == methodRes]
+    if not (cl.__len__() == 1):
+        raise CfgError("Class returning {} doesn't exist".format(methodRes))
+    else:
+        return cl[0]
 
 class DictHolder:
     def __init__(self, dict: dict = None):
@@ -893,6 +1028,20 @@ def applySubstitutionRules(cfg: map, rules: list, commit: str=None):
             )
         )
         cfg = deepMapUpdate(cfg, pathToDst, dstPos)
+
+def simpleSubstitute(cfg: map, placeholder: str,
+                     fromPath: str, toPath: str):
+    rules = [
+            {
+                "name": "simple rule",
+                "enabled": True,
+                "type": "static",
+                "placeholder": placeholder,
+                "from": fromPath,
+                "to": toPath
+            }
+        ]
+    applySubstitutionRules(cfg, rules)
 
 def getMapValueByShortHash(map: dict, commit: str):
     for k in map:

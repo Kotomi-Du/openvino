@@ -1,27 +1,31 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "depth_to_space_kernel_base.h"
-#include "kernel_selector_utils.h"
+
 #include <string>
 #include <vector>
+
+#include "kernel_selector_utils.h"
 
 namespace kernel_selector {
 
 bool DepthToSpaceKernelBase::Validate(const Params& p) const {
     if (p.GetType() != KernelType::DEPTH_TO_SPACE) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const depth_to_space_params& params = static_cast<const depth_to_space_params&>(p);
-    for (auto& fused_op : params.fused_ops) {
-        if (!IsFusedPrimitiveSupported(fused_op))
-            return false;
+    for (const auto& fused_op : params.fused_ops) {
+        if (!IsFusedPrimitiveSupported(fused_op)) {
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
+        }
     }
 
-    if (params.inputs[0].Dimentions() > 5)
-        return false;
+    if (params.inputs[0].Dimentions() > 5) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }
@@ -32,8 +36,15 @@ JitConstants DepthToSpaceKernelBase::GetJitConstants(const depth_to_space_params
     jit.AddConstant(MakeJitConstant("BLOCK_SIZE", params.block_size));
     if (params.mode == DepthToSpaceMode::BLOCKS_FIRST) {
         jit.AddConstant(MakeJitConstant("BLOCKS_FIRST", 1));
-    } else {
+    } else if (params.mode == DepthToSpaceMode::DEPTH_FIRST) {
         jit.AddConstant(MakeJitConstant("DEPTH_FIRST", 1));
+    } else {
+        jit.AddConstant(MakeJitConstant("GROUPED_DEPTH_FIRST", 1));
+        jit.AddConstant(MakeJitConstant("FACTOR_T", params.factor_t));
+        jit.AddConstant(MakeJitConstant("FACTOR_S", params.factor_s));
+        jit.AddConstant(MakeJitConstant("CROP_BEGIN_T", params.crop_begin_t));
+        jit.AddConstant(
+            MakeJitConstant("CHANNEL_REPEATS", params.output_channels * params.factor_t * params.factor_s * params.factor_s / params.inputs[0].Feature().v));
     }
 
     return jit;
@@ -54,9 +65,18 @@ KernelsData DepthToSpaceKernelBase::GetCommonKernelsData(const Params& params) c
 
     auto& kernel = kd.kernels[0];
 
-    FillCLKernelData(kernel, dispatchData, params.engineInfo, kernelName, jit, entry_point,
-                     EXE_MODE_DEFAULT, false, false, 1, GetFusedPrimitiveInputsCount(params));
+    FillCLKernelData(kernel,
+                     dispatchData,
+                     params.engineInfo,
+                     kernelName,
+                     jit,
+                     entry_point,
+                     EXE_MODE_DEFAULT,
+                     false,
+                     false,
+                     1,
+                     GetFusedPrimitiveInputsCount(params));
 
-    return { kd };
+    return {kd};
 }
 }  // namespace kernel_selector

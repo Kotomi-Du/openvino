@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -27,9 +27,7 @@
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace jax {
+namespace ov::frontend::jax {
 namespace op {
 
 #define OP_CONVERTER(op) OutputVector op(const NodeContext& node)
@@ -105,6 +103,4 @@ const std::map<std::string, CreatorFunction> get_supported_ops_jaxpr() {
             {"tanh", op::translate_1to1_match_1_input<v0::Tanh>}};
 };
 
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax

@@ -1,21 +1,23 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-#include <cpu/x64/xbyak/xbyak.h>
-
-#include <cpu/x64/cpu_isa_traits.hpp>
-#include <cpu/x64/jit_generator.hpp>
-#include <cstddef>
-#include <vector>
-
-#include "emitters/snippets/x64/jit_binary_call_emitter.hpp"
-#include "openvino/core/type.hpp"
-#include "snippets/lowered/expression.hpp"
-#include "snippets/op/perf_count.hpp"
 #ifdef SNIPPETS_DEBUG_CAPS
 
-#    include "emitters/plugin/x64/utils.hpp"
 #    include "jit_perf_count_chrono_emitters.hpp"
+
+#    include <xbyak/xbyak.h>
+
+#    include <cpu/x64/cpu_isa_traits.hpp>
+#    include <cpu/x64/jit_generator.hpp>
+#    include <cstddef>
+#    include <vector>
+
+#    include "emitters/plugin/x64/jit_emitter.hpp"
+#    include "emitters/plugin/x64/utils.hpp"
+#    include "emitters/snippets/x64/jit_binary_call_emitter.hpp"
+#    include "openvino/core/type.hpp"
+#    include "snippets/lowered/expression.hpp"
+#    include "snippets/op/perf_count.hpp"
 
 using namespace dnnl::impl;
 using namespace dnnl::impl::utils;
@@ -27,10 +29,11 @@ using namespace Xbyak::util;
 namespace ov::intel_cpu {
 
 jit_perf_count_chrono_start_emitter::jit_perf_count_chrono_start_emitter(
-    dnnl::impl::cpu::x64::jit_generator* host,
+    dnnl::impl::cpu::x64::jit_generator_t* host,
     dnnl::impl::cpu::x64::cpu_isa_t host_isa,
     const ov::snippets::lowered::ExpressionPtr& expr)
-    : jit_binary_call_emitter(host, host_isa, expr->get_live_regs()) {
+    : jit_emitter(host, host_isa),
+      jit_binary_call_emitter(host, host_isa, expr->get_live_regs()) {
     m_start_node = ov::as_type_ptr<snippets::op::PerfCountBegin>(expr->get_node());
 }
 
@@ -44,7 +47,7 @@ void jit_perf_count_chrono_start_emitter::set_start_time(snippets::op::PerfCount
 
 void jit_perf_count_chrono_start_emitter::emit_impl([[maybe_unused]] const std::vector<size_t>& in_idxs,
                                                     [[maybe_unused]] const std::vector<size_t>& out_idxs) const {
-    init_binary_call_regs(0, {});
+    init_binary_call_regs(1, {});
     const Xbyak::Reg64& aux_reg = get_call_address_reg();
     const Xbyak::Reg64& callee_saved_reg = get_callee_saved_reg();
 
@@ -63,10 +66,11 @@ void jit_perf_count_chrono_start_emitter::emit_impl([[maybe_unused]] const std::
 }
 
 ///////////////////jit_perf_count_chrono_end_emitter////////////////////////////////////
-jit_perf_count_chrono_end_emitter::jit_perf_count_chrono_end_emitter(dnnl::impl::cpu::x64::jit_generator* host,
+jit_perf_count_chrono_end_emitter::jit_perf_count_chrono_end_emitter(dnnl::impl::cpu::x64::jit_generator_t* host,
                                                                      dnnl::impl::cpu::x64::cpu_isa_t host_isa,
                                                                      const ov::snippets::lowered::ExpressionPtr& expr)
-    : jit_binary_call_emitter(host, host_isa, expr->get_live_regs()) {
+    : jit_emitter(host, host_isa),
+      jit_binary_call_emitter(host, host_isa, expr->get_live_regs()) {
     m_end_node = ov::as_type_ptr<snippets::op::PerfCountEnd>(expr->get_node());
 }
 
@@ -80,7 +84,7 @@ void jit_perf_count_chrono_end_emitter::set_accumulated_time(snippets::op::PerfC
 
 void jit_perf_count_chrono_end_emitter::emit_impl([[maybe_unused]] const std::vector<size_t>& in_idxs,
                                                   [[maybe_unused]] const std::vector<size_t>& out_idxs) const {
-    init_binary_call_regs(0, {});
+    init_binary_call_regs(1, {});
     const Xbyak::Reg64& aux_reg = get_call_address_reg();
     const Xbyak::Reg64& callee_saved_reg = get_callee_saved_reg();
 

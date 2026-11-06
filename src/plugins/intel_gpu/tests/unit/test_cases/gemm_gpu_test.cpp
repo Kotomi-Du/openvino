@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,10 +7,15 @@
 
 #include <intel_gpu/primitives/input_layout.hpp>
 #include <intel_gpu/primitives/gemm.hpp>
+#include <intel_gpu/primitives/grouped_matmul.hpp>
 #include <intel_gpu/primitives/crop.hpp>
+#include <intel_gpu/primitives/reorder.hpp>
 #include "openvino/reference/matmul.hpp"
 #include "openvino/reference/transpose.hpp"
 #include "openvino/reference/reshape.hpp"
+#include "openvino/reference/grouped_matmul.hpp"
+
+ #include <numeric>
 
 #include "intel_gpu/runtime/compilation_context.hpp"
 #include "gemm_inst.h"
@@ -18,6 +23,7 @@
 #include "layout_optimizer.h"
 
 #include <cstddef>
+#include <algorithm>
 #include <vector>
 
 using namespace cldnn;
@@ -66,7 +72,7 @@ const std::vector<data_types> all_types = {
 };
 
 typedef std::tuple<
-std::vector<std::vector<int32_t>>,
+std::vector<std::vector<ov::Dimension::value_type>>,
 std::vector<std::vector<float>>,
 format,
 data_types,
@@ -82,7 +88,7 @@ class GemmGPUTest : public ::testing::TestWithParam<GemmParams> {
 protected:
     std::vector<std::vector<float>> input_data;
     std::vector<float> out_data;
-    std::vector<std::vector<int32_t>> shapes;
+    std::vector<std::vector<ov::Dimension::value_type>> shapes;
     format fmt{format::bfyx};
     data_types type;
     bool transpose_input0;
@@ -156,7 +162,7 @@ public:
         }
         auto outputs = network->execute();
         auto output = outputs.at("output").get_memory();
-        cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(output_ptr.size(), out_data.size());
         const auto abs_error = type == data_types::f16 ? 0.1 : 0.0001;
@@ -233,8 +239,8 @@ TEST_P(GemmGPUTestRandom, basic) {
 INSTANTIATE_TEST_SUITE_P(
     GemmGPUTest_basic_t1, GemmGPUTestRandom,
     ::testing::Combine(
-        ::testing::Values(std::vector<std::vector<int32_t>>{{1, 1, 3, 4},
-                                                            {1, 1, 1, 4}}),
+        ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{1, 1, 3, 4},
+                                                                              {1, 1, 1, 4}}),
         ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
         ::testing::ValuesIn(planar_formats), ::testing::ValuesIn(float_types),
         ::testing::Values(std::vector<float>{}),
@@ -244,8 +250,8 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     GemmGPUTest_basic_t2, GemmGPUTestRandom,
     ::testing::Combine(
-        ::testing::Values(std::vector<std::vector<int32_t>>{{1, 1, 4, 3},
-                                                            {1, 1, 4, 1}}),
+        ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{1, 1, 4, 3},
+                                                                              {1, 1, 4, 1}}),
         ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
         ::testing::ValuesIn(planar_formats), ::testing::ValuesIn(float_types),
         ::testing::Values(std::vector<float>{}),
@@ -301,7 +307,7 @@ public:
         auto outputs = network->execute();
 
         auto output = outputs.at("output").get_memory();
-        cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(output_ptr.size(), (uint32_t)3);
         for (uint32_t i = 0; i < out_data.size(); ++i) {
@@ -355,7 +361,7 @@ public:
         auto outputs = network->execute();
 
         auto output = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(output_ptr.size(), (uint32_t)3);
         for (uint32_t i = 0; i < out_data.size(); ++i) {
@@ -378,10 +384,10 @@ public:
             cldnn::mem_lock<ov::float16> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -545,10 +551,10 @@ public:
             cldnn::mem_lock<ov::float16> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -758,7 +764,7 @@ public:
             ASSERT_TRUE(impl->is_dynamic());
 
             auto output_prim_mem = outputs.begin()->second.get_memory();
-            cldnn::mem_lock<float> output_ptr(output_prim_mem, get_test_stream());
+            cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim_mem, get_test_stream());
 
             ASSERT_EQ(output_ptr.size(), (uint32_t)3);
             for (uint32_t i = 0; i < out_data1.size(); ++i) {
@@ -775,7 +781,7 @@ public:
             ASSERT_EQ(outputs.begin()->first, "gemm");
 
             auto output_prim_mem = outputs.begin()->second.get_memory();
-            cldnn::mem_lock<float> output_ptr(output_prim_mem, get_test_stream());
+            cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim_mem, get_test_stream());
 
             ASSERT_EQ(output_ptr.size(), (uint32_t)3);
             for (uint32_t i = 0; i < out_data2.size(); ++i) {
@@ -847,7 +853,7 @@ public:
             ASSERT_TRUE(impl->is_dynamic());
 
             auto output_prim_mem = outputs.begin()->second.get_memory();
-            cldnn::mem_lock<float> output_ptr(output_prim_mem, get_test_stream());
+            cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim_mem, get_test_stream());
 
             ASSERT_EQ(output_ptr.size(), (uint32_t)3);
             for (uint32_t i = 0; i < out_data1.size(); ++i) {
@@ -864,7 +870,7 @@ public:
             ASSERT_EQ(outputs.begin()->first, "gemm");
 
             auto output_prim_mem = outputs.begin()->second.get_memory();
-            cldnn::mem_lock<float> output_ptr(output_prim_mem, get_test_stream());
+            cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim_mem, get_test_stream());
 
             ASSERT_EQ(output_ptr.size(), (uint32_t)4);
             for (uint32_t i = 0; i < out_data2.size(); ++i) {
@@ -886,10 +892,10 @@ public:
             cldnn::mem_lock<float> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -950,7 +956,7 @@ public:
         auto outputs = network->execute();
 
         auto output_mem = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<float> output_ptr(output_mem, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
 
         ov::Shape ref_input0_shape = { BATCH_SIZE, 1, M_SIZE, K_SIZE };
         ov::Shape ref_input1_shape = { BATCH_SIZE, 1, K_SIZE, N_SIZE };
@@ -1032,10 +1038,10 @@ public:
             cldnn::mem_lock<float> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -1091,7 +1097,7 @@ public:
         auto outputs = network->execute();
 
         auto output_mem = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<float> output_ptr(output_mem, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
 
         ov::Shape ref_input0_shape;
         ov::Shape ref_input1_unsqueezed_shape;
@@ -1176,10 +1182,10 @@ public:
             cldnn::mem_lock<ov::float16> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -1263,7 +1269,7 @@ public:
         auto outputs = network->execute();
 
         auto output_mem = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<ov::float16> output_ptr(output_mem, get_test_stream());
+        cldnn::mem_lock<ov::float16, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
 
         ov::Shape ref_input0_shape;
         ov::Shape ref_input1_shape;
@@ -1334,6 +1340,107 @@ public:
         const auto abs_error = 0.0001;
         for (uint32_t i = 0; i < transposed_out_data.size(); ++i) {
             ASSERT_NEAR(output_ptr[i], transposed_out_data[i], abs_error);
+        }
+    }
+
+    // Test for FP16 accumulator accuracy
+    void test_fp16_accumulator_accuracy(bool is_caching_test = false) {
+        auto& engine = get_test_engine();
+
+        const size_t batch_size = 1;
+        const size_t m_size = 16;
+        const size_t n_size = 16;
+        const size_t k_size = 4096;  // Large K to amplify FP16 accumulation error significantly
+
+        // Create FP16 input layouts
+        auto input0_layout = layout{
+            ov::PartialShape({batch_size, 1, m_size, k_size}),
+            data_types::f16,
+            format::bfyx
+        };
+        auto input1_layout = layout{
+            ov::PartialShape({batch_size, 1, k_size, n_size}),
+            data_types::f16,
+            format::bfyx
+        };
+
+        auto input0_mem = engine.allocate_memory(input0_layout);
+        auto input1_mem = engine.allocate_memory(input1_layout);
+
+        // Create test data: very small uniform values to expose FP16 precision loss
+        // When 4096 values of ~0.0001f are accumulated in FP16, precision loss is significant
+        // because FP16 has only 10-bit mantissa
+        std::vector<ov::float16> input0_data(batch_size * m_size * k_size);
+        std::vector<ov::float16> input1_data(batch_size * k_size * n_size);
+
+        // Fill with small identical values: 0.0001f
+        // Sum = 4096 * 0.0001 * 0.0001 = 0.04096 per output element
+        // FP16 accumulation will lose precision over 4096 additions
+        const float val = 0.0001f;
+        for (size_t i = 0; i < input0_data.size(); ++i) {
+            input0_data[i] = ov::float16(val);
+        }
+        for (size_t i = 0; i < input1_data.size(); ++i) {
+            input1_data[i] = ov::float16(val);
+        }
+
+        set_values(input0_mem, input0_data);
+        set_values(input1_mem, input1_data);
+
+        // Build topology
+        topology topology;
+        topology.add(
+            input_layout("input0", input0_layout),
+            input_layout("input1", input1_layout),
+            gemm("gemm", {input_info("input0"), input_info("input1")}, data_types::f16, false, false, 1.0f, 0.0f),
+            reorder("output", input_info("gemm"), format::bfyx, data_types::f32)
+        );
+
+        ExecutionConfig config = get_test_default_config(engine);
+        config.set_property(ov::intel_gpu::optimize_data(true));
+        network::ptr network = get_network(engine, topology, config, get_test_stream_ptr(), is_caching_test);
+
+        network->set_input_data("input0", input0_mem);
+        network->set_input_data("input1", input1_mem);
+
+        auto outputs = network->execute();
+        auto output_mem = outputs.at("output").get_memory();
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
+
+        // Compute CPU reference with double precision
+        std::vector<double> ref_output(batch_size * m_size * n_size, 0.0);
+
+        for (size_t b = 0; b < batch_size; ++b) {
+            for (size_t m = 0; m < m_size; ++m) {
+                for (size_t n = 0; n < n_size; ++n) {
+                    double sum = 0.0;
+                    for (size_t k = 0; k < k_size; ++k) {
+                        size_t idx0 = b * m_size * k_size + m * k_size + k;
+                        size_t idx1 = b * k_size * n_size + k * n_size + n;
+                        sum += static_cast<double>(input0_data[idx0]) * static_cast<double>(input1_data[idx1]);
+                    }
+                    ref_output[b * m_size * n_size + m * n_size + n] = sum;
+                }
+            }
+        }
+
+        // Very strict tolerance: 0.1% relative error
+        const float tolerance = 0.001f;
+
+        for (size_t i = 0; i < ref_output.size(); ++i) {
+            float gpu_val = output_ptr[i];
+            float cpu_val = static_cast<float>(ref_output[i]);
+
+            float max_val = std::max(std::abs(gpu_val), std::abs(cpu_val));
+            float abs_error = std::abs(gpu_val - cpu_val);
+            float rel_error = max_val > 1e-9f ? (abs_error / max_val) : abs_error;
+
+            ASSERT_LE(rel_error, tolerance)
+                << "Mismatch at index " << i
+                << ": GPU=" << gpu_val
+                << ", CPU=" << cpu_val
+                << ", RelError=" << rel_error
+                << " (expected < " << tolerance << ")";
         }
     }
 
@@ -1436,7 +1543,7 @@ public:
         auto outputs = network->execute();
 
         auto output_mem = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<float> output_ptr(output_mem, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
 
         std::vector<float> ref_out_data;
         ref_out_data.resize(ov::shape_size(output_shape_default));
@@ -1485,6 +1592,74 @@ public:
         const auto abs_error = 0.0001;
         for (uint32_t i = 0; i < ref_out_data.size(); ++i) {
             ASSERT_NEAR(output_ptr[i], ref_out_data[i], abs_error) << "at " << i;
+        }
+    }
+
+    void test_transpose_matmul_1d_weight(bool is_input_dynamic, size_t M) {
+        tests::random_generator rg;
+        rg.set_seed(GET_SUITE_NAME);
+
+        auto& engine = get_test_engine();
+
+        const size_t K = 33;
+        ov::Shape in0_shape = {M, K};
+        ov::Shape in1_shape = {K};
+
+        auto in0_layout = is_input_dynamic
+            ? layout{ov::PartialShape::dynamic(in0_shape.size()), data_types::f32, format::bfyx}
+            : layout{ov::PartialShape(in0_shape), data_types::f32, format::bfyx};
+        auto in1_layout = is_input_dynamic
+            ? layout{ov::PartialShape::dynamic(in1_shape.size()), data_types::f32, format::bfyx}
+            : layout{ov::PartialShape(in1_shape), data_types::f32, format::bfyx};
+        auto input0_mem = engine.allocate_memory(layout{ov::PartialShape(in0_shape), data_types::f32, format::bfyx});
+        auto input1_mem = engine.allocate_memory(layout{ov::PartialShape(in1_shape), data_types::f32, format::bfyx});
+
+        auto input0_data = rg.generate_random_1d<float>(ov::shape_size(in0_shape), -2, 2);
+        auto input1_data = rg.generate_random_1d<float>(ov::shape_size(in1_shape), -2, 2);
+        set_values(input0_mem, input0_data);
+        set_values(input1_mem, input1_data);
+
+        topology topology;
+        topology.add(input_layout("input0", in0_layout),
+                     input_layout("input1", in1_layout),
+                     gemm("gemm", { input_info("input0"), input_info("input1") },
+                          data_types::f32, false, true, 1.0f, 0.0f, 2, 1)
+        );
+
+        ExecutionConfig config = get_test_default_config(engine);
+        config.set_property(ov::intel_gpu::optimize_data(true));
+        config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+        ov::intel_gpu::ImplementationDesc gemm_impl = { format::bfyx, "gemm_tiled_opt", impl_types::ocl };
+        config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"gemm", gemm_impl} }));
+        network::ptr network = get_network(engine, topology, config, get_test_stream_ptr(), false);
+        network->set_input_data("input0", input0_mem);
+        network->set_input_data("input1", input1_mem);
+
+        if (is_input_dynamic) {
+            auto inst = network->get_primitive("gemm");
+            auto impl = inst->get_impl();
+            ASSERT_TRUE(impl != nullptr);
+            ASSERT_TRUE(impl->is_dynamic());
+        }
+
+        auto outputs = network->execute();
+        auto output_mem = outputs.at("gemm").get_memory();
+        cldnn::mem_lock<float> output_ptr(output_mem, get_test_stream());
+
+        ov::Shape out_shape = {M};
+        std::vector<float> ref_out(M, 0.f);
+        ov::reference::matmul<float>(input0_data.data(),
+                                     input1_data.data(),
+                                     ref_out.data(),
+                                     in0_shape,
+                                     in1_shape,
+                                     out_shape,
+                                     false,
+                                     true);
+
+        ASSERT_EQ(output_ptr.size(), ref_out.size());
+        for (size_t i = 0; i < ref_out.size(); ++i) {
+            ASSERT_NEAR(output_ptr[i], ref_out[i], 0.001f) << "at " << i;
         }
     }
 
@@ -1552,7 +1727,7 @@ public:
         auto outputs = network->execute();
 
         auto output_mem = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<ov::float16> output_ptr(output_mem, get_test_stream());
+        cldnn::mem_lock<ov::float16, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
 
         std::vector<ov::float16> ref_out_data;
         ref_out_data.resize(ov::shape_size(output_shape_default));
@@ -1639,7 +1814,79 @@ public:
         auto outputs = network->execute();
 
         auto output_mem = outputs.at("gemm").get_memory();
-        cldnn::mem_lock<ov::float16> output_ptr(output_mem, get_test_stream());
+        cldnn::mem_lock<ov::float16, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
+
+        std::vector<ov::float16> ref_out_data;
+        ref_out_data.resize(ov::shape_size(output_shape));
+
+        ov::reference::matmul<ov::float16>(input_0_data.data(),
+                                     input_1_data.data(),
+                                     ref_out_data.data(),
+                                     input0_shape,
+                                     input1_shape,
+                                     output_shape,
+                                     false,
+                                     false);
+
+        ASSERT_EQ(output_ptr.size(), ref_out_data.size());
+
+        for (uint32_t i = 0; i < ref_out_data.size(); ++i) {
+            ASSERT_NEAR(output_ptr[i], ref_out_data[i], abs_error) << "at " << i;
+        }
+    }
+
+    // Same as test_dynamic_static_broadcast_3dim, but the batch which has to be broadcast
+    // belongs to the *first* input: [1, M, K] x [B, K, N] -> [B, M, N].
+    // gemm_inst::transform_output_layout seeds the output shape from input0, so only this
+    // direction exposes a missing batch broadcast in it.
+    void test_static_dynamic_broadcast_3dim_in0(std::vector<size_t> BMKN, bool is_caching_test, const double abs_error = 0.0001) {
+        tests::random_generator rg;
+        rg.set_seed(GET_SUITE_NAME);
+
+        auto& engine = get_test_engine();
+
+        std::vector<int64_t> input0_order = {0, 1, 2};
+        std::vector<int64_t> input1_order = {0, 1, 2};
+        std::vector<int64_t> output_order = {0, 1, 2};
+
+        size_t BATCH_SIZE = BMKN[0];
+        size_t M_SIZE = BMKN[1];
+        size_t K_SIZE = BMKN[2];
+        size_t N_SIZE = BMKN[3];
+
+        ov::Shape input0_shape = {          1, M_SIZE, K_SIZE };
+        ov::Shape input1_shape = { BATCH_SIZE, K_SIZE, N_SIZE };
+        ov::Shape output_shape = { BATCH_SIZE, M_SIZE, N_SIZE };
+
+        auto input0_layout = layout{ov::PartialShape(input0_shape), data_types::f16, format::bfyx};
+        auto input1_layout = layout{ov::PartialShape::dynamic(input1_shape.size()), data_types::f16, format::bfyx};
+
+        auto input0_mem = engine.allocate_memory(layout{ov::PartialShape(input0_shape), data_types::f16, format::bfyx});
+        auto input1_mem = engine.allocate_memory(layout{ov::PartialShape(input1_shape), data_types::f16, format::bfyx});
+
+        auto input_0_data = rg.generate_random_1d<ov::float16>(ov::shape_size(input0_shape), -2, 2);
+        auto input_1_data = rg.generate_random_1d<ov::float16>(ov::shape_size(input1_shape), -2, 2);
+
+        set_values(input0_mem, input_0_data);
+        set_values(input1_mem, input_1_data);
+
+        topology topology;
+        topology.add(input_layout("input0", input0_layout),
+                     input_layout("input1", input1_layout),
+                     gemm("gemm", { input_info("input0"), input_info("input1") }, data_types::f16, input0_order, input1_order, output_order)
+        );
+
+        ExecutionConfig config = get_test_default_config(engine);
+        config.set_property(ov::intel_gpu::optimize_data(true));
+        config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+        network::ptr network = get_network(engine, topology, config, get_test_stream_ptr(), is_caching_test);
+        network->set_input_data("input0", input0_mem);
+        network->set_input_data("input1", input1_mem);
+
+        auto outputs = network->execute();
+
+        auto output_mem = outputs.at("gemm").get_memory();
+        cldnn::mem_lock<ov::float16, mem_lock_type::read> output_ptr(output_mem, get_test_stream());
 
         std::vector<ov::float16> ref_out_data;
         ref_out_data.resize(ov::shape_size(output_shape));
@@ -1710,6 +1957,16 @@ TEST_F(gemm_gpu_tests, transpose_matmul_static_1d_f16) {
 
 TEST_F(gemm_gpu_tests, transpose_matmul_static_1d_f32) {
     this->test_transpose_matmul_f32(1, false, false, /*BMKN*/{19, 37, 23, 29}, /*input0_order*/{0}, /*input1_order*/{1, 0});
+}
+
+TEST_F(gemm_gpu_tests, transpose_matmul_1d_weight_static) {
+    // 1D weight with transpose_input1=true
+    this->test_transpose_matmul_1d_weight(false, 1200);
+}
+
+TEST_F(gemm_gpu_tests, transpose_matmul_1d_weight_dynamic) {
+    // Dynamic shape variant of 1D weight transpose test
+    this->test_transpose_matmul_1d_weight(true, 1200);
 }
 
 TEST_F(gemm_gpu_tests, transpose_matmul_dynamic_2d_f16) {
@@ -1796,6 +2053,14 @@ TEST_F(gemm_gpu_tests, test_dynamic_static_broadcast_3dim) {
     this->test_dynamic_static_broadcast_3dim(/*BMKN*/{2, 16, 2, 2}, false);
 }
 
+TEST_F(gemm_gpu_tests, test_static_dynamic_broadcast_3dim_in0) {
+    this->test_static_dynamic_broadcast_3dim_in0(/*BMKN*/{2, 16, 2, 2}, false);
+}
+
+TEST_F(gemm_gpu_tests, test_static_dynamic_broadcast_3dim_in0_cached) {
+    this->test_static_dynamic_broadcast_3dim_in0(/*BMKN*/{2, 16, 2, 2}, true);
+}
+
 TEST_F(gemm_gpu_tests, transpose_matmul_in0_indirect) {
     this->test_transpose_indirect(false, true, false);
 }
@@ -1847,7 +2112,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_t1t2,
         GemmGPUTestRandom,
         ::testing::Combine(
-            ::testing::Values(std::vector<std::vector<int32_t>>{{2, 1, 3, 4}, {2, 1, 4, 1}}),
+            ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{2, 1, 3, 4}, {2, 1, 4, 1}}),
             ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
             ::testing::ValuesIn(planar_formats),
             ::testing::ValuesIn(float_types),
@@ -1862,7 +2127,7 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     GemmGPUTest_basic_input3, GemmGPUTest,
     ::testing::Combine(
-        ::testing::Values(std::vector<std::vector<int32_t>>{
+        ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{
             {1, 1, 3, 2}, {1, 1, 2, 3}, {1, 1, 2, 2}}),
         ::testing::Values(std::vector<std::vector<float>>{
             {1.0f, 2.0f, 3.0f, 1.0f, 0.0f, 1.0f},
@@ -1889,7 +2154,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_input3_t1t2,
         GemmGPUTest,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 1, 1, 4, 3 }, { 1, 1, 3, 2 }, { 1, 1, 2, 4 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 1, 1, 4, 3 }, { 1, 1, 3, 2 }, { 1, 1, 2, 4 }}),
                     ::testing::Values(std::vector<std::vector<float>>{
                         {
                             1.0f, 2.0f, 3.0f, 4.0f,
@@ -1927,7 +2192,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_input3_1,
         GemmGPUTest,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 1, 1, 3, 4 }, { 1, 1, 2, 3 }, { 1, 1, 2, 4 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 1, 1, 3, 4 }, { 1, 1, 2, 3 }, { 1, 1, 2, 4 }}),
                     ::testing::Values(std::vector<std::vector<float>>{
                         {
                             1.0f, 1.0f, 0.0f,
@@ -1968,7 +2233,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_input3_t2,
         GemmGPUTest,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 1, 1, 3, 4 }, { 1, 1, 3, 2 }, { 1, 1, 2, 4 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 1, 1, 3, 4 }, { 1, 1, 3, 2 }, { 1, 1, 2, 4 }}),
                     ::testing::Values(std::vector<std::vector<float>>{
                         {
                             1.0f, 1.0f, 0.0f,
@@ -2008,7 +2273,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_input3_t1,
         GemmGPUTest,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 1, 1, 4, 3 }, { 1, 1, 2, 3 }, { 1, 1, 2, 4 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 1, 1, 4, 3 }, { 1, 1, 2, 3 }, { 1, 1, 2, 4 }}),
                     ::testing::Values(std::vector<std::vector<float>>{
                         {
                             1.0f, 2.0f, 3.0f, 4.0f,
@@ -2047,7 +2312,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_basic,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 2, 1, 4, 3 }, { 2, 1, 1, 4 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 2, 1, 4, 3 }, { 2, 1, 1, 4 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(planar_formats),
                     ::testing::ValuesIn(float_types),
@@ -2064,7 +2329,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_basic3_bfyx,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 5, 1, 500, 9 }, { 5, 1, 1, 500 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 5, 1, 500, 9 }, { 5, 1, 1, 500 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(planar_formats),
                     ::testing::ValuesIn(float_types),
@@ -2080,7 +2345,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_basic_smarcink2,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 2, 1, 3, 2 }, { 2, 1, 2, 3 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 2, 1, 3, 2 }, { 2, 1, 2, 3 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(planar_formats),
                     ::testing::ValuesIn(float_types),
@@ -2096,7 +2361,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_f_block_4d_formats,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 1, 32, 3, 2 }, { 1, 32, 2, 3 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 1, 32, 3, 2 }, { 1, 32, 2, 3 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(f_blocked_4d_formats),
                     ::testing::ValuesIn(float_types),
@@ -2112,7 +2377,7 @@ INSTANTIATE_TEST_SUITE_P(
         GemmGPUTest_b_block_4d_formats,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 32, 1, 3, 2 }, { 32, 1, 2, 3 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 32, 1, 3, 2 }, { 32, 1, 2, 3 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(b_blocked_4d_formats),
                     ::testing::ValuesIn(float_types),
@@ -2128,7 +2393,7 @@ INSTANTIATE_TEST_SUITE_P(
         DISABLED_GemmGPUTest_f_block_5d_formats,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 1, 16, 2, 3, 2 }, { 1, 16, 2, 2, 3 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 1, 16, 2, 3, 2 }, { 1, 16, 2, 2, 3 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(f_blocked_5d_formats),
                     ::testing::ValuesIn(float_types),
@@ -2144,7 +2409,7 @@ INSTANTIATE_TEST_SUITE_P(
         DISABLED_GemmGPUTest_b_block_5d_formats,
         GemmGPUTestRandom,
                 ::testing::Combine(
-                    ::testing::Values(std::vector<std::vector<int32_t>>{{ 16, 1, 2, 3, 2 }, { 16, 1, 2, 2, 3 }}),
+                    ::testing::Values(std::vector<std::vector<ov::Dimension::value_type>>{{ 16, 1, 2, 3, 2 }, { 16, 1, 2, 2, 3 }}),
                     ::testing::Values(std::vector<std::vector<float>>{{}, {}}),
                     ::testing::ValuesIn(b_blocked_5d_formats),
                     ::testing::ValuesIn(float_types),
@@ -2446,6 +2711,11 @@ struct gemm_base_test_params {
 #define CASE_GEMM_FP32_TILED_NN_BROADCAST_4 64, 1, 2, 1, 1, 2, 2, 2, 2, 2, 2, false, false, \
 1.0f, 4.0f, data_types::f32, data_types::f32, data_types::f32, data_types::f32, { -10, 10, 8 }, { -10, 10, 8 }, { -10, 10, 8 }
 
+// Reduced shape from real model MatMul_147904 (M=128, K=1025, N=199, f_num=32)
+// Key OOB conditions preserved: N%16=7, K%16=1; M and batch reduced to keep CPU ref cost low
+#define CASE_GEMM_FP32_TILED_NN_UNALIGNED_1 32, 199, 17, 1, 4, 1, 4, 1, 1, 1, 4, false, false, \
+1.0f, 0.0f, data_types::f32, data_types::f32, data_types::f32, data_types::f32, { -10, 10, 8 }, { -10, 10, 8 }, { -10, 10, 8 }
+
 #define CASE_GEMM_FP16_TILED_NN_1 64, 32, 32, 1, 1, 1, 1, 1, 1, 1, 1, false, false, \
 1.5f, 2.0f, data_types::f16, data_types::f16, data_types::f16, data_types::f16, { -1, 1, 1 }, { -1, 1, 1 }, { -1, 1, 1 }
 #define CASE_GEMM_FP16_TILED_NN_2 128, 64, 64, 1, 1, 1, 1, 1, 1, 1, 1, false, false, \
@@ -2612,6 +2882,13 @@ public:
 
         ov::intel_gpu::ImplementationDesc gemm_impl = getImplementationDesc(p);
 
+        // gemm_mmad_int8_slm requires SIMD8 with no wider-SIMD fallback
+        const auto& supported_simd = engine.get_device_info().supported_simd_sizes;
+        if (p.kernel_name == "gemm_mmad_int8_slm" &&
+            std::none_of(supported_simd.begin(), supported_simd.end(), [](size_t s) { return s == 8; })) {
+            GTEST_SKIP() << p.kernel_name << " requires SIMD8 which is not supported on this platform";
+        }
+
         ExecutionConfig cfg = get_test_default_config(engine);
         cfg.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"gemm_bfyx", gemm_impl} }));
 
@@ -2721,7 +2998,7 @@ public:
 
     layout get_input_layout(T& p, int in_no) {
         auto pad = p.pad;
-        std::vector<int> pad_ = { 0, 0, pad.spatial[0], pad.spatial[1] };
+        std::vector<ov::Dimension::value_type> pad_ = { 0, 0, pad.spatial[0], pad.spatial[1] };
         if (in_no == 0)
             return layout{ p.data_type_in0, p.input_format, p.in_shapes.at(0), padding{ pad_ } };
         else if (in_no == 1)
@@ -2948,10 +3225,10 @@ public:
             cldnn::mem_lock<ov::float16> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -3114,10 +3391,10 @@ public:
             cldnn::mem_lock<ov::float16> mem_ptr(mem, get_test_stream());
             auto&& l = mem->get_layout();
             auto data_idx = 0;
-            for (cldnn::tensor::value_type b = 0; b < l.batch(); ++b) {
-                for (cldnn::tensor::value_type f = 0; f < l.feature(); ++f) {
-                    for (cldnn::tensor::value_type y = 0; y < l.spatial(1); ++y) {
-                        for (cldnn::tensor::value_type x = 0; x < l.spatial(0); ++x) {
+            for (ov::Dimension::value_type b = 0; b < l.batch(); ++b) {
+                for (ov::Dimension::value_type f = 0; f < l.feature(); ++f) {
+                    for (ov::Dimension::value_type y = 0; y < l.spatial(1); ++y) {
+                        for (ov::Dimension::value_type x = 0; x < l.spatial(0); ++x) {
                             auto tensor_coord = cldnn::tensor{{b, f, x, y}, 0};
                             auto buffer_idx = l.get_linear_offset(tensor_coord);
                             mem_ptr[buffer_idx] = data[data_idx++];
@@ -3179,7 +3456,7 @@ public:
 
             ov::intel_gpu::ImplementationDesc gemm_impl = { format::bfyx, std::string(""), impl_types::onednn };
             ExecutionConfig cfg{ ov::intel_gpu::queue_type(QueueTypes::in_order),
-                                 ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"gemm", gemm_impl} }),
+                                 ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"gemm_ref", gemm_impl} }),
                                  ov::intel_gpu::optimize_data(true),
                                  ov::intel_gpu::allow_new_shape_infer(true) };
 
@@ -3561,6 +3838,13 @@ INSTANTIATE_TEST_SUITE_P(gemm_gpu, gemm_fp32_tiled_nn_broadcast_tests, ::testing
     gemm_base_test_params{ CASE_GEMM_FP32_TILED_NN_BROADCAST_4, "gemm_tiled_opt" },
 }));
 
+class gemm_fp32_tiled_nn_unaligned_tests : public ::GemmBaseTest<gemm_base_test_params, float, float, float, float, float> {};
+TEST_P(gemm_fp32_tiled_nn_unaligned_tests, basic) { auto p = GetParam(); execute(p); }
+
+INSTANTIATE_TEST_SUITE_P(gemm_gpu, gemm_fp32_tiled_nn_unaligned_tests, ::testing::ValuesIn(std::vector <gemm_base_test_params> {
+    gemm_base_test_params{ CASE_GEMM_FP32_TILED_NN_UNALIGNED_1, "gemm_tiled_opt" },
+}));
+
 class gemm_fp16_tiled_nn_tests : public ::GemmBaseTest<gemm_base_test_params, ov::float16, ov::float16, ov::float16, ov::float16, ov::float16> {};
 TEST_P(gemm_fp16_tiled_nn_tests, basic) { auto p = GetParam(); execute(p); }
 
@@ -3648,6 +3932,7 @@ TEST_P(gemm_fp32_tiled_nt_tests, basic_cached) { auto p = GetParam(); execute(p,
 TEST_P(gemm_fp32_tiled_tn_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
 TEST_P(gemm_fp32_tiled_tt_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
 TEST_P(gemm_fp32_tiled_nn_broadcast_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
+TEST_P(gemm_fp32_tiled_nn_unaligned_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
 TEST_P(gemm_fp16_tiled_nn_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
 TEST_P(gemm_fp16_tiled_nt_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
 TEST_P(gemm_fp16_tiled_tn_tests, basic_cached) { auto p = GetParam(); execute(p, true); }
@@ -3671,6 +3956,16 @@ TEST_F(gemm_gpu_tests, basic_bfyx_t2_inplace_crop_with_pad_cached) {
     this->test_basic_bfyx_t2_inplace_crop_with_pad(true);
 }
 
+TEST_F(gemm_gpu_tests, fp16_accumulator_accuracy) {
+    // Test for FP16 accumulator accuracy fix (commit 685ccb196a)
+    this->test_fp16_accumulator_accuracy(false);
+}
+
+TEST_F(gemm_gpu_tests, fp16_accumulator_accuracy_cached) {
+    // Test for FP16 accumulator accuracy fix with caching
+    this->test_fp16_accumulator_accuracy(true);
+}
+
 TEST_F(gemm_gpu_tests, transpose_matmul_dynamic_4d_cached) {
     this->test_transpose_matmul_f16(4, true, true, /*BMKN*/{19, 37, 23, 29}, /*input0_order*/{0, 2, 3, 1}, /*input1_order*/{1, 2, 3, 0});
 }
@@ -3681,4 +3976,91 @@ TEST_F(gemm_gpu_tests, transpose_matmul_transpose_dynamic_4d_cached) {
     this->test_transpose_matmul_transpose(4, true, true);
 }
 #endif
+
+#ifdef ENABLE_ONEDNN_FOR_GPU
+// Smoke test: cldnn::grouped_matmul (2D x 3D case of GroupedMatMul-17) via onednn.
+// Compared against ov::reference::grouped_matmul_2d_3d.
+TEST(grouped_matmul_gpu_tests, smoke_2d_3d_f16) {
+    auto& engine = get_test_engine();
+    if (!engine.get_device_info().supports_immad)
+        GTEST_SKIP() << "grouped_matmul onednn impl requires XMX/DPAS support (Xe-HPG+)";
+
+    // Small shapes to keep the smoke test cheap.
+    constexpr size_t G = 3;    // number of experts
+    constexpr size_t K = 128;  // hidden size (multiple of 16 for onednn tile)
+    constexpr size_t N = 64;   // output features
+
+    // Token distribution across experts: [4, 0, 6] -> total 10 rows.
+    const std::vector<int32_t> tokens_per_expert = {4, 0, 6};
+    const size_t total_tokens = std::accumulate(tokens_per_expert.begin(), tokens_per_expert.end(), size_t{0});
+
+    // Cumulative end-offsets: [4, 4, 10].
+    std::vector<int32_t> offsets(G);
+    offsets[0] = tokens_per_expert[0];
+    for (size_t i = 1; i < G; ++i)
+        offsets[i] = offsets[i - 1] + tokens_per_expert[i];
+
+    tests::random_generator rg("grouped_matmul_smoke");
+    auto mat_a_f32 = rg.generate_random_1d<float>(total_tokens * K, -0.5f, 0.5f);
+    auto mat_b_f32 = rg.generate_random_1d<float>(G * N * K, -0.5f, 0.5f);
+
+    std::vector<ov::float16> mat_a_f16(mat_a_f32.size());
+    std::vector<ov::float16> mat_b_f16(mat_b_f32.size());
+    for (size_t i = 0; i < mat_a_f32.size(); ++i) mat_a_f16[i] = ov::float16(mat_a_f32[i]);
+    for (size_t i = 0; i < mat_b_f32.size(); ++i) mat_b_f16[i] = ov::float16(mat_b_f32[i]);
+
+    // Allocate device memory.
+    auto mat_a_mem = engine.allocate_memory({ov::PartialShape{static_cast<int64_t>(total_tokens), K},
+                                             data_types::f16, format::bfyx});
+    auto mat_b_mem = engine.allocate_memory({ov::PartialShape{G, N, K}, data_types::f16, format::bfyx});
+    auto off_mem   = engine.allocate_memory({ov::PartialShape{G}, data_types::i32, format::bfyx});
+
+    set_values(mat_a_mem, mat_a_f16);
+    set_values(mat_b_mem, mat_b_f16);
+    set_values(off_mem, offsets);
+
+    // Dynamic input layouts: total_tokens and G are unknown at compile time.
+    layout mat_a_dyn_layout{ov::PartialShape{-1, static_cast<int64_t>(K)}, data_types::f16, format::bfyx};
+    layout offsets_dyn_layout{ov::PartialShape{-1}, data_types::i32, format::bfyx};
+
+    topology tp;
+    tp.add(input_layout("mat_a", mat_a_dyn_layout));
+    tp.add(data("mat_b", mat_b_mem));
+    tp.add(input_layout("offsets", offsets_dyn_layout));
+    tp.add(grouped_matmul("gmm",
+                          {input_info("mat_a"), input_info("mat_b"), input_info("offsets")},
+                          data_types::f16));
+    tp.add(reorder("output", input_info("gmm"), format::bfyx, data_types::f32));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::optimize_data(true));
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+
+    network net(engine, tp, config);
+    net.set_input_data("mat_a", mat_a_mem);
+    net.set_input_data("offsets", off_mem);
+    auto out_mem = net.execute().at("output").get_memory();
+    cldnn::mem_lock<float> out_ptr(out_mem, get_test_stream());
+    std::vector<float> gpu_out(out_ptr.begin(), out_ptr.end());
+
+    // Reference computed on f16 inputs to match GPU accumulation precision profile.
+    std::vector<ov::float16> ref_out_f16(total_tokens * N, ov::float16(0.f));
+    ov::reference::grouped_matmul_2d_3d<ov::float16, int32_t>(mat_a_f16.data(),
+                                                              mat_b_f16.data(),
+                                                              offsets.data(),
+                                                              ref_out_f16.data(),
+                                                              ov::Shape{total_tokens, K},
+                                                              ov::Shape{G, N, K});
+    std::vector<float> ref_out(ref_out_f16.size());
+    for (size_t i = 0; i < ref_out_f16.size(); ++i) ref_out[i] = static_cast<float>(ref_out_f16[i]);
+
+    ASSERT_EQ(gpu_out.size(), ref_out.size());
+    // f16 GEMM accumulation over K -> relative tolerance ~ few percent.
+    for (size_t i = 0; i < gpu_out.size(); ++i) {
+        const float diff = std::abs(gpu_out[i] - ref_out[i]);
+        const float tol = 0.05f * std::max(1.f, std::abs(ref_out[i]));
+        ASSERT_LE(diff, tol) << "mismatch at i=" << i << ": gpu=" << gpu_out[i] << ", ref=" << ref_out[i];
+    }
+}
+#endif  // ENABLE_ONEDNN_FOR_GPU
 } // namespace

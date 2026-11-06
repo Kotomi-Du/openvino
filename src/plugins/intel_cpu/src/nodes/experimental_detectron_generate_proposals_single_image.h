@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,16 +13,14 @@
 #include "node.h"
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class ExperimentalDetectronGenerateProposalsSingleImage : public Node {
 public:
     ExperimentalDetectronGenerateProposalsSingleImage(const std::shared_ptr<ov::Node>& op,
                                                       const GraphContext::CPtr& context);
 
-    void getSupportedDescriptors() override{};
+    void getSupportedDescriptors() override {};
     void initSupportedPrimitiveDescriptors() override;
     void execute(const dnnl::stream& strm) override;
     bool created() const override;
@@ -49,14 +47,12 @@ private:
     const int OUTPUT_SCORES{1};
 
     float min_size_;
-    int pre_nms_topn_;
-    int post_nms_topn_;
+    size_t pre_nms_topn_;
+    size_t post_nms_topn_;
     float nms_thresh_;
     float coordinates_offset;
 
     std::vector<int> roi_indices_;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

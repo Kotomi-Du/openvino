@@ -1,16 +1,15 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "jit_emitter.hpp"
 
-#include <cpu/x64/xbyak/xbyak.h>
+#include <xbyak/xbyak.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cpu/x64/cpu_isa_traits.hpp>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <set>
 #include <vector>
@@ -28,7 +27,7 @@ using namespace Xbyak;
 namespace ov::intel_cpu {
 
 size_t jit_emitter::get_max_vecs_count() const {
-    return one_of(host_isa_, cpu::x64::avx512_core, cpu::x64::avx512_core) ? 32 : 16;
+    return any_of(host_isa_, cpu::x64::avx512_core, cpu::x64::avx512_core) ? 32 : 16;
 }
 
 size_t jit_emitter::get_vec_length() const {
@@ -84,10 +83,8 @@ void jit_emitter::emitter_preamble(const std::vector<size_t>& in_idxs,
                                    const std::vector<size_t>& pool_vec_idxs,
                                    const std::vector<size_t>& pool_gpr_idxs) const {
     using namespace Xbyak::util;
-    bool is_vec_input =
-        (in_out_type_ == emitter_in_out_map::vec_to_vec) || (in_out_type_ == emitter_in_out_map::vec_to_gpr);
-    bool is_vec_output =
-        (in_out_type_ == emitter_in_out_map::vec_to_vec) || (in_out_type_ == emitter_in_out_map::gpr_to_vec);
+    bool is_vec_input = any_of(in_out_type_, emitter_in_out_map::vec_to_vec, emitter_in_out_map::vec_to_gpr);
+    bool is_vec_output = any_of(in_out_type_, emitter_in_out_map::vec_to_vec, emitter_in_out_map::gpr_to_vec);
 
     for (auto idx : pool_vec_idxs) {
         aux_vec_idxs.push_back(idx);
@@ -194,8 +191,8 @@ void jit_emitter::emitter_preamble(const std::vector<size_t>& in_idxs,
         aux_gpr_idxs.erase(aux_gpr_idxs.end() - 1);
     }
 
-    for (uint64_t preserved_gpr_idx : preserved_gpr_idxs) {
-        h->push(Reg64(preserved_gpr_idx));
+    for (auto preserved_gpr_idx : preserved_gpr_idxs) {
+        h->push(Reg64(static_cast<int>(preserved_gpr_idx)));
     }
 
     if (!preserved_vec_idxs.empty()) {

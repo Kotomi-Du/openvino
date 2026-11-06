@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -34,7 +34,6 @@ std::shared_ptr<ov::Model> MoveFakeQuantize::get(
     const DequantizationOperations::Convert& convertAfter,
     const DequantizationOperations& dequantizationAfter,
     const std::vector<ov::Any>& concatAttributes,
-    const ov::element::Type precisionAfterOperation,
     const std::int64_t& axis,
     const bool oneInputWithSplit) {
     std::vector<std::shared_ptr<ov::opset1::Parameter>> inputs(oneInputWithSplit ? 1 : concatInputsCount);

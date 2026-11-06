@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,7 +15,7 @@ namespace kernel_selector {
 class EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32 : public EltwiseKernelBase {
 public:
     EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32() : EltwiseKernelBase("eltwise_mixed_byxf_and_fs_b_yx_fsv32") {}
-    virtual ~EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32() {}
+    ~EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

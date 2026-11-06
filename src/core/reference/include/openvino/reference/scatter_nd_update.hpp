@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -99,6 +99,7 @@ void scatterNdUpdate(
             if (c < 0) {
                 c += static_cast<indicesType>(dataShape[j]);
             }
+            OPENVINO_ASSERT(c >= 0 && static_cast<size_t>(c) < dataShape[j], "Index is out of bounds");
             j++;
         }
 

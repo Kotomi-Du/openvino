@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,18 +26,20 @@ uint32_t ZeroEngineBackend::getDriverVersion() const {
 }
 
 uint32_t ZeroEngineBackend::getGraphExtVersion() const {
-    return _initStruct->getGraphDdiTable().version();
+    return _initStruct->getGraphExtVersion();
 }
 
 bool ZeroEngineBackend::isCommandQueueExtSupported() const {
-    return _initStruct->isExtensionSupported(std::string(ZE_COMMAND_QUEUE_NPU_EXT_NAME), ZE_MAKE_VERSION(1, 0));
+    return _initStruct->isCommandQueueExtSupported();
 }
 
 bool ZeroEngineBackend::isLUIDExtSupported() const {
-    return _initStruct->isExtensionSupported(std::string(ZE_DEVICE_LUID_EXT_NAME), ZE_MAKE_VERSION(1, 0));
+    return _initStruct->isLUIDExtSupported();
 }
 
-ZeroEngineBackend::~ZeroEngineBackend() = default;
+bool ZeroEngineBackend::isContextExtSupported() const {
+    return _initStruct->isContextExtSupported();
+}
 
 const std::shared_ptr<IDevice> ZeroEngineBackend::getDevice() const {
     if (_devices.empty()) {
@@ -132,11 +134,22 @@ void* ZeroEngineBackend::getContext() const {
     return _initStruct->getContext();
 }
 
-void ZeroEngineBackend::updateInfo(const Config& config) {
-    _logger.setLevel(config.get<LOG_LEVEL>());
+void ZeroEngineBackend::updateInfo(const ov::AnyMap& properties) {
+    if (properties.count(ov::log::level.name()) != 0) {
+        _logger.setLevel(properties.at(ov::log::level.name()).as<ov::log::Level>());
+    }
+
+    if (properties.count(ov::intel_npu::disable_idle_memory_prunning.name()) != 0) {
+        if (properties.at(ov::intel_npu::disable_idle_memory_prunning.name()).as<bool>()) {
+            _initStruct->clearContextOptions(ZE_NPU_CONTEXT_OPTION_IDLE_OPTIMIZATIONS);
+        } else {
+            _initStruct->setContextOptions(ZE_NPU_CONTEXT_OPTION_IDLE_OPTIMIZATIONS);
+        }
+    }
+
     if (_devices.size() > 0) {
         for (auto& dev : _devices) {
-            dev.second->updateInfo(config);
+            dev.second->updateInfo(properties);
         }
     }
 }

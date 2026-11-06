@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -28,6 +28,7 @@ const std::vector<ov::element::Type> model_types = {
     ov::element::u64,
     ov::element::i64,
     ov::element::f32,
+    ov::element::f64,
     ov::element::boolean
 };
 

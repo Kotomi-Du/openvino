@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,11 +26,11 @@ void ConvolutionQDqTransformation::SetUp() {
     auto [netPrecision, inputShape, device, param] = this->GetParam();
     targetDevice = device;
 
-    init_input_shapes(inputShape);
+    SubgraphBaseTest::init_input_shapes({inputShape});
 
     function = ov::builder::subgraph::FakeQuantizeAndConvolutionFunction::get(
         netPrecision,
-        inputShape,
+        inputDynamicShapes[0],
         param.fakeQuantizeOnData,
         param.convertOnData,
         param.dequantizationOnData,

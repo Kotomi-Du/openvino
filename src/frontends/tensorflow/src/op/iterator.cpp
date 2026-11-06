@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,10 +13,7 @@ using namespace std;
 using namespace ov;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 OutputVector translate_iterator_op(const ov::frontend::tensorflow::NodeContext& node) {
     default_op_checks(node, 0, {"Iterator", "IteratorV2", "OneShotIterator"});
@@ -35,8 +32,8 @@ OutputVector translate_iterator_get_next_op(const NodeContext& node) {
     // Iterator operations are responsible for iterator creation
     // and it usually goes to IteratorGetNext so we have to handle
     // Iterator->IteratorGetNext sub-graph
-    // From IteratorGetNext generates nultiple outputs which we should
-    // automatically prune and create Parameter node for each of them
+    // IteratorGetNext generates multiple outputs; auto-prune and create a
+    // Parameter node for each one
     default_op_checks(node, 1, {"IteratorGetNext"});
     auto node_name = node.get_name();
     auto output_types = node.get_attribute<vector<element::Type>>("output_types");
@@ -46,7 +43,7 @@ OutputVector translate_iterator_get_next_op(const NodeContext& node) {
     TENSORFLOW_OP_VALIDATION(
         node,
         output_num == output_shapes.size(),
-        "[TensorFlow Frontend] Incorrect input model: lenghts of output_types and output_shapes do not match.");
+        "[TensorFlow Frontend] Incorrect input model: lengths of output_types and output_shapes do not match.");
 
     OutputVector iterator_get_next_outputs;
     // perform auto-pruning: create Parameter nodes for each output of IteratorGetNext
@@ -64,7 +61,4 @@ OutputVector translate_iterator_get_next_op(const NodeContext& node) {
     return iterator_get_next_outputs;
 }
 
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

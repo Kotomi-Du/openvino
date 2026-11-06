@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -86,7 +86,7 @@ public:
 
         auto output_prim = outputs.begin()->second.get_memory();
 
-        cldnn::mem_lock<float> output_ptr(output_prim, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim, get_test_stream());
         for (uint32_t i = 0; i < out_size; i++) {
             out_buffer[i] = output_ptr[i];
         }
@@ -120,7 +120,7 @@ public:
 
         auto output_prim = outputs.begin()->second.get_memory();
 
-        cldnn::mem_lock<float> output_ptr(output_prim, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim, get_test_stream());
         for (uint32_t i = 0; i < out_size; i++) {
             out_buffer[i] = output_ptr[i];
         }
@@ -178,7 +178,7 @@ public:
 
         auto output_prim = outputs.begin()->second.get_memory();
 
-        cldnn::mem_lock<float> output_ptr(output_prim, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output_prim, get_test_stream());
         for (uint32_t i = 0; i < out_size; i++) {
             out_buffer[i] = output_ptr[i];
         }
@@ -250,7 +250,7 @@ TEST(softmax_gpu_bfyx_f32, normalize_y) {
     ASSERT_EQ(outputs.begin()->first, "softmax");
 
     auto output = outputs.at("softmax").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
     float out_buffer[buf_size];
     for (uint32_t i = 0; i < buf_size; i++) {
         out_buffer[i] = output_ptr[i];
@@ -330,10 +330,7 @@ TEST(softmax_gpu_bfyx_f32, normalize_f) {
     ASSERT_EQ(outputs.begin()->first, "softmax");
 
     auto output = outputs.at("softmax").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
-    for (size_t i = 0; i < output->count(); i++) {
-        std::cerr << "i = " << i << " v = " << output_ptr[i] << std::endl;
-    }
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     float out_buffer[buf_size];
     for (uint32_t i = 0; i < buf_size; i++) {
@@ -415,7 +412,7 @@ TEST(softmax_gpu_bfzyx_f32, normalize_z) {
     ASSERT_EQ(outputs.begin()->first, "softmax");
 
     auto output = outputs.at("softmax").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
     float out_buffer[buf_size];
     for (uint32_t i = 0; i < buf_size; i++) {
         out_buffer[i] = output_ptr[i];
@@ -498,7 +495,7 @@ TEST(softmax_gpu_bfyx_f32, normalize_b) {
     ASSERT_EQ(outputs.begin()->first, "softmax");
 
     auto output = outputs.at("softmax").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
     float out_buffer[buf_size];
     for (uint32_t i = 0; i < buf_size; i++) {
         out_buffer[i] = output_ptr[i];
@@ -907,14 +904,17 @@ float getError<ov::float16>() {
     return 0.2;
 }
 
+template<>
+float getError<ov::bfloat16>() {
+    return 0.2;
+}
+
 struct PrintToStringParamName {
     template<class T>
     std::string operator()(const testing::TestParamInfo<SoftmaxParamsWithFormat<T> > &param) {
         std::stringstream buf;
-        SoftmaxParams<T> p;
-        format::type plain_format;
-        format::type target_format;
-        std::tie(p, plain_format, target_format) = param.param;
+
+        const auto& [p, plain_format, target_format] = param.param;
         buf << "_inputTensor=" << p.input_tensor.to_string()
             << "_axis=" << p.axis
             << "_plainFormat=" << fmt_to_str(plain_format)
@@ -932,11 +932,8 @@ struct softmax_gpu_formats_test
 public:
     void test(bool is_caching_test) {
         const auto data_type = ov::element::from<T>();
-        SoftmaxParams<T> params;
-        format::type plain_format;
-        format::type target_format;
 
-        std::tie(params, plain_format, target_format) = this->GetParam();
+        const auto& [params, plain_format, target_format] = this->GetParam();
 
         auto& engine = get_test_engine();
         const auto input = engine.allocate_memory({data_type, plain_format, params.input_tensor});
@@ -956,7 +953,7 @@ public:
         network->set_input_data("input", input);
         const auto outputs = network->execute();
         const auto output = outputs.at("softmax").get_memory();
-        const cldnn::mem_lock<T> output_ptr(output, get_test_stream());
+        const cldnn::mem_lock<T, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(params.input_tensor.count(), output_ptr.size());
         for (uint32_t i = 0; i < output_ptr.size(); i++) {
@@ -967,12 +964,17 @@ public:
 
 using softmax_gpu_formats_test_f32 = softmax_gpu_formats_test<float>;
 using softmax_gpu_formats_test_f16 = softmax_gpu_formats_test<ov::float16>;
+using softmax_gpu_formats_test_bf16 = softmax_gpu_formats_test<ov::bfloat16>;
 
 TEST_P(softmax_gpu_formats_test_f32, softmax_gpu_formats_test_f32) {
     ASSERT_NO_FATAL_FAILURE(test(false));
 }
 
 TEST_P(softmax_gpu_formats_test_f16, softmax_gpu_formats_test_f16) {
+    ASSERT_NO_FATAL_FAILURE(test(false));
+}
+
+TEST_P(softmax_gpu_formats_test_bf16, softmax_gpu_formats_test_bf16) {
     ASSERT_NO_FATAL_FAILURE(test(false));
 }
 
@@ -989,6 +991,15 @@ INSTANTIATE_TEST_SUITE_P(softmax_gpu_formats_test_f16_2d,
                          softmax_gpu_formats_test_f16,
                          ::testing::Combine(
                                  ::testing::ValuesIn(generateSoftmaxParams2D<ov::float16>()),
+                                 ::testing::Values(format::bfyx),
+                                 ::testing::ValuesIn(formats2D)
+                                 ),
+                         PrintToStringParamName());
+
+INSTANTIATE_TEST_SUITE_P(softmax_gpu_formats_test_bf16_2d,
+                         softmax_gpu_formats_test_bf16,
+                         ::testing::Combine(
+                                 ::testing::ValuesIn(generateSoftmaxParams2D<ov::bfloat16>()),
                                  ::testing::Values(format::bfyx),
                                  ::testing::ValuesIn(formats2D)
                                  ),
@@ -1011,6 +1022,37 @@ INSTANTIATE_TEST_SUITE_P(softmax_gpu_formats_test_f16_3d,
                                  ::testing::ValuesIn(formats3D)
                                  ),
                          PrintToStringParamName());
+
+INSTANTIATE_TEST_SUITE_P(softmax_gpu_formats_test_bf16_3d,
+                         softmax_gpu_formats_test_bf16,
+                         ::testing::Combine(
+                                 ::testing::ValuesIn(generateSoftmaxParams3D<ov::bfloat16>()),
+                                 ::testing::Values(format::bfzyx),
+                                 ::testing::ValuesIn(formats3D)
+                                 ),
+                         PrintToStringParamName());
+
+TEST(softmax_gpu_byxf_f32, normalize_f_dynamic) {
+    auto& engine = get_test_engine();
+    auto input = engine.allocate_memory({ov::PartialShape{2, 2, 1, 1}, data_types::f32, format::byxf});
+    set_values(input, {1.f, 2.f, 3.f, 4.f});
+
+    topology topology(input_layout("input", {ov::PartialShape::dynamic(4), data_types::f32, format::byxf}),
+                      softmax("softmax", input_info("input"), 1));
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    network network(engine, topology, config);
+    network.set_input_data("input", input);
+
+    ASSERT_TRUE(network.get_primitive("softmax")->get_impl()->is_dynamic());
+    auto output = network.execute().at("softmax").get_memory();
+    ASSERT_EQ(output->get_layout().format, format::byxf);
+    mem_lock<float, mem_lock_type::read> result(output, get_test_stream());
+    for (size_t b = 0; b < 2; ++b) {
+        ASSERT_NEAR(result[b * 2], 1.f / (1.f + std::exp(1.f)), 1e-5f);
+        ASSERT_NEAR(result[b * 2 + 1], 1.f / (1.f + std::exp(-1.f)), 1e-5f);
+    }
+}
 
 TEST(softmax_gpu_bfyx_f32, normalize_f_dynamic) {
     auto& engine = get_test_engine();
@@ -1066,7 +1108,7 @@ TEST(softmax_gpu_bfyx_f32, normalize_f_dynamic) {
     ASSERT_EQ(outputs.begin()->first, "softmax");
 
     auto output = outputs.at("softmax").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
     float out_buffer[buf_size];
     for (uint32_t i = 0; i < buf_size; i++) {
         out_buffer[i] = output_ptr[i];
@@ -1124,6 +1166,10 @@ TEST_P(softmax_gpu_formats_test_f32, softmax_gpu_formats_test_f32_cached) {
 TEST_P(softmax_gpu_formats_test_f16, softmax_gpu_formats_test_f16_cached) {
     ASSERT_NO_FATAL_FAILURE(test(true));
 }
+
+TEST_P(softmax_gpu_formats_test_bf16, softmax_gpu_formats_test_bf16_cached) {
+    ASSERT_NO_FATAL_FAILURE(test(true));
+}
 #endif
 
 TEST(softmax_gpu_bfyx_f32, bf_opt_normalize_f_dynamic) {
@@ -1171,7 +1217,7 @@ TEST(softmax_gpu_bfyx_f32, bf_opt_normalize_f_dynamic) {
     ASSERT_EQ(outputs.begin()->first, "softmax");
 
     auto output = outputs.at("softmax").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
     float out_buffer[buf_size];
     for (uint32_t i = 0; i < buf_size; i++) {
         out_buffer[i] = output_ptr[i];
@@ -1205,6 +1251,7 @@ TEST(softmax_gpu_bfyx_f32, bf_opt_normalize_f_dynamic) {
     }
 }
 
+template <typename T>
 static void run_softmax_bfyx_opt(const int64_t b, const int64_t f, const int64_t y, const int64_t x, const uint64_t axis) {
     tests::random_generator rg(GET_SUITE_NAME);
     auto& engine = get_test_engine();
@@ -1214,10 +1261,11 @@ static void run_softmax_bfyx_opt(const int64_t b, const int64_t f, const int64_t
     ov::intel_gpu::ImplementationDesc softmax_bf_kernel = {format::bfyx, "softmax_gpu_bf"};
     config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{{"softmax", softmax_bf_kernel}}));
 
+    const auto data_type = ov::element::from<T>();
     const int64_t buf_size = b * f * y * x;
     auto input_layout_dynamic = layout{ov::PartialShape{ov::Dimension::dynamic(), f, ov::Dimension::dynamic(), ov::Dimension::dynamic()},
-                                        data_types::f16, format::bfyx};
-    auto input_layout_static = layout{ov::PartialShape{b, f, y, x}, data_types::f16, format::bfyx};
+                                        data_type, format::bfyx};
+    auto input_layout_static = layout{ov::PartialShape{b, f, y, x}, data_type, format::bfyx};
 
     std::string softmax_id = "softmax";
     topology topology;
@@ -1228,7 +1276,7 @@ static void run_softmax_bfyx_opt(const int64_t b, const int64_t f, const int64_t
 
     auto input_mem = engine.allocate_memory(input_layout_static);
 
-    auto input_data = rg.generate_random_1d<ov::float16>(buf_size, -20, 20);
+    auto input_data = rg.generate_random_1d<T>(buf_size, -20, 20);
     set_values(input_mem, input_data);
 
     std::map<cldnn::primitive_id, cldnn::network_output> outputs;
@@ -1239,16 +1287,88 @@ static void run_softmax_bfyx_opt(const int64_t b, const int64_t f, const int64_t
     output = outputs.at(softmax_id).get_memory();
     ASSERT_NE(output, nullptr);
 
-    std::vector<ov::float16> output_ref(buf_size);
-    ov::reference::softmax<ov::float16>(input_data.data(), output_ref.data(), input_layout_static.get_shape(), ov::AxisSet{axis});
+    std::vector<T> output_ref(buf_size);
+    ov::reference::softmax<T>(input_data.data(), output_ref.data(), input_layout_static.get_shape(), ov::AxisSet{axis});
     ASSERT_NE(output, nullptr);
-    const float threshold_fp16 = 1e-1;
-    cldnn::mem_lock<ov::float16> output_ptr(output, get_test_stream());
+    const float threshold = 1e-1;
+    cldnn::mem_lock<T> output_ptr(output, get_test_stream());
     for (size_t idx = 0; idx < static_cast<size_t>(buf_size); idx++) {
-        ASSERT_NEAR(float(output_ptr[idx]), float(output_ref[idx]), threshold_fp16) << idx << ", " << std::fixed << setprecision(8) << output_ptr[idx] << " vs " << output_ref[idx];
+        ASSERT_NEAR(float(output_ptr[idx]), float(output_ref[idx]), threshold) << idx << ", " << std::fixed << setprecision(8) << output_ptr[idx] << " vs " << output_ref[idx];
     }
 }
 
 TEST(softmax_gpu_bfyx_f16, opt_softmax_bf_axis_3) {
-    run_softmax_bfyx_opt(1, 4, 2, 3083, 3);
+    run_softmax_bfyx_opt<ov::float16>(1, 4, 2, 3083, 3);
+}
+
+TEST(softmax_gpu_bfyx_bf16, opt_softmax_bf_axis_3) {
+    run_softmax_bfyx_opt<ov::bfloat16>(1, 4, 2, 3083, 3);
+}
+
+// Large data set size (> 32 * max_lws) forces the dynamic softmax_gpu_bf kernel to take the
+// use_output_buffer path, since items_num exceeds the fixed dynamic STACK_SIZE (34).
+TEST(softmax_gpu_bfyx_f16, opt_softmax_bf_use_output_buffer) {
+    run_softmax_bfyx_opt<ov::float16>(1, 1, 1, 40000, 3);
+}
+
+TEST(softmax_gpu_bfyx_bf16, opt_softmax_bf_use_output_buffer) {
+    run_softmax_bfyx_opt<ov::bfloat16>(1, 1, 1, 40000, 3);
+}
+
+// Forces the softmax_gpu_items_class_optimized kernel (splits the class dimension across
+// 16 work-items per output). A feature-axis softmax with >= 32 classes keeps this kernel valid,
+// and force_implementations guarantees it is picked over the higher-priority softmax_gpu_bf.
+template <typename T>
+static void run_softmax_items_class_opt(const int64_t b, const int64_t f, const int64_t y, const int64_t x, const uint64_t axis) {
+    tests::random_generator rg(GET_SUITE_NAME);
+    auto& engine = get_test_engine();
+    auto config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::optimize_data(true));
+    ov::intel_gpu::ImplementationDesc softmax_items_class_kernel = {format::bfyx, "softmax_gpu_items_class_optimized"};
+    config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{{"softmax", softmax_items_class_kernel}}));
+
+    const auto data_type = ov::element::from<T>();
+    const int64_t buf_size = b * f * y * x;
+    auto in_layout = layout{ov::PartialShape{b, f, y, x}, data_type, format::bfyx};
+
+    const std::string softmax_id = "softmax";
+    topology topology;
+    topology.add(input_layout("input", in_layout));
+    topology.add(softmax(softmax_id, input_info("input"), axis));
+
+    cldnn::network::ptr network = get_network(engine, topology, config, get_test_stream_ptr(), false);
+
+    auto input_mem = engine.allocate_memory(in_layout);
+    auto input_data = rg.generate_random_1d<T>(buf_size, -20, 20);
+    set_values(input_mem, input_data);
+    network->set_input_data("input", input_mem);
+
+    auto inst = network->get_primitive(softmax_id);
+    auto impl = inst->get_impl();
+    ASSERT_TRUE(impl != nullptr);
+    ASSERT_NE(impl->get_kernel_name().find("softmax_gpu_items_class_optimized"), std::string::npos);
+
+    auto outputs = network->execute();
+    auto output = outputs.at(softmax_id).get_memory();
+    ASSERT_NE(output, nullptr);
+
+    std::vector<T> output_ref(buf_size);
+    ov::reference::softmax<T>(input_data.data(), output_ref.data(), in_layout.get_shape(), ov::AxisSet{axis});
+
+    cldnn::mem_lock<T> output_ptr(output, get_test_stream());
+    for (size_t idx = 0; idx < static_cast<size_t>(buf_size); idx++) {
+        ASSERT_NEAR(float(output_ptr[idx]), float(output_ref[idx]), getError<T>()) << idx;
+    }
+}
+
+TEST(softmax_gpu_bfyx_f32, items_class_opt_normalize_f) {
+    run_softmax_items_class_opt<float>(2, 64, 1, 1, 1);
+}
+
+TEST(softmax_gpu_bfyx_f16, items_class_opt_normalize_f) {
+    run_softmax_items_class_opt<ov::float16>(2, 64, 1, 1, 1);
+}
+
+TEST(softmax_gpu_bfyx_bf16, items_class_opt_normalize_f) {
+    run_softmax_items_class_opt<ov::bfloat16>(2, 64, 1, 1, 1);
 }

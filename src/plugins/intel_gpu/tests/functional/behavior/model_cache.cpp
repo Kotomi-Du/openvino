@@ -1,34 +1,41 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <algorithm>
 #include <cstdio>
 
-#include "base/ov_behavior_test_utils.hpp"
 #include "common_test_utils/common_utils.hpp"
 #include "common_test_utils/file_utils.hpp"
+#include "common_test_utils/node_builders/convolution.hpp"
 #include "common_test_utils/ov_tensor_utils.hpp"
 #include "common_test_utils/subgraph_builders/read_concat_split_assign.hpp"
 #include "common_test_utils/subgraph_builders/single_concat_with_constant.hpp"
 #include "common_test_utils/subgraph_builders/ti_with_lstm_cell.hpp"
 #include "common_test_utils/test_common.hpp"
 #include "openvino/core/rt_info/weightless_caching_attributes.hpp"
+#include "openvino/op/convolution.hpp"
 #include "openvino/op/convert.hpp"
+#include "openvino/op/matmul.hpp"
+#include "openvino/op/subtract.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/pass/constant_folding.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/serialize.hpp"
+#include "openvino/runtime/weightless_properties_utils.hpp"
 #include "openvino/util/codec_xor.hpp"
-#include "shared_test_classes/subgraph/weights_decompression_builders.hpp"
-#include "openvino/op/matmul.hpp"
-#ifndef WIN32
+#include "ov_ops/type_relaxed.hpp"
+#include "shared_test_classes/base/ov_behavior_test_utils.hpp"
+#include "shared_test_classes/subgraph/weights_decompression_params.hpp"
+#include "common_test_utils/subgraph_builders/weights_decompression_builders.hpp"
+#ifndef _WIN32
 #    include <unistd.h>
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 #    define stat _stat
 #endif
 
@@ -56,16 +63,12 @@ std::string import_api_to_string(Import_API api) {
     }
 }
 
-typedef std::tuple<Import_API, bool, ov::element::Type, ov::element::Type> testParams;
+typedef std::tuple<Import_API, bool, ov::element::Type, ov::element::Type, ov::AnyMap> testParams;
 
 class CheckWeightlessCacheAccuracy : public ::testing::Test, public ::testing::WithParamInterface<testParams> {
 public:
     static std::string get_test_case_name(::testing::TestParamInfo<testParams> obj) {
-        Import_API import_api_;
-        bool do_encryption_;
-        ov::element::Type inference_mode_;
-        ov::element::Type model_dtype_;
-        std::tie(import_api_, do_encryption_, inference_mode_, model_dtype_) = obj.param;
+        const auto& [import_api_, do_encryption_, inference_mode_, model_dtype_, config_] = obj.param;
 
         std::ostringstream result;
         const char separator = '_';
@@ -73,6 +76,10 @@ public:
         result << "do_encryption=" << do_encryption_ << separator;
         result << "inference_mode=" << inference_mode_ << separator;
         result << "model_dtype=" << model_dtype_;
+        result << "_config=";
+        for (const auto& [name, value] : config_) {
+            result << name << "[" << value.as<std::string>() << "]|";
+        }
         return result.str();
     }
 
@@ -99,7 +106,7 @@ void CheckWeightlessCacheAccuracy::SetUp() {
     cache_path = filePrefix + ".blob";
     cache_dir = filePrefix + "_cache_dir";
 
-    std::tie(import_api, do_encryption, inference_mode, model_dtype) = GetParam();
+    std::tie(import_api, do_encryption, inference_mode, model_dtype, std::ignore) = GetParam();
 }
 
 void CheckWeightlessCacheAccuracy::TearDown() {
@@ -113,12 +120,16 @@ void CheckWeightlessCacheAccuracy::TearDown() {
 }
 
 void CheckWeightlessCacheAccuracy::run() {
-    ov::AnyMap config = {ov::cache_dir(cache_dir),
-                         ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE),
-                         ov::hint::inference_precision(inference_mode)};
-    ov::AnyMap config_with_weights_path = {ov::cache_mode(ov::CacheMode::OPTIMIZE_SIZE),
-                                           ov::weights_path(bin_path),
-                                           ov::hint::inference_precision(inference_mode)};
+    ov::AnyMap config = {ov::cache_dir(cache_dir), ov::hint::inference_precision(inference_mode)};
+    for (const auto& property : std::get<4>(GetParam())) {
+        config.insert(property);
+    }
+
+    auto config_with_weights_path = config;
+    if (ov::util::is_weightless_enabled(config).value_or(false)) {
+        config_with_weights_path.insert(ov::weights_path(bin_path));
+    }
+    config_with_weights_path.erase(ov::cache_dir.name());
 
     if (do_encryption) {
         ov::EncryptionCallbacks encryption_callbacks;
@@ -226,6 +237,30 @@ void CheckWeightlessCacheAccuracy::run() {
     }
 }
 
+class CheckWeightlessCacheAccuracyLargeConv : public CheckWeightlessCacheAccuracy {
+
+};
+
+TEST_P(CheckWeightlessCacheAccuracyLargeConv, smoke_CheckWeightlessCacheAccuracyForLargeConv) {
+    //test large conv to meet custom reorder on BMG
+    auto param0 = std::make_shared<ov::op::v0::Parameter>(model_dtype, ov::Shape({1, 256, 24, 24}));
+
+    auto conv1 = ov::test::utils::make_convolution(param0,
+                                                   model_dtype,
+                                                   {3, 3},
+                                                   {1, 1},
+                                                   {1, 1},
+                                                   {1, 1},
+                                                   {1, 1},
+                                                   ov::op::PadType::EXPLICIT,
+                                                   512);
+    auto result = std::make_shared<ov::op::v0::Result>(conv1);
+
+    model = std::make_shared<ov::Model>(ov::ResultVector{result}, ov::ParameterVector{param0});
+    model->set_friendly_name("SingleConv");
+    OV_ASSERT_NO_THROW(run());
+}
+
 TEST_P(CheckWeightlessCacheAccuracy, ReadConcatSplitAssign) {
     OV_ASSERT_NO_THROW(model = ov::test::utils::make_read_concat_split_assign({1, 1, 2, 4}, model_dtype));
     OV_ASSERT_NO_THROW(run());
@@ -243,6 +278,105 @@ TEST_P(CheckWeightlessCacheAccuracy, TiWithLstmCell) {
 
 class CheckWeightlessCacheAccuracyLowPrecision : public CheckWeightlessCacheAccuracy {};
 
+class CheckModelCacheOnednnConvAZP : public ::testing::Test {
+protected:
+    std::string cache_dir;
+
+    void SetUp() override {
+        cache_dir = ov::test::utils::generateTestFilePrefix() + "_cache_dir";
+    }
+
+    void TearDown() override {
+        ov::test::utils::removeFilesWithExt(cache_dir, "blob");
+        ov::test::utils::removeFilesWithExt(cache_dir, "cl_cache");
+        ov::test::utils::removeDir(cache_dir);
+    }
+
+    static std::shared_ptr<ov::Model> make_model() {
+        auto input = std::make_shared<ov::op::v0::Parameter>(ov::element::u8, ov::Shape{1, 2, 5, 4});
+        auto azp_const = ov::op::v0::Constant::create(ov::element::u8, ov::Shape{1, 2, 1, 1}, {2, 5});
+        auto activations = std::make_shared<ov::op::TypeRelaxed<ov::op::v1::Subtract>>(
+            ov::element::TypeVector{ov::element::u8, ov::element::u8},
+            ov::element::TypeVector{ov::element::f32},
+            ov::op::TemporaryReplaceOutputType(input, ov::element::f32).get(),
+            ov::op::TemporaryReplaceOutputType(azp_const, ov::element::f32).get());
+
+        const std::vector<uint8_t> weights = {1, 2, 1, 2, 1, 2, 9, 7, 1,
+                                              9, 0, 4, 1, 3, 2, 0, 2, 5,
+                                              1, 2, 1, 2, 1, 2, 9, 7, 1,
+                                              9, 0, 4, 1, 3, 2, 0, 2, 5,
+                                              1, 2, 1, 2, 1, 2, 9, 7, 1,
+                                              9, 0, 4, 1, 3, 2, 0, 2, 5};
+        auto weights_const = ov::op::v0::Constant::create(ov::element::u8, ov::Shape{3, 2, 3, 3}, weights);
+        auto wzp_const = ov::op::v0::Constant::create(ov::element::u8, ov::Shape{1}, {2});
+        auto quantized_weights = std::make_shared<ov::op::TypeRelaxed<ov::op::v1::Subtract>>(
+            ov::element::TypeVector{ov::element::u8, ov::element::u8},
+            ov::element::TypeVector{ov::element::f32},
+            ov::op::TemporaryReplaceOutputType(weights_const, ov::element::f32).get(),
+            ov::op::TemporaryReplaceOutputType(wzp_const, ov::element::f32).get());
+
+        auto conv = std::make_shared<ov::op::TypeRelaxed<ov::op::v1::Convolution>>(
+            ov::element::TypeVector{ov::element::u8, ov::element::u8},
+            ov::element::TypeVector{ov::element::f32},
+            ov::op::TemporaryReplaceOutputType(activations, ov::element::f32).get(),
+            ov::op::TemporaryReplaceOutputType(quantized_weights, ov::element::f32).get(),
+            ov::Strides{2, 2},
+            ov::CoordinateDiff{0, 0},
+            ov::CoordinateDiff{1, 2},
+            ov::Strides{1, 1},
+            ov::op::PadType::EXPLICIT);
+        conv->set_friendly_name("conv");
+        auto result = std::make_shared<ov::op::v0::Result>(conv);
+        return std::make_shared<ov::Model>(ov::ResultVector{result}, ov::ParameterVector{input}, "OnednnConvAZP");
+    }
+
+    static ov::Tensor make_input_tensor() {
+        const std::vector<uint8_t> input_data = {1, 2, 3, 4, 5,
+                                                 2, 2, 3, 4, 6,
+                                                 3, 3, 3, 5, 1,
+                                                 1, 1, 1, 1, 1,
+                                                 1, 2, 3, 4, 5,
+                                                 2, 2, 3, 4, 6,
+                                                 3, 3, 3, 5, 1,
+                                                 1, 1, 1, 1, 1};
+        ov::Tensor tensor{ov::element::u8, ov::Shape{1, 2, 5, 4}};
+        std::copy(input_data.begin(), input_data.end(), tensor.data<uint8_t>());
+        return tensor;
+    }
+};
+
+TEST_F(CheckModelCacheOnednnConvAZP, ActivationZeroPointRestoredFromCache) {
+    ov::AnyMap config = {ov::cache_dir(cache_dir)};
+
+    auto core = ov::test::utils::PluginCache::get().core();
+    auto compiled_model = core->compile_model(make_model(), ov::test::utils::DEVICE_GPU, config);
+
+    auto blobs = ov::test::utils::listFilesWithExt(cache_dir, "blob");
+    ASSERT_EQ(blobs.size(), 1);
+
+    struct stat result;
+    ASSERT_EQ(stat(blobs[0].c_str(), &result), 0);
+    const auto first_mod_time = result.st_mtime;
+
+    auto imported_model = core->compile_model(make_model(), ov::test::utils::DEVICE_GPU, config);
+
+    blobs = ov::test::utils::listFilesWithExt(cache_dir, "blob");
+    ASSERT_EQ(blobs.size(), 1);
+    ASSERT_EQ(stat(blobs[0].c_str(), &result), 0);
+    ASSERT_EQ(first_mod_time, result.st_mtime);
+
+    auto input_tensor = make_input_tensor();
+    auto orig_req = compiled_model.create_infer_request();
+    auto new_req = imported_model.create_infer_request();
+    orig_req.set_input_tensor(input_tensor);
+    new_req.set_input_tensor(input_tensor);
+
+    orig_req.infer();
+    new_req.infer();
+
+    ov::test::utils::compare(orig_req.get_output_tensor(), new_req.get_output_tensor(), compiled_model.output().get_element_type());
+}
+
 TEST_P(CheckWeightlessCacheAccuracyLowPrecision, MatmulWeightsDecompression) {
     ov::test::MatMulDecompressionShapeParams shape_params{{{}, {{1, 4, 16}}}, {1, 16, 32}};
     auto dynShape = shape_params.data_shape.first;
@@ -250,16 +384,16 @@ TEST_P(CheckWeightlessCacheAccuracyLowPrecision, MatmulWeightsDecompression) {
         dynShape = shape_params.data_shape.second.front();
     }
     ov::ParameterVector params{std::make_shared<ov::op::v0::Parameter>(ov::element::f32, dynShape)};
-    const auto weights_subgraph = ov::test::initMatMulDecompressionSubgraph(shape_params.weights_shape,
-                                                                            shape_params.decompression_group_size,
-                                                                            ov::element::f32,
-                                                                            model_dtype,
-                                                                            ov::element::f32,
-                                                                            ov::element::dynamic,
-                                                                            true,
-                                                                            ov::test::DecompressionType::full,
-                                                                            ov::test::DecompressionType::full,
-                                                                            false);
+    const auto weights_subgraph = ov::test::utils::initMatMulDecompressionSubgraph(shape_params.weights_shape,
+                                                                                   shape_params.decompression_group_size,
+                                                                                   ov::element::f32,
+                                                                                   model_dtype,
+                                                                                   ov::element::f32,
+                                                                                   ov::element::dynamic,
+                                                                                   true,
+                                                                                   ov::test::utils::DecompressionType::full,
+                                                                                   ov::test::utils::DecompressionType::full,
+                                                                                   false);
     auto matmul = std::make_shared<ov::op::v0::MatMul>(params[0], weights_subgraph);
 
     ov::ResultVector results;
@@ -294,12 +428,26 @@ const std::vector<ov::element::Type> low_precision_dtypes = {
     ov::element::i4,
 };
 
+INSTANTIATE_TEST_SUITE_P(smoke_CheckWeightlessCacheAccuracyForLargeConv,
+                         CheckWeightlessCacheAccuracyLargeConv,
+                         ::testing::Combine(::testing::ValuesIn(import_api_types),
+                                            ::testing::Bool(),
+                                            ::testing::ValuesIn(inference_modes),
+                                            ::testing::ValuesIn({ov::element::f16}),
+                                            ::testing::Values(ov::AnyMap{ov::enable_weightless("ON"), ov::cache_mode("OPTIMIZE_SPEED")},
+                                                              ov::AnyMap{ov::cache_mode("OPTIMIZE_SIZE")},
+                                                              ov::AnyMap{ov::enable_weightless("OFF"), ov::cache_mode("OPTIMIZE_SIZE")})),
+                         CheckWeightlessCacheAccuracy::get_test_case_name);
+
 INSTANTIATE_TEST_SUITE_P(smoke_CheckWeightlessCacheAccuracy,
                          CheckWeightlessCacheAccuracy,
                          ::testing::Combine(::testing::ValuesIn(import_api_types),
                                             ::testing::Bool(),
                                             ::testing::ValuesIn(inference_modes),
-                                            ::testing::ValuesIn(model_dtypes)),
+                                            ::testing::ValuesIn(model_dtypes),
+                                            ::testing::Values(ov::AnyMap{ov::enable_weightless("ON"), ov::cache_mode("OPTIMIZE_SPEED")},
+                                                              ov::AnyMap{ov::cache_mode("OPTIMIZE_SIZE")},
+                                                              ov::AnyMap{ov::enable_weightless("OFF"), ov::cache_mode("OPTIMIZE_SIZE")})),
                          CheckWeightlessCacheAccuracy::get_test_case_name);
 
 INSTANTIATE_TEST_SUITE_P(smoke_CheckWeightlessCacheAccuracyLowPrecision,
@@ -307,7 +455,9 @@ INSTANTIATE_TEST_SUITE_P(smoke_CheckWeightlessCacheAccuracyLowPrecision,
                          ::testing::Combine(::testing::ValuesIn(import_api_types),
                                             ::testing::Bool(),
                                             ::testing::ValuesIn(inference_modes),
-                                            ::testing::ValuesIn(low_precision_dtypes)),
+                                            ::testing::ValuesIn(low_precision_dtypes),
+                                            ::testing::Values(ov::AnyMap{ov::cache_mode("OPTIMIZE_SIZE")},
+                                                              ov::AnyMap{ov::enable_weightless("OFF"), ov::cache_mode("OPTIMIZE_SIZE")})),
                          CheckWeightlessCacheAccuracy::get_test_case_name);
 
 TEST(smoke_CheckWeightlessCacheAccuracy, ConstantFoldingAttrPropagation) {

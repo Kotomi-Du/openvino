@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,18 +13,16 @@
 #include "node.h"
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class GatherElements : public Node {
 public:
     GatherElements(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context);
 
-    void getSupportedDescriptors() override{};
+    void getSupportedDescriptors() override {};
     void initSupportedPrimitiveDescriptors() override;
     void execute(const dnnl::stream& strm) override;
-    bool created() const override;
+    [[nodiscard]] bool created() const override;
 
     static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
 
@@ -38,14 +36,13 @@ private:
 
     size_t axis_;
     size_t dataTypeSize_ = 0;
-    int strideAxDst_ = 0;
-    int dstAxDim_ = 0;
-    int strideAx1Diff_ = 0;
+    size_t strideAxDst_ = 0;
+    size_t dstAxDim_ = 0;
+    size_t dataAxDim_ = 0;
+    size_t strideAx1Diff_ = 0;
 
     template <typename dataType>
     void directExecution();
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

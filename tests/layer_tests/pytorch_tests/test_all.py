@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import platform
@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from pytorch_layer_test_class import PytorchLayerTest, skip_if_export
+from pytorch_layer_test_class import PytorchLayerTest
 
 class aten_all_noparam(torch.nn.Module):
     def __init__(self) -> None:
@@ -58,10 +58,15 @@ class aten_all_out(torch.nn.Module):
         ), out
 
 class TestAll(PytorchLayerTest):
-    def _prepare_input(self, out=False):
+    def _prepare_input(self, out=False, dim=None, keepdim=None):
         if not out:
             return (self.input_tensor,)
-        return (self.input_tensor, np.zeros_like(self.input_tensor, dtype=bool if self.input_tensor.dtype != np.uint8 else np.uint8))
+        out_dtype = bool if self.input_tensor.dtype != np.uint8 else np.uint8
+        if dim is not None:
+            input_shape = list(self.input_tensor.shape)
+            out_shape = input_shape[:dim] + ([1] if keepdim else []) + input_shape[dim + 1:]
+            return (self.input_tensor, np.zeros(out_shape, dtype=out_dtype))
+        return (self.input_tensor, np.array(False, dtype=out_dtype))
 
     @pytest.mark.parametrize("input_shape, d_type", [
         (np.eye(5,5), np.int64),
@@ -74,17 +79,17 @@ class TestAll(PytorchLayerTest):
         ([7, 7], np.uint8),
         ([4, 4], bool)
     ])
-    @pytest.mark.parametrize("out", [skip_if_export(True), False])
+    @pytest.mark.parametrize("out", [True, False])
     @pytest.mark.nightly
     @pytest.mark.precommit
     @pytest.mark.precommit_torch_export
     @pytest.mark.precommit_fx_backend
     def test_all_noparams(self, input_shape, d_type, out, ie_device, precision, ir_version):
         if type(input_shape) is list:
-            self.input_tensor = np.random.randint(0, 2, input_shape, dtype=d_type)
+            self.input_tensor = self.random.randint(0, 2, input_shape, dtype=d_type)
         else:
             self.input_tensor = input_shape
-        self._test(aten_all_noparam() if not out else aten_all_noparam_out(), None, "aten::all",
+        self._test(aten_all_noparam() if not out else aten_all_noparam_out(), "aten::all",
                 ie_device, precision, ir_version, trace_model=True, freeze_model=False, kwargs_to_prepare_input={"out": out})
 
     @pytest.mark.parametrize("input_shape, d_type", [
@@ -103,7 +108,7 @@ class TestAll(PytorchLayerTest):
         False,
         None
     ])
-    @pytest.mark.parametrize("out", [skip_if_export(True), False])
+    @pytest.mark.parametrize("out", [True, False])
     @pytest.mark.nightly
     @pytest.mark.precommit
     @pytest.mark.precommit_torch_export
@@ -114,9 +119,9 @@ class TestAll(PytorchLayerTest):
                        reason='Ticket - 122715')
     def test_all(self, input_shape, d_type, keepdim, out, ie_device, precision, ir_version):
         if type(input_shape) is list:
-            self.input_tensor = np.random.randint(0, 2, input_shape, dtype=d_type)
+            self.input_tensor = self.random.randint(0, 2, input_shape, dtype=d_type)
         else:
             self.input_tensor = input_shape
         for dim in range(len(self.input_tensor.shape)):
-            self._test(aten_all(dim, keepdim) if not out else aten_all_out(dim, keepdim), None, "aten::all",
-                    ie_device, precision, ir_version, trace_model=True, freeze_model=False, kwargs_to_prepare_input={"out": out})
+            self._test(aten_all(dim, keepdim) if not out else aten_all_out(dim, keepdim), "aten::all",
+                    ie_device, precision, ir_version, trace_model=True, freeze_model=False, kwargs_to_prepare_input={"out": out, "dim": dim, "keepdim": keepdim})

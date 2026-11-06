@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,19 +20,17 @@
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 struct jit_bin_conv_params {
-    int mb;
-    int ngroups;
-    int ic, oc, ic_padded;
-    int ih, iw, oh, ow;
-    int l_pad, t_pad, b_pad;
-    int kh, kw;
-    int stride_h, stride_w;
-    int dilate_h, dilate_w;
+    size_t mb;
+    size_t ngroups;
+    size_t ic, oc, ic_padded;
+    size_t ih, iw, oh, ow;
+    size_t l_pad, t_pad, b_pad;
+    size_t kh, kw;
+    size_t stride_h, stride_w;
+    size_t dilate_h, dilate_w;
     bool with_sum;
     bool with_dw_conv;
     bool with_binarization;
@@ -40,16 +38,16 @@ struct jit_bin_conv_params {
     float pad_value;
     bool exclude_pad;
 
-    int nb_ic, ic_block;
-    int nb_oc, oc_block;
-    int nb_oc_blocking;
-    int ur_w, ur_w_tail;
-    int typesize_in, typesize_out;
+    size_t nb_ic, ic_block;
+    size_t nb_oc, oc_block;
+    size_t nb_oc_blocking;
+    size_t ur_w, ur_w_tail;
+    size_t typesize_in, typesize_out;
     dnnl::memory::data_type dst_dt;
 };
 
 struct jit_dw_conv_params {
-    int kh;
+    size_t kh;
 };
 
 struct jit_bin_conv_call_args {
@@ -66,9 +64,9 @@ struct jit_bin_conv_call_args {
 };
 
 struct jit_uni_bin_conv_kernel {
-    void (*ker_)(const jit_bin_conv_call_args*);
+    void (*ker_)(const jit_bin_conv_call_args*) = nullptr;
 
-    void operator()(const jit_bin_conv_call_args* args) {
+    void operator()(const jit_bin_conv_call_args* args) const {
         assert(ker_);
         ker_(args);
     }
@@ -76,11 +74,10 @@ struct jit_uni_bin_conv_kernel {
     explicit jit_uni_bin_conv_kernel(jit_bin_conv_params jcp,
                                      jit_dw_conv_params jcp_dw_conv,
                                      const dnnl_primitive_attr& attr)
-        : ker_(nullptr),
-          jcp_(jcp),
+        : jcp_(jcp),
           jcp_dw_conv_(jcp_dw_conv),
           attr_(attr) {}
-    virtual ~jit_uni_bin_conv_kernel() {}
+    virtual ~jit_uni_bin_conv_kernel() = default;
 
     virtual void create_ker() = 0;
 
@@ -116,7 +113,7 @@ private:
     bool withBinarization = false;
 
     size_t group = 1;
-    float pad_value = 0.f;
+    float pad_value = 0.F;
 
     std::vector<ptrdiff_t> stride;
     std::vector<ptrdiff_t> dilation;
@@ -145,6 +142,4 @@ private:
                           const std::vector<size_t>& d_str) const;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

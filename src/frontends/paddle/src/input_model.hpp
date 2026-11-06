@@ -1,25 +1,22 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <filesystem>
+
 #include "openvino/frontend/extension/telemetry.hpp"
 #include "openvino/frontend/paddle/frontend.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
+namespace ov::frontend::paddle {
 
 class OpPlace;
 class TensorPlace;
 
 class InputModel : public ov::frontend::InputModel {
 public:
-    explicit InputModel(const std::string& path, const std::shared_ptr<TelemetryExtension>& telemetry = {});
-#if defined(OPENVINO_ENABLE_UNICODE_PATH_SUPPORT) && defined(_WIN32)
-    explicit InputModel(const std::wstring& path, const std::shared_ptr<TelemetryExtension>& telemetry = {});
-#endif
+    explicit InputModel(const std::filesystem::path& path, const std::shared_ptr<TelemetryExtension>& telemetry = {});
     explicit InputModel(const std::vector<std::istream*>& streams,
                         const std::shared_ptr<TelemetryExtension>& telemetry = {});
     std::vector<Place::Ptr> get_inputs() const override;
@@ -46,6 +43,4 @@ private:
     std::map<std::string, Output<Node>> get_tensor_values() const;
 };
 
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle

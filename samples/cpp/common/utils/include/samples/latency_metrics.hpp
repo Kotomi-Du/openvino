@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -28,7 +28,7 @@ public:
     }
 
     void write_to_stream(std::ostream& stream) const;
-    void write_to_slog() const;
+    void write_to_slog(bool adaptive_latency_unit = false) const;
 
     double median_or_percentile = 0;
     double avg = 0;

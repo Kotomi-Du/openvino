@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -54,8 +54,8 @@ protected:
         auto input_layout = impl_params.get_input_layout(0);
         auto output_layout = impl_params.get_output_layout();
 
-        auto input_md = onednn::layout_to_memory_desc(input_layout);
-        auto output_md = onednn::layout_to_memory_desc(output_layout);
+        auto input_md = onednn::layout_to_memory_desc_blocked(input_layout, dnnl::memory::format_tag::undef);
+        auto output_md = onednn::layout_to_memory_desc_blocked(output_layout, dnnl::memory::format_tag::undef);
 
         OPENVINO_ASSERT(input_md.get_format_kind() != dnnl::memory::format_kind::any,
                         "[GPU] The format kind of the input memory descriptor of onednn reorder cannot be 'any'.");
@@ -75,9 +75,7 @@ public:
 #ifdef ONEDNN_PRIMITIVE_SERIALIZATION
         parent::save(ob);
 
-        std::vector<uint8_t> prim_cache;
-        prim_cache = _prim.get_cache_blob();
-        ob << prim_cache;
+        ob << get_cache_blob();
 #endif
     }
 
@@ -87,8 +85,8 @@ public:
 
         const kernel_impl_params* impl_params = reinterpret_cast<kernel_impl_params*>(ib.getKernelImplParams());
 
-        auto input_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(0));
-        auto output_md = onednn::layout_to_memory_desc(impl_params->get_output_layout());
+        auto input_md = onednn::layout_to_memory_desc_blocked(impl_params->get_input_layout(0), dnnl::memory::format_tag::undef);
+        auto output_md = onednn::layout_to_memory_desc_blocked(impl_params->get_output_layout(), dnnl::memory::format_tag::undef);
 
         auto prim_desc = std::make_shared<dnnl::reorder::primitive_desc>(
             ib.get_engine().get_onednn_engine(),
@@ -102,10 +100,7 @@ public:
         ib >> prim_cache;
 
         _scratchpad_md = _pd.scratchpad_desc();
-        if (prim_cache.size() > 0)
-            _prim = dnnl::reorder(_pd, prim_cache);
-        else
-            _prim = dnnl::reorder(_pd);
+        _prim = make_primitive_from_blob(prim_cache);
 #endif
     }
 
@@ -114,13 +109,12 @@ public:
                                   format::is_weights_format(impl_params.get_output_layout().format);
         if (is_reorder_weights) {
             return create_reorder_weights(impl_params);
-        } else {
-            auto& engine = impl_params.prog->get_engine();
-            auto& config = impl_params.prog->get_config();
-            auto attr = impl_params.attrs_onednn;
-            auto prim_desc = get_reorder_primitive_descriptor(impl_params, *attr);
-            return std::make_unique<reorder_onednn>(engine, config, attr, *prim_desc);
         }
+        auto& engine = impl_params.prog->get_engine();
+        const auto& config = impl_params.prog->get_config();
+        auto attr = impl_params.attrs_onednn;
+        auto prim_desc = get_reorder_primitive_descriptor(impl_params, *attr);
+        return std::make_unique<reorder_onednn>(engine, config, attr, *prim_desc);
     }
 
     static std::unique_ptr<primitive_impl> create_reorder_weights(const kernel_impl_params& impl_param) {
@@ -132,9 +126,8 @@ public:
 
         OPENVINO_ASSERT(impl_param.get_input_layout().bytes_count() == weights_params->get_input_layout().bytes_count(),
                         "[GPU] Input layout doesn't match required reorder weights layout");
-
-        auto input_md = onednn_weights_params ? onednn_weights_params->_in_desc : onednn::layout_to_memory_desc(weights_params->get_input_layout());
-        auto output_md = onednn_weights_params ? onednn_weights_params->_out_desc : onednn::layout_to_memory_desc(weights_params->get_output_layout());
+        auto input_md = onednn_weights_params ? *onednn_weights_params->_in_desc : onednn::layout_to_memory_desc(weights_params->get_input_layout());
+        auto output_md = onednn_weights_params ? *onednn_weights_params->_out_desc : onednn::layout_to_memory_desc(weights_params->get_output_layout());
 
         auto attr = std::make_shared<dnnl::primitive_attr>();
         auto reorder_prim = std::make_shared<dnnl::reorder::primitive_desc>(

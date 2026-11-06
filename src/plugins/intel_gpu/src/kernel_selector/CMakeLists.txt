@@ -1,20 +1,23 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
-set(TARGET_NAME "openvino_intel_gpu_kernels")
+set(TARGET_NAME "openvino_intel_gpu_kernels${OV_GPU_SUFFIX}")
+if(NOT DEFINED OV_GPU_RT)
+    # Reachable only if this directory is added outside ov_gpu_build_stack(), which always sets a
+    # single runtime; COMBINED names two, so a stack built from it would belong to neither.
+    if(GPU_RT_TYPE STREQUAL "COMBINED")
+        message(FATAL_ERROR "OV_GPU_RT must be set to a single runtime before adding this directory; got COMBINED")
+    endif()
+    set(OV_GPU_RT "${GPU_RT_TYPE}")
+endif()
 
 find_host_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-file(GLOB_RECURSE LIBRARY_SRC
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
-  )
+include(${CMAKE_CURRENT_LIST_DIR}/sources.cmake)
 
-file(GLOB_RECURSE KERNELS
-    "${CMAKE_CURRENT_SOURCE_DIR}/cl_kernels/*.cl"
-  )
+set(LIBRARY_SRC ${GPU_KERNEL_SELECTOR_SOURCES})
+set(KERNELS ${GPU_KERNEL_SELECTOR_CL_KERNELS})
 
 # Path which points to root directory where code generated elements are created
 # (specific to build configuration).
@@ -54,6 +57,20 @@ add_custom_command(OUTPUT "${CODEGEN_INCDIR}/${PRIM_DB}"
 
 add_library(${TARGET_NAME} STATIC ${LIBRARY_SRC} ${CODEGEN_CACHE_SOURCES})
 
+# .cl files aren't compiled, so a missing list entry won't fail the build - only silently skip
+# incremental regeneration of the primitive DB.
+file(GLOB_RECURSE _ov_gpu_cl_kernels_on_disk CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cl_kernels/*.cl")
+
+foreach(_ov_gpu_cl_kernel IN LISTS _ov_gpu_cl_kernels_on_disk)
+  if(NOT _ov_gpu_cl_kernel IN_LIST KERNELS)
+    message(SEND_ERROR "[${TARGET_NAME}] '${_ov_gpu_cl_kernel}' is missing from GPU_KERNEL_SELECTOR_CL_KERNELS "
+      "(kernel_selector/sources.cmake).")
+  endif()
+endforeach()
+
+unset(_ov_gpu_cl_kernel)
+unset(_ov_gpu_cl_kernels_on_disk)
+
 if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(${TARGET_NAME} PUBLIC OPENVINO_STATIC_LIBRARY)
 endif()
@@ -67,14 +84,11 @@ target_compile_options(${TARGET_NAME} PRIVATE
   $<$<CONFIG:Release>:$<IF:$<CXX_COMPILER_ID:MSVC>,/Os,-Os>>)
 
 if (ENABLE_ONEDNN_FOR_GPU)
-    target_link_libraries(${TARGET_NAME} PRIVATE onednn_gpu_tgt)
+    target_link_libraries(${TARGET_NAME} PRIVATE onednn_gpu_tgt${OV_GPU_SUFFIX})
 endif()
 
-if(COMMAND add_cpplint_target)
-  add_cpplint_target(${TARGET_NAME}_cpplint FOR_TARGETS ${TARGET_NAME})
-endif()
-
-target_link_libraries(${TARGET_NAME} PUBLIC OpenCL::OpenCL openvino::runtime PRIVATE openvino::runtime::dev)
+target_link_libraries(${TARGET_NAME} PUBLIC openvino::runtime PRIVATE OpenCL::OpenCL openvino::runtime::dev)
+ov_gpu_set_runtime_interface_for(${TARGET_NAME} RUNTIME ${OV_GPU_RT})
 
 target_include_directories(${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:rapidjson,INTERFACE_INCLUDE_DIRECTORIES>)
 
@@ -92,6 +106,14 @@ else()
   set(TUNING_CACHE_PATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/")
 endif()
 
+ov_build_target_faster(${TARGET_NAME} PCH)
+
+if(OV_GPU_RT STREQUAL "SYCL")
+  # Some sources include oneDNN headers that require SYCL backend support.
+  # Without the SYCL compilation flag, the compiler will fail with "Unsupported compiler" error.
+  add_sycl_to_target(TARGET ${TARGET_NAME} SOURCES)
+endif()
+
 add_custom_command(
     TARGET ${TARGET_NAME} POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/cache/cache.json ${TUNING_CACHE_PATH}/cache.json)
@@ -107,5 +129,9 @@ endif()
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/cache/cache.json
         DESTINATION ${CACHE_JSON_INSTALL_DIR}
         COMPONENT ${CACHE_JSON_COMPONENT})
+
+# Static library built via ov_add_target, so apply clang-tidy directly
+# (the ADD_CLANG_TIDY option only exists for plugins created via ov_add_plugin).
+ov_apply_clang_tidy(TARGET ${TARGET_NAME})
 
 ov_install_static_lib(${TARGET_NAME} ${OV_CPACK_COMP_CORE})

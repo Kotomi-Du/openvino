@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,11 +14,19 @@ using MemoryDescArgs = std::unordered_map<int, MemoryDescPtr>;
 using MemoryArgs = std::unordered_map<int, MemoryPtr>;
 
 // basic inputs
-#define ARG_SRC_0 1
-#define ARG_SRC   ARG_SRC_0
-#define ARG_SRC_1 2
-#define ARG_SRC_2 3
-#define ARG_SRC_3 4
+#define ARG_SRC_0  1
+#define ARG_SRC    ARG_SRC_0
+#define ARG_SRC_1  2
+#define ARG_SRC_2  3
+#define ARG_SRC_3  4
+#define ARG_SRC_4  5
+#define ARG_SRC_5  6
+#define ARG_SRC_6  7
+#define ARG_SRC_7  8
+#define ARG_SRC_8  9
+#define ARG_SRC_9  10
+#define ARG_SRC_10 11
+
 #define ARG_SUM   ARG_SRC_2
 #define ARG_DST_0 17
 #define ARG_DST   ARG_DST_0

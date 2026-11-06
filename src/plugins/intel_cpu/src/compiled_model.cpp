@@ -1,10 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "compiled_model.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -15,13 +16,16 @@
 
 #include "async_infer_request.h"
 #include "config.h"
+#include "cpu_parallel.hpp"
 #include "graph.h"
 #include "graph_context.h"
 #include "infer_request.h"
+#include "internal_properties.hpp"
 #include "low_precision/low_precision.hpp"
 #include "openvino/core/any.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/model.hpp"
+#include "openvino/runtime/hsm_deferred_writer.hpp"
 #include "openvino/runtime/iasync_infer_request.hpp"
 #include "openvino/runtime/icompiled_model.hpp"
 #include "openvino/runtime/intel_cpu/properties.hpp"
@@ -34,10 +38,17 @@
 #include "openvino/runtime/threading/itask_executor.hpp"
 #include "sub_memory_manager.hpp"
 #include "utils/debug_capabilities.h"
-#include "utils/memory_stats_dump.hpp"
-#include "utils/serialize.hpp"
+#include "utils/general_utils.h"
+#include "utils/graph_serializer/hsm_writer_handler.hpp"
+#include "utils/graph_serializer/serializer.hpp"
+#ifdef CPU_DEBUG_CAPS
+#    include "utils/memory_stats_dump.hpp"
+#endif
 
 #if defined(OV_CPU_WITH_ACL)
+#    include <arm_compute/runtime/IScheduler.h>
+#    include <arm_compute/runtime/Scheduler.h>
+
 #    include "nodes/executors/acl/acl_ie_scheduler.hpp"
 #endif
 
@@ -78,10 +89,9 @@ CompiledModel::CompiledModel(const std::shared_ptr<ov::Model>& model,
       m_loaded_from_cache(loaded_from_cache),
       m_sub_memory_manager(std::move(sub_memory_manager)) {
     m_mutex = std::make_shared<std::mutex>();
+    m_runtime_requirements = build_runtime_requirements();
     const auto& core = m_plugin->get_core();
-    if (!core) {
-        OPENVINO_THROW("Unable to get API version. Core is unavailable");
-    }
+    OPENVINO_ASSERT(core, "Unable to get API version. Core is unavailable");
 
     IStreamsExecutor::Config executor_config;
     if (m_cfg.exclusiveAsyncRequests) {
@@ -111,7 +121,7 @@ CompiledModel::CompiledModel(const std::shared_ptr<ov::Model>& model,
         set_callback_executor(m_callback_executor);
     }
 
-    m_optimized_single_stream = (executor_config.get_streams() == 1 && executor_config.get_threads() == 1);
+    m_optimized_single_stream = all_of(1, executor_config.get_streams(), executor_config.get_threads());
 
     int streams = std::max(1, executor_config.get_streams());
     std::vector<Task> tasks;
@@ -195,10 +205,12 @@ CompiledModel::GraphGuard::Lock CompiledModel::get_graph() const {
                     std::lock_guard<std::mutex> lock{*m_mutex};
                     auto isQuantizedFlag = (m_cfg.lpTransformsMode == Config::On) &&
                                            ov::pass::low_precision::LowPrecision::isFunctionQuantized(m_model);
+                    auto cpuParallel = std::make_shared<CpuParallel>(m_cfg.tbbPartitioner);
                     ctx = std::make_shared<GraphContext>(m_cfg,
                                                          m_socketWeights[socketId],
                                                          isQuantizedFlag,
                                                          streamsExecutor,
+                                                         cpuParallel,
                                                          m_sub_memory_manager);
                 }
 
@@ -222,7 +234,8 @@ CompiledModel::GraphGuard::Lock CompiledModel::get_graph() const {
 }
 
 std::shared_ptr<ov::ISyncInferRequest> CompiledModel::create_sync_infer_request() const {
-    return std::make_shared<SyncInferRequest>(std::static_pointer_cast<const CompiledModel>(shared_from_this()));
+    return std::make_shared<SyncInferRequest>(
+        CompiledModelHolder(std::static_pointer_cast<const CompiledModel>(shared_from_this())));
 }
 
 std::shared_ptr<ov::IAsyncInferRequest> CompiledModel::create_infer_request() const {
@@ -245,17 +258,13 @@ std::shared_ptr<ov::IAsyncInferRequest> CompiledModel::create_infer_request() co
 }
 
 std::shared_ptr<const ov::Model> CompiledModel::get_runtime_model() const {
-    if (m_graphs.empty()) {
-        OPENVINO_THROW("No graph was found");
-    }
+    OPENVINO_ASSERT(!m_graphs.empty(), "No graph was found");
 
     return get_graph()._graph.dump();
 }
 
 ov::Any CompiledModel::get_property(const std::string& name) const {
-    if (m_graphs.empty()) {
-        OPENVINO_THROW("No graph was found");
-    }
+    OPENVINO_ASSERT(!m_graphs.empty(), "No graph was found");
 
     if (name == ov::loaded_from_cache) {
         return m_loaded_from_cache;
@@ -297,20 +306,21 @@ ov::Any CompiledModel::get_property(const std::string& name) const {
             RO_property(ov::intel_cpu::denormals_optimization.name()),
             RO_property(ov::log::level.name()),
             RO_property(ov::intel_cpu::sparse_weights_decompression_rate.name()),
+            RO_property(ov::intel_cpu::enable_tensor_parallel.name()),
+            RO_property(ov::intel_cpu::tbb_partitioner.name()),
             RO_property(ov::hint::dynamic_quantization_group_size.name()),
             RO_property(ov::hint::kv_cache_precision.name()),
             RO_property(ov::key_cache_precision.name()),
             RO_property(ov::value_cache_precision.name()),
             RO_property(ov::key_cache_group_size.name()),
             RO_property(ov::value_cache_group_size.name()),
-        };
+            RO_property(ov::runtime_requirements.name())};
 
         return ro_properties;
     }
 
     if (name == ov::model_name) {
-        // @todo Does not seem ok to 'dump()' the whole graph everytime in order to get a name
-        const std::string modelName = graph.dump()->get_friendly_name();
+        std::string modelName = graph.GetName();
         return decltype(ov::model_name)::value_type(modelName);
     }
     if (name == ov::optimal_number_of_infer_requests) {
@@ -377,6 +387,13 @@ ov::Any CompiledModel::get_property(const std::string& name) const {
         return static_cast<decltype(ov::intel_cpu::sparse_weights_decompression_rate)::value_type>(
             config.fcSparseWeiDecompressionRate);
     }
+    if (name == ov::intel_cpu::enable_tensor_parallel) {
+        const auto& enable_tensor_parallel = config.enableTensorParallel;
+        return enable_tensor_parallel;
+    }
+    if (name == ov::intel_cpu::tbb_partitioner) {
+        return config.tbbPartitioner;
+    }
     if (name == ov::hint::dynamic_quantization_group_size) {
         return static_cast<decltype(ov::hint::dynamic_quantization_group_size)::value_type>(
             config.fcDynamicQuantizationGroupSize);
@@ -396,12 +413,38 @@ ov::Any CompiledModel::get_property(const std::string& name) const {
     if (name == ov::value_cache_group_size) {
         return static_cast<decltype(ov::value_cache_group_size)::value_type>(config.valueCacheGroupSize);
     }
+    if (name == ov::weights_path) {
+        return static_cast<decltype(ov::weights_path)::value_type>("");
+    }
+    if (name == ov::runtime_requirements) {
+        return static_cast<decltype(ov::runtime_requirements)::value_type>(m_runtime_requirements);
+    }
     OPENVINO_THROW("Unsupported property: ", name);
 }
 
+static void write_header(std::ostream& modelStream, const std::string& runtime_requirements) {
+    modelStream.write(reinterpret_cast<const char*>(&runtime_requirements_magic), sizeof(runtime_requirements_magic));
+    modelStream.write(reinterpret_cast<const char*>(&runtime_requirements_version),
+                      sizeof(runtime_requirements_version));
+    uint64_t reqs_size = runtime_requirements.size();
+    modelStream.write(reinterpret_cast<const char*>(&reqs_size), sizeof(reqs_size));
+    modelStream.write(runtime_requirements.data(), reqs_size);
+}
+
 void CompiledModel::export_model(std::ostream& modelStream) const {
-    ModelSerializer serializer(modelStream, m_cfg.cacheEncrypt);
-    serializer << m_model;
+    const bool weightless_mode = m_cfg.m_cache_mode == ov::CacheMode::OPTIMIZE_SIZE;
+    if (m_cfg.exportHsmFormat) {
+        HsmWriterHandler handler{m_model, m_runtime_requirements, m_cfg.cacheEncrypt, weightless_mode};
+        auto writer = ov::runtime::hsm::DeferredWriter::open(modelStream);
+        OPENVINO_ASSERT(writer, "[CPU] Cannot export in HSM format: the output stream must be seekable.");
+        writer->add_sections({&handler});
+        const auto error = writer->finalize();
+        OPENVINO_ASSERT(!error, "[CPU] HSM export failed: ", error.message());
+    } else {
+        write_header(modelStream, m_runtime_requirements);
+        ModelSerializer serializer(modelStream, m_cfg.cacheEncrypt, weightless_mode);
+        serializer << m_model;
+    }
 }
 
 void CompiledModel::release_memory() {

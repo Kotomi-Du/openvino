@@ -1,32 +1,30 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
-#include "openvino/op/op.hpp"
+#include <memory>
 
-namespace ov {
-namespace snippets {
-namespace op {
+#include "openvino/core/node.hpp"
+#include "openvino/core/node_vector.hpp"
+#include "snippets/op/horizon.hpp"
+
+namespace ov::snippets::op {
 
 /**
  * @interface HorizonSum
  * @brief The operation calculates a horizon sum of a vector register
  * @ingroup snippets
  */
-class HorizonSum : public ov::op::Op {
+class HorizonSum : public HorizonBase {
 public:
-    OPENVINO_OP("HorizonSum", "SnippetsOpset");
+    OPENVINO_OP("HorizonSum", "SnippetsOpset", HorizonBase);
 
-    HorizonSum(const Output<Node>& x);
+    using HorizonBase::HorizonBase;
     HorizonSum() = default;
 
-    bool visit_attributes(AttributeVisitor& visitor) override { return true;}
     std::shared_ptr<Node> clone_with_new_inputs(const OutputVector& new_args) const override;
-    void validate_and_infer_types() override;
 };
 
-} // namespace op
-} // namespace snippets
-} // namespace ov
+}  // namespace ov::snippets::op

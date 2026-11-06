@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <common/c_types_map.hpp>
 #include <common/primitive_desc_iface.hpp>
-#include <common/primitive_hashing_utils.hpp>
+#include <common/primitive_hashing.hpp>
 #include <common/utils.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -29,7 +29,9 @@
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/except.hpp"
 #include "openvino/core/type/element_type.hpp"
-#include "utils/general_utils.h"
+#if defined(OV_CPU_WITH_ACL) || defined(OPENVINO_ARCH_X86_64)
+#    include "utils/general_utils.h"
+#endif
 
 using namespace dnnl;
 
@@ -51,7 +53,9 @@ uint8_t DnnlExtensionUtils::sizeOfDataType(dnnl::memory::data_type dataType) {
     case dnnl::memory::data_type::nf4:
     case dnnl::memory::data_type::s4:
     case dnnl::memory::data_type::u4:
-    case dnnl::memory::data_type::f8_e8m0:
+    case dnnl::memory::data_type::u2:
+    case dnnl::memory::data_type::u3:
+    case dnnl::memory::data_type::e8m0:
     case dnnl::memory::data_type::f8_e4m3:
     case dnnl::memory::data_type::f8_e5m2:
     case dnnl::memory::data_type::f4_e2m1:
@@ -65,7 +69,7 @@ uint8_t DnnlExtensionUtils::sizeOfDataType(dnnl::memory::data_type dataType) {
 
 std::optional<dnnl::memory::data_type> DnnlExtensionUtils::ElementTypeToDataType(
     const ov::element::Type& elementType,
-    DnnlExtensionUtils::nothrow_tag /*unused*/) noexcept {
+    [[maybe_unused]] DnnlExtensionUtils::nothrow_tag tag) noexcept {
     switch (elementType) {
     case ov::element::f32:
         return memory::data_type::f32;
@@ -88,8 +92,12 @@ std::optional<dnnl::memory::data_type> DnnlExtensionUtils::ElementTypeToDataType
         return memory::data_type::s4;
     case ov::element::u4:
         return memory::data_type::u4;
+    case ov::element::u2:
+        return memory::data_type::u2;
+    case ov::element::u3:
+        return memory::data_type::u3;
     case ov::element::f8e8m0:
-        return memory::data_type::f8_e8m0;
+        return memory::data_type::e8m0;
     case ov::element::f8e4m3:
         return memory::data_type::f8_e4m3;
     case ov::element::f8e5m2:
@@ -105,7 +113,7 @@ std::optional<dnnl::memory::data_type> DnnlExtensionUtils::ElementTypeToDataType
 }
 
 dnnl::memory::data_type DnnlExtensionUtils::ElementTypeToDataType(const ov::element::Type& elementType,
-                                                                  DnnlExtensionUtils::throw_tag /*unused*/) {
+                                                                  [[maybe_unused]] DnnlExtensionUtils::throw_tag tag) {
     auto&& result = ElementTypeToDataType(elementType, nothrow_tag{});
     OPENVINO_ASSERT(result, "CPU plugin does not support ", elementType.to_string(), " for use with oneDNN.");
     return result.value();
@@ -135,7 +143,11 @@ ov::element::Type DnnlExtensionUtils::DataTypeToElementType(const dnnl::memory::
         return ov::element::i4;
     case memory::data_type::u4:
         return ov::element::u4;
-    case memory::data_type::f8_e8m0:
+    case memory::data_type::u2:
+        return ov::element::u2;
+    case memory::data_type::u3:
+        return ov::element::u3;
+    case memory::data_type::e8m0:
         return ov::element::f8e8m0;
     case memory::data_type::f8_e4m3:
         return ov::element::f8e4m3;
@@ -231,19 +243,14 @@ DnnlMemoryDescPtr DnnlExtensionUtils::query_md(const const_dnnl_primitive_desc_t
     auto query = dnnl::convert_to_c(what);
     const auto* cdesc = dnnl_primitive_desc_query_md(pd, query, idx);
 
-    if (!cdesc) {
-        OPENVINO_THROW("query_md failed for query=", query, " idx=", idx, ".");
-    }
-
+    OPENVINO_ASSERT(cdesc, "query_md failed for query=", query, " idx=", idx, ".");
     return DnnlExtensionUtils::makeDescriptor(cdesc);
 }
 
 std::string DnnlExtensionUtils::query_impl_info_str(const const_dnnl_primitive_desc_t& pd) {
     const char* res = nullptr;
     dnnl_status_t status = dnnl_primitive_desc_query(pd, dnnl_query_impl_info_str, 0, reinterpret_cast<void*>(&res));
-    if (status != dnnl_success) {
-        OPENVINO_THROW("query_impl_info_str failed.");
-    }
+    OPENVINO_ASSERT(status == dnnl_success, "query_impl_info_str failed.");
     return res;
 }
 
@@ -269,9 +276,9 @@ const char* DnnlExtensionUtils::query_pd_info(const_dnnl_primitive_desc_t pd) {
     return pd->info();
 }
 
-bool DnnlExtensionUtils::isUnarySupportedAsPostOp(Algorithm alg) {
+bool DnnlExtensionUtils::isUnarySupportedAsPostOp([[maybe_unused]] Algorithm alg) {
 #if defined(OV_CPU_WITH_ACL)
-    return one_of(alg,
+    return any_of(alg,
                   Algorithm::EltwiseRelu,
                   Algorithm::EltwiseTanh,
                   Algorithm::EltwiseElu,
@@ -281,7 +288,7 @@ bool DnnlExtensionUtils::isUnarySupportedAsPostOp(Algorithm alg) {
                   Algorithm::EltwiseSigmoid,
                   Algorithm::EltwiseClamp);
 #elif defined(OPENVINO_ARCH_X86_64)
-    return one_of(alg,
+    return any_of(alg,
                   Algorithm::EltwiseRelu,
                   Algorithm::EltwiseGeluErf,
                   Algorithm::EltwiseGeluTanh,

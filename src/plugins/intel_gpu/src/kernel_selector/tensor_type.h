@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -140,6 +140,8 @@ enum WeightsLayout {
                                                  // 1,5...
     os_is_zyx_osa4_isa8_osv8_isv4_swizzled_by_4,  // for MMAD convolution swizzled from ofm 0..7 to 0,4,8,12,16,20,24,28,
                                                   // 1,5...
+    os_is_yx_osa2_isa8_osv16_isv4_swizzled_by_2,
+    os_is_zyx_osa2_isa8_osv16_isv4_swizzled_by_2,
     os_is_yx_osv16_isv4,                 // swizzled weights for convolution using IMAD
     os_is_yx_osv8_isv4,                      // weights for int8 blocked conv
     os_is_yx_osv32_isv4_swizzled_by_2,   //  weights for bfyx -> b_fs_yx_fsv32 convolution using IMAD with swizzled ofm (0, 2, 4..), (1, 3, 5...)
@@ -196,8 +198,9 @@ struct Pad {
 
     static size_t NumPadOffsetsPerDim() { return 2; /*pad_before/pad_after*/}
     size_t Total(bool is_runtime = false) const {
-        if (!is_runtime)
+        if (!is_runtime) {
             OPENVINO_ASSERT(!is_dynamic, "Total() is called for dynamic pad!");
+        }
         return before + after;
     }
 };
@@ -488,8 +491,9 @@ protected:
         size_t channel = static_cast<size_t>(channelName);
 
         for (auto& entry : channelArr) {
-            if (entry.first == l)
+            if (entry.first == l) {
                 return entry.second[channel];
+            }
         }
 
         return -1;
@@ -508,9 +512,10 @@ protected:
                          std::end(channelArr),
                          [&](typename std::tuple_element<0, ArrayT>::type entry) { return entry.first == l; });
 
-        if (entry == channelArr.end())
+        if (entry == channelArr.end()) {
             throw std::invalid_argument("Failed to get channels count for layout " +
                                         std::to_string(static_cast<uint32_t>(l)));
+        }
 
         return std::accumulate(entry->second.begin(), entry->second.end(), 0U, [](uint32_t count, int v) {
             return count + ((v != -1) ? 1 : 0);

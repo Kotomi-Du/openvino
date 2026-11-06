@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,6 +15,7 @@ namespace kernel_selector {
 struct broadcast_params : public base_params {
     broadcast_params() : base_params(KernelType::BROADCAST) {}
     std::vector<uint16_t> input_order;
+    bool is_explicit_mode = false;  // true if primitive uses axes_mapping (explicit), false for numpy mode
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

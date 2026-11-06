@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ class ConvolutionKernel_b_fs_yx_fsv16_depthwise : public ConvolutionKernelBase {
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_b_fs_yx_fsv16_depthwise() : ConvolutionKernelBase("convolution_gpu_bfyx_f16_depthwise") {}
-    virtual ~ConvolutionKernel_b_fs_yx_fsv16_depthwise() {}
+    ~ConvolutionKernel_b_fs_yx_fsv16_depthwise() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

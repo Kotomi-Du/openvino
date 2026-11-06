@@ -1,11 +1,13 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "common_test_utils/test_constants.hpp"
 #include "behavior/compiled_model/import_export.hpp"
-#include "openvino/op/interpolate.hpp"
+#include "common_test_utils/test_constants.hpp"
+#include "internal_properties.hpp"
 #include "openvino/core/model_util.hpp"
+#include "openvino/op/interpolate.hpp"
+#include "openvino/op/is_inf.hpp"
 #include "ov_ops/type_relaxed.hpp"
 
 namespace {
@@ -40,7 +42,7 @@ TEST_P(OVClassCompiledModelImportExportTestP, importExportModelWithTypeRelaxedEx
     std::shared_ptr<ov::Model> model;
 
     {
-        using ov::op::v4::Interpolate;
+        using ov::op::v4::Interpolate, ov::op::v10::IsInf;
 
         ov::ParameterVector inputs;
         auto data = std::make_shared<Parameter>(elementType, ov::PartialShape{1, 3, 64, 64});
@@ -56,10 +58,11 @@ TEST_P(OVClassCompiledModelImportExportTestP, importExportModelWithTypeRelaxedEx
         attrs.pads_end = {0, 0, 0, 0};
         attrs.cube_coeff = -0.75;
         auto interpolate = std::make_shared<ov::op::TypeRelaxed<Interpolate>>(data, output_shape, scales, attrs);
+        auto is_inf = std::make_shared<IsInf>(interpolate);
 
         auto result = std::make_shared<Result>(interpolate);
         result->set_friendly_name("result");
-        model = std::make_shared<ov::Model>(ov::ResultVector{result},
+        model = std::make_shared<ov::Model>(ov::OutputVector{result, is_inf},
                                             ov::ParameterVector{data, output_shape, scales},
                                             "Interpolate");
         ov::util::set_tensors_names(ov::AUTO, *model);
@@ -75,9 +78,9 @@ TEST_P(OVClassCompiledModelImportExportTestP, importExportModelWithTypeRelaxedEx
     EXPECT_NO_THROW(importedCompiledModel.input("data").get_node());
     EXPECT_THROW(importedCompiledModel.input("param"), ov::Exception);
 
-    EXPECT_EQ(model->outputs().size(), 1);
+    EXPECT_EQ(model->outputs().size(), 2);
     EXPECT_EQ(model->outputs().size(), importedCompiledModel.outputs().size());
-    EXPECT_NO_THROW(importedCompiledModel.output());
+    EXPECT_NO_THROW(importedCompiledModel.output(0));
     EXPECT_EQ(model->output(0).get_tensor().get_names(), importedCompiledModel.output(0).get_tensor().get_names());
     EXPECT_NO_THROW(importedCompiledModel.output("result").get_node());
     EXPECT_THROW(importedCompiledModel.output("param"), ov::Exception);
@@ -86,12 +89,22 @@ TEST_P(OVClassCompiledModelImportExportTestP, importExportModelWithTypeRelaxedEx
     EXPECT_EQ(elementType, importedCompiledModel.output("result").get_element_type());
 }
 
+// TODO: when HSM becomes the default and the legacy format and export_hsm_format are dropped, remove the second config -
+// the default one then covers HSM.
 INSTANTIATE_TEST_SUITE_P(smoke_serialization,
                          OVCompiledGraphImportExportTest,
                          ::testing::Combine(::testing::ValuesIn(netPrecisions),
                                             ::testing::Values(ov::test::utils::DEVICE_CPU),
-                                            ::testing::Values(empty_property)),
+                                            ::testing::Values(empty_property,
+                                                              ov::AnyMap{ov::intel_cpu::export_hsm_format(true)})),
                          OVCompiledGraphImportExportTest::getTestCaseName);
+
+// TODO: when HSM becomes the default and export_hsm_format is dropped, use an empty config here.
+INSTANTIATE_TEST_SUITE_P(smoke_serialization,
+                         OVCompiledModelHsmBlobTest,
+                         ::testing::Combine(::testing::Values(ov::test::utils::DEVICE_CPU),
+                                            ::testing::Values(ov::AnyMap{ov::intel_cpu::export_hsm_format(true)})),
+                         OVCompiledModelHsmBlobTest::getTestCaseName);
 
 TEST_P(OVCompiledModelGraphUniqueNodeNamesTest, CheckUniqueNodeNames) {
     std::shared_ptr<ov::Core> core = ov::test::utils::PluginCache::get().core();

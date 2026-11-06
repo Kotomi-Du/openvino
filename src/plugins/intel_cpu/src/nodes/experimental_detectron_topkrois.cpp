@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -50,17 +50,12 @@ ExperimentalDetectronTopKROIs::ExperimentalDetectronTopKROIs(const std::shared_p
     }
 
     const auto topKROI = ov::as_type_ptr<const ov::op::v6::ExperimentalDetectronTopKROIs>(op);
-    if (topKROI == nullptr) {
-        THROW_CPU_NODE_ERR("is not an instance of ExperimentalDetectronTopKROIs from opset6.");
-    }
+    CPU_NODE_ASSERT(topKROI, "is not an instance of ExperimentalDetectronTopKROIs from opset6.");
 
-    if (inputShapes.size() != 2 || outputShapes.size() != 1) {
-        THROW_CPU_NODE_ERR("has incorrect number of input/output edges!");
-    }
+    CPU_NODE_ASSERT(inputShapes.size() == 2 && outputShapes.size() == 1, "has incorrect number of input/output edges!");
 
-    if (getInputShapeAtPort(INPUT_ROIS).getRank() != 2 || getInputShapeAtPort(INPUT_PROBS).getRank() != 1) {
-        THROW_CPU_NODE_ERR("has unsupported input shape");
-    }
+    CPU_NODE_ASSERT(getInputShapeAtPort(INPUT_ROIS).getRank() == 2 && getInputShapeAtPort(INPUT_PROBS).getRank() == 1,
+                    "has unsupported input shape");
 
     max_rois_num_ = topKROI->get_max_rois();
 }
@@ -76,8 +71,8 @@ void ExperimentalDetectronTopKROIs::initSupportedPrimitiveDescriptors() {
 }
 
 void ExperimentalDetectronTopKROIs::execute([[maybe_unused]] const dnnl::stream& strm) {
-    const int input_rois_num = getParentEdgeAt(INPUT_ROIS)->getMemory().getStaticDims()[0];
-    const int top_rois_num = (std::min)(max_rois_num_, input_rois_num);
+    const auto input_rois_num = getParentEdgeAt(INPUT_ROIS)->getMemory().getStaticDims()[0];
+    const auto top_rois_num = (std::min)(max_rois_num_, input_rois_num);
 
     const auto* input_rois = getSrcDataAtPortAs<const float>(INPUT_ROIS);
     const auto* input_probs = getSrcDataAtPortAs<const float>(INPUT_PROBS);
@@ -90,7 +85,7 @@ void ExperimentalDetectronTopKROIs::execute([[maybe_unused]] const dnnl::stream&
         return input_probs[i1] > input_probs[i2];
     });
 
-    for (int i = 0; i < top_rois_num; ++i) {
+    for (size_t i = 0; i < top_rois_num; ++i) {
         cpu_memcpy(output_rois + 4 * i, input_rois + 4 * idx[i], 4 * sizeof(float));
     }
 }

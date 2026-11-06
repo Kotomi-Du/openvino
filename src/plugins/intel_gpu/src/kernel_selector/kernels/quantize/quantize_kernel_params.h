@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -63,8 +63,9 @@ struct quantize_params : public base_params {
 
     ParamsKey GetParamsKey() const override {
         auto k = base_params::GetParamsKey();
-        if (scale_shift_opt)
+        if (scale_shift_opt) {
             k.EnableQuantizeScaleShiftOpt();
+        }
         return k;
     }
 };

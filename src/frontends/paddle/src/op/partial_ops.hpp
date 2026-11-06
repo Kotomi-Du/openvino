@@ -1,17 +1,15 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "default_opset.hpp"
 #include "openvino/frontend/paddle/node_context.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 
 NamedOutputs partial_ops(const NodeContext& node, const std::string type) {
     auto x = node.get_ng_inputs("X");
+    PADDLE_OP_CHECK(node, x.size() == 2, "partial_ops requires exactly 2 inputs in X.");
     const auto start_index = node.get_attribute<int>("start_index");
     const auto length = node.get_attribute<int>("length");
     PADDLE_OP_CHECK(node, x[0].get_partial_shape().rank().get_length() == 2, "partial ops only support 2-D Tensor");
@@ -37,7 +35,4 @@ NamedOutputs partial_ops(const NodeContext& node, const std::string type) {
                                               {"Out"});
 }
 
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

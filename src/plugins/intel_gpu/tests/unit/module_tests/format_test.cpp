@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -151,7 +151,7 @@ INSTANTIATE_TEST_SUITE_P(smoke, axes_test_format,
     axes_test_format::PrintToString);
 
 struct find_format_test_params {
-    std::vector<uint64_t> dims_order;
+    std::vector<size_t> dims_order;
     std::vector<std::pair<size_t, int>> block_sizes;
     bool is_weights;
     bool is_grouped;

@@ -1,0 +1,96 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#pragma once
+
+#include <ze_graph_ext.h>
+
+#include <atomic>
+#include <mutex>
+
+#include "intel_npu/common/igraph.hpp"
+#include "intel_npu/common/network_metadata.hpp"
+#include "intel_npu/utils/vm/npu_vm_runtime_api.hpp"
+#include "intel_npu/utils/zero/zero_init.hpp"
+#include "intel_npu/utils/zero/zero_wrappers.hpp"
+#include "openvino/runtime/so_ptr.hpp"
+
+namespace intel_npu {
+class DynamicGraph final : public IGraph {
+public:
+    DynamicGraph(const std::shared_ptr<ZeroInitStructsHolder>& zeroInitStruct,
+                 ov::Tensor blob,
+                 BlobType blobType = BlobType::BYTECODE);
+
+    std::pair<uint64_t, std::optional<std::vector<uint64_t>>> export_blob(std::ostream& stream) const override;
+
+    void* get_handle() const override;
+
+    GraphKind get_kind() const override {
+        return GraphKind::Dynamic;
+    }
+
+    // HostCompile has no fixed plugin-side batch size; return nullopt for the shared import path.
+    const std::optional<std::size_t> get_batch_size() const override {
+        return std::nullopt;
+    }
+
+    ~DynamicGraph() override;
+
+    const NetworkMetadata& get_metadata() const override;
+
+    void update_network_name(std::string_view name) override;
+
+    CommandQueueDesc get_command_queue_desc() const override;
+    void set_workload_type(const ov::WorkloadType workloadType) override;
+    void set_model_priority(const ov::hint::Priority modelPriority) override;
+
+    uint32_t get_unique_id() override;
+    void set_last_submitted_id(uint32_t id_index) override;
+    uint32_t get_last_submitted_id() const override;
+
+    std::optional<bool> is_profiling_blob() const override;
+
+    std::optional<std::string_view> get_compatibility_descriptor() const override;
+
+    BlobType get_blob_type() const override;
+
+private:
+    void initialize_impl(const Config& runtimeConfig) override;
+    bool release_blob();
+    void initialize_engine(const Config& config);
+    void create_execution_engine(const Config& config);
+    void prepare_metadata();
+
+    std::shared_ptr<ZeroInitStructsHolder> _zeroInitStruct;
+
+    NetworkMetadata _metadata;
+
+    // Preserve previous behavior: when shared common queue is disabled and a new queue is created due to a priority
+    // change, keep the same workload type to avoid creating a queue with an unexpected workload.
+    std::optional<ov::WorkloadType> _workloadType = std::nullopt;
+    std::shared_ptr<CommandQueue> _commandQueue = nullptr;
+
+    mutable std::mutex _commandQueueDescMutex;
+    CommandQueueDesc _commandQueueDesc;
+
+    std::optional<ov::Tensor> _blob;
+    BlobType _blobType = BlobType::BYTECODE;
+
+    // In the case of the import path, the blob is released after graph initialization so it can not be any longer
+    // exported
+    bool _blobIsReleased = false;
+
+    uint32_t _uniqueId = 0;
+
+    Logger _logger;
+
+    npu_vm_runtime_handle_t _engine = nullptr;
+    npu_vm_runtime_properties_t _engineProperties{};
+    npu_vm_runtime_version_t _apiVersion = NPU_VM_RUNTIME_VERSION_1_0;
+    // Set once the VM engine is created and _metadata is populated from it; get_metadata() throws before that
+    std::atomic<bool> _metadataInitialized{false};
+};
+
+}  // namespace intel_npu

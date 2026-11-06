@@ -1,15 +1,12 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "behavior/ov_infer_request/io_tensor.hpp"
-
+#include <behavior/ov_infer_request/io_tensor.hpp>
 #include <vector>
 
 #include "common/npu_test_env_cfg.hpp"
 #include "common/utils.hpp"
-#include "intel_npu/config/options.hpp"
-#include "overload/ov_infer_request/io_tensor.hpp"
 
 using namespace ov::test::behavior;
 
@@ -34,18 +31,6 @@ INSTANTIATE_TEST_SUITE_P(smoke_Multi_BehaviorTests,
                                             ::testing::ValuesIn(multiConfigs)),
                          InferRequestParamsAnyMapTestName::getTestCaseName);
 
-INSTANTIATE_TEST_SUITE_P(smoke_BehaviorTests,
-                         OVInferRequestIOTensorTestNPU,
-                         ::testing::Combine(::testing::Values(ov::test::utils::DEVICE_NPU),
-                                            ::testing::ValuesIn(configs)),
-                         InferRequestParamsAnyMapTestName::getTestCaseName);
-
-INSTANTIATE_TEST_SUITE_P(smoke_Multi_BehaviorTests,
-                         OVInferRequestIOTensorTestNPU,
-                         ::testing::Combine(::testing::Values(ov::test::utils::DEVICE_MULTI),
-                                            ::testing::ValuesIn(multiConfigs)),
-                         InferRequestParamsAnyMapTestName::getTestCaseName);
-
 INSTANTIATE_TEST_SUITE_P(smoke_Auto_BehaviorTests,
                          OVInferRequestIOTensorTest,
                          ::testing::Combine(::testing::Values(ov::test::utils::DEVICE_AUTO),
@@ -54,6 +39,11 @@ INSTANTIATE_TEST_SUITE_P(smoke_Auto_BehaviorTests,
 
 const std::vector<ov::element::Type> prcs = {
     ov::element::boolean,
+    ov::element::nf4,
+    ov::element::f4e2m1,
+    ov::element::f8e4m3,
+    ov::element::f8e5m2,
+    ov::element::f8e8m0,
     ov::element::bf16,
     ov::element::f16,
     ov::element::f32,
@@ -64,6 +54,7 @@ const std::vector<ov::element::Type> prcs = {
     ov::element::i32,
     ov::element::i64,
     ov::element::u1,
+    ov::element::u2,
     ov::element::u4,
     ov::element::u8,
     ov::element::u16,
@@ -91,27 +82,6 @@ INSTANTIATE_TEST_SUITE_P(compatibility_smoke_Auto_BehaviorTests,
                                             ::testing::Values(ov::test::utils::DEVICE_AUTO),
                                             ::testing::ValuesIn(autoConfigs)),
                          ov::test::utils::appendPlatformTypeTestName<OVInferRequestIOTensorSetPrecisionTest>);
-
-INSTANTIATE_TEST_SUITE_P(compatibility_smoke_BehaviorTests,
-                         OVInferRequestIOTensorSetPrecisionTestNPU,
-                         ::testing::Combine(::testing::ValuesIn(prcs),
-                                            ::testing::Values(ov::test::utils::DEVICE_NPU),
-                                            ::testing::ValuesIn(configs)),
-                         ov::test::utils::appendPlatformTypeTestName<OVInferRequestIOTensorSetPrecisionTestNPU>);
-
-INSTANTIATE_TEST_SUITE_P(compatibility_smoke_Mutli_BehaviorTests,
-                         OVInferRequestIOTensorSetPrecisionTestNPU,
-                         ::testing::Combine(::testing::ValuesIn(prcs),
-                                            ::testing::Values(ov::test::utils::DEVICE_MULTI),
-                                            ::testing::ValuesIn(multiConfigs)),
-                         ov::test::utils::appendPlatformTypeTestName<OVInferRequestIOTensorSetPrecisionTestNPU>);
-
-INSTANTIATE_TEST_SUITE_P(compatibility_smoke_Auto_BehaviorTests,
-                         OVInferRequestIOTensorSetPrecisionTestNPU,
-                         ::testing::Combine(::testing::ValuesIn(prcs),
-                                            ::testing::Values(ov::test::utils::DEVICE_AUTO),
-                                            ::testing::ValuesIn(autoConfigs)),
-                         ov::test::utils::appendPlatformTypeTestName<OVInferRequestIOTensorSetPrecisionTestNPU>);
 
 INSTANTIATE_TEST_SUITE_P(smoke_BehaviorTests,
                          OVInferRequestCheckTensorPrecision,

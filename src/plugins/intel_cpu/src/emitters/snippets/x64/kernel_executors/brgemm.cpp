@@ -1,18 +1,13 @@
-// Copyright (C) 2020-2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "brgemm.hpp"
 
-#include <oneapi/dnnl/dnnl_common_types.h>
-
 #include <common/primitive_attr.hpp>
-#include <cpu/x64/brgemm/brgemm_types.hpp>
 #include <cpu/x64/cpu_isa_traits.hpp>
 #include <cstddef>
 #include <memory>
-#include <sstream>
-#include <string>
 #include <utility>
 
 #include "cache/multi_cache.h"
@@ -23,7 +18,16 @@
 #include "openvino/core/type/element_type.hpp"
 #include "snippets/lowered/expression.hpp"
 #include "snippets/lowered/linear_ir.hpp"
-#include "utils/general_utils.h"
+#include "transformations/snippets/x64/op/brgemm_utils.hpp"
+#ifdef SNIPPETS_DEBUG_CAPS
+#    include <oneapi/dnnl/dnnl_common_types.h>
+
+#    include <cpu/x64/brgemm/brgemm_types.hpp>
+#    include <sstream>
+#    include <string>
+
+#    include "utils/general_utils.h"
+#endif
 
 using namespace Xbyak;
 using namespace dnnl::impl;
@@ -31,14 +35,15 @@ using namespace dnnl::impl::cpu::x64;
 
 namespace ov::intel_cpu::x64 {
 
-BrgemmKernelConfig::BrgemmKernelConfig(const element::Type& in0_dtype,
-                                       const element::Type& in1_dtype,
+BrgemmKernelConfig::BrgemmKernelConfig(const brgemm_utils::BrgemmConfig& brgemm_config,
                                        const element::Type& out_dtype,
-                                       bool is_with_comp,
-                                       dnnl::impl::cpu::x64::cpu_isa_t primitive_isa,
                                        const dnnl_post_ops& post_ops)
-    : m_static_params(
-          std::make_shared<StaticParams>(in0_dtype, in1_dtype, out_dtype, is_with_comp, primitive_isa, post_ops)) {
+    : m_static_params(std::make_shared<StaticParams>(brgemm_config.src_dt(),
+                                                     brgemm_config.wei_dt(),
+                                                     out_dtype,
+                                                     brgemm_config.with_compensations(),
+                                                     brgemm_config.isa(),
+                                                     post_ops)) {
     m_hash = compute_hash();
 }
 
@@ -138,7 +143,7 @@ std::shared_ptr<BrgemmCompiledKernel> BrgemmKernelReferenceExecutor::compile_ker
 brgemm_ref_kernel::brgemm_ref_kernel(BrgemmKernelConfig c) : m_config(std::move(c)) {
     OV_CPU_JIT_EMITTER_ASSERT(!m_config.is_with_comp(), "brgemm_ref_kernel doesn't currently support compensations");
     OV_CPU_JIT_EMITTER_ASSERT(
-        everyone_is(dnnl_data_type_t::dnnl_f32, m_config.get_dt_in0(), m_config.get_dt_in1(), m_config.get_dt_out()),
+        all_of(dnnl_data_type_t::dnnl_f32, m_config.get_dt_in0(), m_config.get_dt_in1(), m_config.get_dt_out()),
         "brgemm_ref_kernel currently supports only fp32 precisions");
 }
 

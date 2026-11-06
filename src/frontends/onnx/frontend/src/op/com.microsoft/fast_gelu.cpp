@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,11 +12,7 @@
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace com_microsoft {
-namespace opset_1 {
+namespace ov::frontend::onnx::com_microsoft::opset_1 {
 
 ov::OutputVector fast_gelu(const ov::frontend::onnx::Node& node) {
     // Original documentation:
@@ -45,8 +41,4 @@ ov::OutputVector fast_gelu(const ov::frontend::onnx::Node& node) {
 
 ONNX_OP("FastGelu", OPSET_SINCE(1), com_microsoft::opset_1::fast_gelu, MICROSOFT_DOMAIN);
 
-}  // namespace opset_1
-}  // namespace com_microsoft
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::com_microsoft::opset_1

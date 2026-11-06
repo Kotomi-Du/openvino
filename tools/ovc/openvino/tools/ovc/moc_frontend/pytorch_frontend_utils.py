@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import logging as log
@@ -9,7 +9,7 @@ import numpy as np
 
 # pylint: disable=no-name-in-module,import-error
 from openvino import Tensor, PartialShape
-from openvino.tools.ovc.cli_parser import single_input_to_input_cut_info, _InputCutInfo
+from openvino.tools.ovc.cli_parser import input_to_input_cut_info, single_input_to_input_cut_info, _InputCutInfo
 from openvino.tools.ovc.error import Error
 
 
@@ -19,6 +19,99 @@ def extract_module_extensions(args):
     if not isinstance(extensions, (list, tuple)):
         extensions = [extensions]
     return {extension.module: extension for extension in extensions if isinstance(extension, ModuleExtension)}
+
+
+def _build_dynamic_shapes(inputs, input_specs=None):
+    """Build dynamic_shapes for torch.export.export.
+
+    If input_specs (list of _InputCutInfo from the 'input' parameter) is provided
+    and contains shapes, dimensions marked as -1 (fully dynamic) get Dim.AUTO,
+    dimensions with min/max constraints (e.g. Dimension(1, 10)) get
+    Dim("dI_D", min=..., max=...), and fixed dimensions stay static.
+    When no specs are given returns None so that torch.export.export produces
+    a fully static graph.
+
+    The input_specs list is flat (one spec per leaf tensor), while inputs may
+    contain nested tuples/lists (e.g. past_key_values). pytree is used to
+    flatten inputs, pair each leaf with its spec, and then unflatten the
+    result back into the original structure that torch.export expects.
+    """
+    import torch
+    from torch.export import Dim
+    from torch.utils._pytree import tree_flatten, tree_unflatten
+
+    if input_specs is None:
+        return None
+
+    def _dims_for_tensor(tensor, spec_shape, input_idx):
+        """Return a per-dim dict mapping dim index to Dim hint.
+
+        - Fully dynamic dims (-1) → Dim.AUTO
+        - Constrained dims (min, max) → Dim("dI_D", min=..., max=...)
+        - Static dims → omitted (stays static)
+        """
+        if not isinstance(tensor, torch.Tensor) or tensor.ndim == 0:
+            return None
+        if spec_shape is None:
+            return None
+        dims = {}
+        for d in range(tensor.ndim):
+            if d >= len(spec_shape):
+                continue
+            sd = spec_shape[d]
+            if isinstance(sd, tuple):
+                # Constrained dimension with (min, max) bounds
+                min_val, max_val = sd
+                kwargs = {}
+                if min_val > 0:
+                    kwargs['min'] = min_val
+                if max_val != -1:  # -1 means unbounded
+                    kwargs['max'] = max_val
+                dims[d] = Dim(f"d{input_idx}_{d}", **kwargs)
+            elif sd == -1:
+                dims[d] = Dim.AUTO
+        # If no dynamic dims, return None
+        if not dims:
+            return None
+        return dims
+
+    # Resolve spec shapes (list of dim descriptors aligned to flat leaves).
+    # Each dim is: int (static), -1 (fully dynamic), or (min, max) tuple.
+    def _get_spec_shapes():
+        shapes = []
+        for spec in input_specs:
+            if spec is None or getattr(spec, 'shape', None) is None or not spec.shape.rank.is_static:
+                shapes.append(None)
+                continue
+            dims = []
+            for i in range(spec.shape.rank.get_length()):
+                dim = spec.shape.get_dimension(i)
+                if dim.is_static:
+                    dims.append(dim.get_length())
+                elif dim.get_min_length() == 0 and dim.get_max_length() == -1:
+                    dims.append(-1)  # Fully dynamic (unbounded)
+                else:
+                    dims.append((dim.get_min_length(), dim.get_max_length()))  # Constrained
+            shapes.append(dims)
+        return shapes
+
+    spec_shapes = _get_spec_shapes()
+
+    # Flatten the (possibly nested) inputs to get leaf tensors and the
+    # tree structure.  Build a flat list of per-leaf dim specs, then
+    # unflatten back so that dynamic_shapes mirrors the input structure
+    # exactly as torch.export.export requires.
+    if isinstance(inputs, torch.Tensor):
+        inputs = (inputs,)
+
+    flat_leaves, tree_spec = tree_flatten(inputs)
+
+    flat_dim_specs = []
+    for i, leaf in enumerate(flat_leaves):
+        ss = spec_shapes[i] if i < len(spec_shapes) else None
+        flat_dim_specs.append(_dims_for_tensor(leaf, ss, i))
+
+    return tree_unflatten(flat_dim_specs, tree_spec)
 
 
 def get_pytorch_decoder(model, example_inputs, args):
@@ -47,9 +140,24 @@ def get_pytorch_decoder(model, example_inputs, args):
                                "supported directly. Please upgrade nncf or "
                                "export to ONNX first.")
     inputs = prepare_torch_inputs(example_inputs)
+    use_dynamo = args.get("dynamo", False)
     if not isinstance(model, (TorchScriptPythonDecoder, TorchFXPythonDecoder)):
         if hasattr(torch, "export") and isinstance(model, (torch.export.ExportedProgram)):
             decoder = TorchFXPythonDecoder.from_exported_program(model)
+        elif use_dynamo and isinstance(model, torch.nn.Module):
+            if inputs is None:
+                raise Error("example_input is required when dynamo=True")
+            # Extract user-provided input shape specs to constrain dynamic dims.
+            # Normalize raw user input (PartialShape, list, etc.) to list of _InputCutInfo
+            # because _build_dynamic_shapes expects _InputCutInfo objects with .shape attribute.
+            raw_input = args.get('input', None) or None
+            input_specs = input_to_input_cut_info(raw_input) if raw_input is not None else None
+            dynamic_shapes = _build_dynamic_shapes(inputs, input_specs=input_specs)
+            decoder = TorchFXPythonDecoder.from_model(
+                model,
+                example_inputs=inputs,
+                dynamic_shapes=dynamic_shapes,
+                module_extensions=extract_module_extensions(args))
         else:
             decoder = TorchScriptPythonDecoder(
                 model,
@@ -68,14 +176,53 @@ def get_pytorch_decoder(model, example_inputs, args):
     return args
 
 
-def get_pytorch_decoder_for_model_on_disk(argv, args):
+def _is_pytorch_zip(path):
+    """Check if a file looks like a PyTorch archive (TorchScript or ExportedProgram).
+
+    Both formats are ZIP archives with specific internal entries.
+    This lightweight check avoids expensive torch.jit.load / torch.export.load
+    calls (and their warnings/side effects) on non-PyTorch files.
+    """
+    import zipfile
+    # Maximum bytes to read from the "archive_format" entry. The expected
+    # content is the literal b"pt2" (3 bytes); cap at a small constant so a
+    # crafted ZIP cannot trigger large/expensive decompression during
+    # auto-detection.
+    _ARCHIVE_FORMAT_MAX_BYTES = 16
     try:
-        from openvino.frontend.pytorch.ts_decoder import TorchScriptPythonDecoder
-        from openvino.frontend.pytorch.fx_decoder import TorchFXPythonDecoder
-        import torch
-    except:
+        if not zipfile.is_zipfile(path):
+            return False
+        with zipfile.ZipFile(path, 'r') as zf:
+            for info in zf.infolist():
+                name = info.filename
+                basename = name.rsplit('/', 1)[-1] if '/' in name else name
+                # TorchScript archives contain data.pkl and constants.pkl
+                if basename == 'data.pkl' or basename == 'constants.pkl':
+                    return True
+                # Older ExportedProgram format (PyTorch ≤2.6)
+                if basename.startswith('serialized_') and basename.endswith('.json'):
+                    return True
+                # Newer PT2 archive format (PyTorch ≥2.7): contains an
+                # "archive_format" entry whose content is b"pt2". Reject
+                # entries with unexpected uncompressed size up-front and
+                # only read a small bounded prefix to avoid CPU/memory
+                # blow-ups on crafted archives.
+                if basename == 'archive_format':
+                    if info.file_size > _ARCHIVE_FORMAT_MAX_BYTES:
+                        continue
+                    try:
+                        with zf.open(info, 'r') as fh:
+                            data = fh.read(_ARCHIVE_FORMAT_MAX_BYTES)
+                        if data == b'pt2':
+                            return True
+                    except Exception:
+                        pass
+            return False
+    except Exception:
         return False
 
+
+def get_pytorch_decoder_for_model_on_disk(argv, args):
     example_inputs = None
     if 'example_input' in args and args['example_input'] is not None:
         example_inputs = args['example_input']
@@ -88,10 +235,37 @@ def get_pytorch_decoder_for_model_on_disk(argv, args):
     if not isinstance(input_model, (str, pathlib.Path)):
         return False
 
+    # Quick structural check: only attempt PyTorch loading for ZIP archives
+    # that contain PyTorch-specific entries. This avoids importing torch,
+    # emitting misleading warnings, and running pickle-based deserialization
+    # on non-PyTorch files (e.g. ONNX, TF, TFLite).
+    if not _is_pytorch_zip(input_model):
+        return False
+
+    try:
+        from openvino.frontend.pytorch.ts_decoder import TorchScriptPythonDecoder
+        from openvino.frontend.pytorch.fx_decoder import TorchFXPythonDecoder
+        import torch
+    except Exception:
+        # Auto-detection must not fail hard if the PyTorch frontend or torch
+        # itself cannot be imported (missing shared libs, init errors, etc.).
+        # Mirror the broad-except pattern used in convert_impl.py.
+        return False
+
+    inputs = prepare_torch_inputs(example_inputs)
+    # SECURITY: torch.jit.load / torch.export.load unpickle, so a malicious
+    # archive can execute arbitrary code. Mitigations:
+    #   1. _is_pytorch_zip() above rejects anything that isn't a ZIP with
+    #      PyTorch-specific entries, shrinking the attack surface.
+    #   2. input_model comes from the OVC CLI / Python API; the trust
+    #      boundary is the caller, who already has code-exec on this host.
+    #   3. neither torch.jit.load nor torch.export.load supports a
+    #      weights_only / safe mode for TorchScript / older PT2 archives.
+    log.warning("Loading PyTorch model from '%s'. PyTorch archives are deserialized via pickle; only load model files you trust.", input_model)
+
     # attempt to load scripted model
     try:
-        inputs = prepare_torch_inputs(example_inputs)
-        model = torch.jit.load(input_model)
+        model = torch.jit.load(input_model) # nosec B614 - see note above
         model.eval()
         decoder = TorchScriptPythonDecoder(
             model,
@@ -101,17 +275,19 @@ def get_pytorch_decoder_for_model_on_disk(argv, args):
         argv.input_model = decoder
         argv.framework = 'pytorch'
         return True
-    except:
+    except Exception:
         pass
+
     # attempt to load exported model
     try:
-        exported_program = torch.export.load(input_model)
-        if hasattr(torch, "export") and isinstance(exported_program, (torch.export.ExportedProgram)):
+        exported_program = torch.export.load(input_model) # nosec B614 - see note above
+        if isinstance(exported_program, torch.export.ExportedProgram):
             argv.input_model = TorchFXPythonDecoder.from_exported_program(exported_program)
             argv.framework = 'pytorch'
             return True
-    except:
+    except Exception:
         pass
+
     return False
 
 
@@ -167,6 +343,17 @@ def flatten_inputs(inputs, names=None):
     return flattened
 
 
+def _torchscript_input_aliases(model):
+    from openvino.frontend.pytorch.ts_decoder import TorchScriptPythonDecoder
+    if not isinstance(model, TorchScriptPythonDecoder):
+        return {}
+    schema = getattr(getattr(model.pt_module, "forward", model.pt_module), "schema", None)
+    if schema is None or len(schema.arguments) != len(model.raw_inputs):
+        return {}
+    # TorchScript schema names and graph debug names identify the same inputs.
+    return {model.get_input_debug_name(i): argument.name for i, argument in enumerate(schema.arguments)}
+
+
 def extract_input_info_from_example(args, inputs):
     try:
         from openvino.frontend.pytorch.utils import pt_to_ov_type_map  # pylint: disable=no-name-in-module,import-error
@@ -193,6 +380,10 @@ def extract_input_info_from_example(args, inputs):
             name = example[0]
             example = example[1]
         shape = PartialShape([-1] * example.ndim) if hasattr(example, "ndim") else PartialShape.dynamic()
+        if getattr(args, 'dynamo', False):
+            # For dynamo mode, use concrete shapes from example; dynamic dims
+            # are only introduced when the user explicitly provides 'input'.
+            shape = PartialShape(list(example.shape)) if hasattr(example, "shape") else shape
         dtype = getattr(example, "dtype", type(example))
         dtype = pt_to_ov_type_map.get(str(dtype))
         if name:
@@ -201,20 +392,30 @@ def extract_input_info_from_example(args, inputs):
             input_arg.append(single_input_to_input_cut_info((shape, dtype)))
     if inputs is not None and len(inputs) != 0:
         if len(inputs) == len(input_arg):
-            # we can update input argument with info from examples
+            # Pass 1: exact name matches, then TorchScript alias matches for examples
+            # not taken yet. Pass 2: unmatched descriptors take leftover examples in
+            # order; a named descriptor may only take an unnamed example.
+            by_name = {ex.name: ex for ex in input_arg if ex.name is not None}
+            matched = [by_name.get(desc.name) for desc in args.input]
+            used = {id(ex) for ex in matched if ex is not None}
+            aliases = _torchscript_input_aliases(args.input_model)
+            for i, desc in enumerate(args.input):
+                ex = by_name.get(aliases.get(desc.name))
+                if matched[i] is None and ex is not None and id(ex) not in used:
+                    matched[i] = ex
+                    used.add(id(ex))
+            leftover = [ex for ex in input_arg if id(ex) not in used]
             new_input = []
-            for i in range(len(input_arg)):
-                input_desc = args.input[i]
-                name = input_desc.name
-                dtype = input_desc.type
-                shape = input_desc.shape
-                if name is None:
-                    name = input_arg[i].name
-                if dtype is None:
-                    dtype = input_arg[i].type
-                if shape is None:
-                    shape = input_arg[i].shape
-                new_input.append(_InputCutInfo(name, shape, dtype, input_desc.value))
+            for desc, ex in zip(args.input, matched):
+                if ex is None:
+                    ex = next((e for e in leftover if desc.name is None or e.name is None), None)
+                    if ex is not None:
+                        leftover.remove(ex)
+                name, shape, dtype = (ex.name, ex.shape, ex.type) if ex is not None else (None, None, None)
+                new_input.append(_InputCutInfo(desc.name if desc.name is not None else name,
+                                               desc.shape if desc.shape is not None else shape,
+                                               desc.type if desc.type is not None else dtype,
+                                               desc.value))
             input_arg = new_input
         else:
             # we can't update args.input

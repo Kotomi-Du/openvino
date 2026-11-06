@@ -1,14 +1,17 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "include/batch_headers/fetch_data.cl"
-#include "include/batch_headers/fetch_data.cl"
 #include "include/batch_headers/common.cl"
+#include "include/batch_headers/bf16_utils.cl"
+#include "include/batch_headers/int4_utils.cl"
 #include "include/batch_headers/sub_group_block_read.cl"
 #include "include/batch_headers/sub_group_block_write.cl"
 #include "include/batch_headers/sub_group_shuffle.cl"
 
+
+#define UINT4_RANGE 15
 
 #if OUTPUT_DIMS != 4
 #error "dynamic_quantize_gpu_kv_cache.cl: Unsupported output dimension"
@@ -64,15 +67,15 @@ KERNEL(dynamic_quantize_gpu_kv_cache)(
     // The innermost dimension is always processed in the loop inside the kernel
     const uint x = 0;
 
-    half grp_max = 0.001h;
-    half max_value = INPUT0_VAL_MIN;
-    half min_value = INPUT0_VAL_MAX;
+    const INPUT0_COMPUTE_TYPE grp_max = TO_INPUT0_COMPUTE_TYPE(0.001f);
+    INPUT0_COMPUTE_TYPE max_value = INPUT0_VAL_MIN;
+    INPUT0_COMPUTE_TYPE min_value = INPUT0_VAL_MAX;
 
-    half val[INNERMOST_DIM_VALUE / SUBGROUP_SIZE];
+    INPUT0_COMPUTE_TYPE val[INNERMOST_DIM_VALUE / SUBGROUP_SIZE];
 
     const uint input_offset = INPUT0_GET_INDEX(b, f, y, x);
     unroll_for (uint i = 0; i < INNERMOST_DIM_VALUE / SUBGROUP_SIZE; i++) {
-        val[i] = INPUT_BLOCK_READ(input, input_offset + i * SUBGROUP_SIZE);
+        val[i] = DECODE_INPUT0_COMPUTE_TYPE(INPUT_BLOCK_READ(input, input_offset + i * SUBGROUP_SIZE));
 #if ASYMMETRIC_QUANTIZATION
         max_value = fmax(max_value, val[i]);
         min_value = fmin(min_value, val[i]);
@@ -84,6 +87,70 @@ KERNEL(dynamic_quantize_gpu_kv_cache)(
     max_value = fmax(max_value, grp_max);
 #endif
 
+#ifdef APPEND_MODE
+    APPEND_AXIS_NAME += axis_offset;
+#endif
+
+#if IS_INT4_COMPRESSED
+    // 4-bit unsigned asymmetric quantization with adjacent head packing
+    min_value = work_group_reduce_min(min_value);
+    max_value = work_group_reduce_max(max_value);
+
+    ACCUMULATOR_TYPE diff_value = max_value == min_value ? (ACCUMULATOR_TYPE)(grp_max)
+                                                         : (ACCUMULATOR_TYPE)(max_value - min_value);
+    ACCUMULATOR_TYPE scale_tmp = (ACCUMULATOR_TYPE)((UINT4_RANGE) / diff_value);
+    ACCUMULATOR_TYPE zp_tmp    = (ACCUMULATOR_TYPE)(-min_value * scale_tmp);
+
+    // Quantize all values to u4 range
+    uchar qval[INNERMOST_DIM_VALUE / SUBGROUP_SIZE];
+    unroll_for (uint i = 0; i < INNERMOST_DIM_VALUE / SUBGROUP_SIZE; i++) {
+        qval[i] = (uchar)clamp(convert_int_rte((float)val[i] * scale_tmp + zp_tmp), 0, UINT4_RANGE);
+    }
+
+    // Pack adjacent head dimensions
+    const uint output_offset = OUTPUT_GET_INDEX(b, f, y, x);
+#define NUM_SUBGROUP_CHUNKS (INNERMOST_DIM_VALUE / SUBGROUP_SIZE)
+#define NUM_OUTPUT_ITERS (NUM_SUBGROUP_CHUNKS / 2)
+    unroll_for (uint i = 0; i < NUM_OUTPUT_ITERS; i++) {
+        uint pair_lane = 2 * (sglid % 8);
+        uchar lo_even = intel_sub_group_shuffle(qval[2 * i], pair_lane);
+        uchar hi_even = intel_sub_group_shuffle(qval[2 * i], pair_lane + 1);
+        uchar lo_odd  = intel_sub_group_shuffle(qval[2 * i + 1], pair_lane);
+        uchar hi_odd  = intel_sub_group_shuffle(qval[2 * i + 1], pair_lane + 1);
+        uchar q_lo = (sglid < 8) ? lo_even : lo_odd;
+        uchar q_hi = (sglid < 8) ? hi_even : hi_odd;
+        char packed = cvt_uint8x2_to_uint4x2((uchar2)(q_lo, q_hi));
+        output[output_offset + i * SUBGROUP_SIZE + sglid] = packed;
+    }
+#if (NUM_SUBGROUP_CHUNKS % 2) != 0
+    {
+        uint pair_lane = 2 * (sglid % 8);
+        uchar q_lo = intel_sub_group_shuffle(qval[NUM_SUBGROUP_CHUNKS - 1], pair_lane);
+        uchar q_hi = intel_sub_group_shuffle(qval[NUM_SUBGROUP_CHUNKS - 1], pair_lane + 1);
+        char packed = cvt_uint8x2_to_uint4x2((uchar2)(q_lo, q_hi));
+        if (sglid < SUBGROUP_SIZE / 2)
+            output[output_offset + NUM_OUTPUT_ITERS * SUBGROUP_SIZE + sglid] = packed;
+    }
+#endif
+#undef NUM_SUBGROUP_CHUNKS
+#undef NUM_OUTPUT_ITERS
+
+    const uint scale_idx = FUNC_CALL(get_scales_offset)(OPTIONAL_SHAPE_INFO_TENSOR b, f, y, x);
+    if (grouped_indexes == 0 && sglid == 0) {
+        output_scale[scale_idx]     = TO_OUTPUT1_TYPE(1.0f / scale_tmp); // dequant scale
+#if ASYMMETRIC_QUANTIZATION && !GROUP_SCALES_WITH_ZP
+    #if OUTPUT2_IS_FP
+        output_zp[scale_idx] = TO_OUTPUT2_TYPE(zp_tmp);
+    #else
+        output_zp[scale_idx] = convert_char_rte(zp_tmp);
+    #endif
+#else
+        output_scale[scale_idx + 1] = TO_OUTPUT1_TYPE(zp_tmp);           // zero-point (interleaved)
+#endif
+    }
+
+#else  // !IS_INT4_COMPRESSED — original INT8 path
+
 #if ASYMMETRIC_QUANTIZATION
     min_value = work_group_reduce_min(min_value);
     max_value = work_group_reduce_max(max_value);
@@ -92,16 +159,12 @@ KERNEL(dynamic_quantize_gpu_kv_cache)(
     ACCUMULATOR_TYPE diff_value = max_value == min_value ? (grp_max) : (max_value - min_value);
     ACCUMULATOR_TYPE scale_tmp = (ACCUMULATOR_TYPE)((CHAR_MAX - CHAR_MIN) / diff_value);
     ACCUMULATOR_TYPE zp_tmp = (ACCUMULATOR_TYPE)(-min_value * scale_tmp) + CHAR_MIN;
-    OUTPUT1_TYPE scale = (OUTPUT1_TYPE)(scale_tmp);
-    OUTPUT1_TYPE zp = (OUTPUT1_TYPE)(zp_tmp);
+    OUTPUT1_COMPUTE_TYPE scale = TO_OUTPUT1_COMPUTE_TYPE(scale_tmp);
+    OUTPUT1_COMPUTE_TYPE zp = TO_OUTPUT1_COMPUTE_TYPE(zp_tmp);
 
 #else
     max_value = work_group_reduce_max(max_value);
-    OUTPUT1_TYPE scale = 127.0h / max_value;
-#endif
-
-#ifdef APPEND_MODE
-    APPEND_AXIS_NAME += axis_offset;
+    OUTPUT1_COMPUTE_TYPE scale = TO_OUTPUT1_COMPUTE_TYPE(127.0h / max_value);
 #endif
 
     const uint output_offset = OUTPUT_GET_INDEX(b, f, y, x);
@@ -118,20 +181,22 @@ KERNEL(dynamic_quantize_gpu_kv_cache)(
 
     if (grouped_indexes == 0 && sglid == 0) {
 #if ASYMMETRIC_QUANTIZATION
-        output_scale[scale_idx] = 1.0h / scale;
+        output_scale[scale_idx] = TO_OUTPUT1_TYPE(1.0h / scale);
 #if GROUP_SCALES_WITH_ZP
-        output_scale[scale_idx + 1] = zp;
+        output_scale[scale_idx + 1] = TO_OUTPUT1_TYPE(zp);
 #else
 
     #if OUTPUT2_IS_FP
-        output_zp[scale_idx] = zp;
+        output_zp[scale_idx] = TO_OUTPUT2_TYPE(zp);
     #else
         output_zp[scale_idx] = convert_char_rte(zp);
     #endif
 
 #endif
 #else
-        output_scale[scale_idx] = 1.0h / scale;
+        output_scale[scale_idx] = TO_OUTPUT1_TYPE(1.0h / scale);
 #endif
     }
+
+#endif  // IS_INT4_COMPRESSED
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -57,6 +57,8 @@ struct Configuration {
     std::filesystem::path weights_path{};
     AnyMap compiled_model_runtime_properties{};
     CacheMode cache_mode{CacheMode::OPTIMIZE_SPEED};
+    // Transition switch: false selects the legacy blob layout; removed together with it.
+    bool export_hsm_format = true;
 };
 // ! [configuration:header]
 

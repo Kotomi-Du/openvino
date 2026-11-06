@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,9 +8,8 @@
 
 #include "compare.hpp"
 #include "openvino/core/except.hpp"
+#include "openvino/core/memory_util.hpp"
 #include "openvino/core/shape_util.hpp"
-#include "openvino/core/type/element_iterator.hpp"
-#include "openvino/runtime/allocator.hpp"
 #include "openvino/runtime/iremote_tensor.hpp"
 #include "openvino/runtime/make_tensor.hpp"
 #include "openvino/runtime/properties.hpp"
@@ -39,7 +38,7 @@ size_t ITensor::get_size() const {
 }
 
 size_t ITensor::get_byte_size() const {
-    return element::get_memory_size(get_element_type(), get_size());
+    return util::get_memory_size(get_element_type(), get_size());
 }
 
 bool ITensor::is_continuous() const {
@@ -60,6 +59,8 @@ bool ITensor::is_continuous() const {
     }
 
     const auto default_last = default_strides.rend();
+    // It assumed that `default_strides' and `strides' have the same size, thus `default_stride' iterator is valid
+    // coverity[deref_iterator:SUPPRESS]
     return (default_stride == default_last) || (*default_stride < *stride && (get_shape()[0] == 1) &&
                                                 std::all_of(default_stride, default_last, cmp::Equal(*default_stride)));
 }
@@ -81,6 +82,10 @@ void ITensor::copy_to(const std::shared_ptr<ov::ITensor>& dst) const {
     const auto& shape = get_shape();
     if (shape != dst->get_shape()) {
         dst->set_shape(shape);
+    }
+
+    if (get_size() == 0) {
+        return;
     }
 
     if (auto remote_tensor_dst = std::dynamic_pointer_cast<ov::IRemoteTensor>(dst)) {
@@ -126,18 +131,13 @@ void ITensor::copy_to(const std::shared_ptr<ov::ITensor>& dst) const {
                     dst_str.resize(strides_size + 1);
                     max_pos.resize(strides_size + 1);
                     cur_pos.resize(strides_size + 1);
-                    // In case of default continuous strides we can copy several elements
-                    // In other case only one element
-                    size_t dim = 1;
-                    size_t strides = type.size();
-
-                    if (strides_size < default_strides.size()) {
-                        strides = default_strides[strides_size];
-                        dim = shape[strides_size];
-                    }
-                    src_str[strides_size] = strides;
-                    dst_str[strides_size] = strides;
-                    max_pos[strides_size] = dim;
+                    // Dimensions after inverted_idx have default strides in both tensors,
+                    // so they are copied as one block of default_strides[inverted_idx] bytes
+                    // In case the innermost dimension is strided, the block is one element
+                    const auto block_size = default_strides[inverted_idx];
+                    src_str[strides_size] = block_size;
+                    dst_str[strides_size] = block_size;
+                    max_pos[strides_size] = 1;
                     cur_pos[strides_size] = 0;
                 }
             }

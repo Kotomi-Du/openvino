@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,6 +11,7 @@ using ov::test::ScatterElementsUpdate12LayerTest;
 
 // map<inputShape, map<indicesShape, axis>>
 std::map<std::vector<size_t>, std::map<std::vector<size_t>, std::vector<int>>> axesShapeInShape {
+    {{12}, {{{8}, {0}}}},
     {{10, 12, 15}, {{{1, 2, 4}, {0, 1, 2}}, {{2, 2, 2}, {-1, -2, -3}}}},
     {{15, 9, 8, 12}, {{{1, 2, 2, 2}, {0, 1, 2, 3}}, {{1, 2, 1, 4}, {-1, -2, -3, -4}}}},
     {{9, 9, 8, 8, 11, 10}, {{{1, 2, 1, 2, 1, 2}, {5, -3}}}},
@@ -82,6 +83,27 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::ValuesIn(idxWithNegativeValues),
                        ::testing::ValuesIn(reduceModes),
                        ::testing::ValuesIn({true, false}),
+                       ::testing::Values(inputPrecisions[0]),
+                       ::testing::Values(idxPrecisions[0]),
+                       ::testing::Values(ov::test::utils::DEVICE_GPU)),
+    ScatterElementsUpdate12LayerTest::getTestCaseName);
+
+const std::map<std::vector<size_t>, std::map<std::vector<size_t>, std::vector<int>>> batch1100Shapes {
+    {{1100, 4, 1, 1}, {{{1100, 1, 1, 1}, {1}}}},
+};
+
+const std::vector<std::vector<int64_t>> batch1100Indices = {
+    std::vector<int64_t>(1100, 0),
+    std::vector<int64_t>(1100, 1),
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    smoke_lws_constraint_batch1100_ScatterEltsUpdate12,
+    ScatterElementsUpdate12LayerTest,
+    ::testing::Combine(::testing::ValuesIn(combine_shapes(batch1100Shapes)),
+                       ::testing::ValuesIn(batch1100Indices),
+                       ::testing::ValuesIn(reduceModes),
+                       ::testing::Values(true),
                        ::testing::Values(inputPrecisions[0]),
                        ::testing::Values(idxPrecisions[0]),
                        ::testing::Values(ov::test::utils::DEVICE_GPU)),

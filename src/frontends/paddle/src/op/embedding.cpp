@@ -1,14 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/opsets/opset8.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 using namespace opset8;
 using namespace element;
 
@@ -49,7 +46,4 @@ NamedOutputs embedding(const NodeContext& node) {
 
     return node.default_single_output_mapping({node_embedding}, {"Out"});
 }
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

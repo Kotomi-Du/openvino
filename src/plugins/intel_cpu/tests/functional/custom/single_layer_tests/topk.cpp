@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,12 +8,16 @@
 #include "shared_test_classes/base/ov_subgraph.hpp"
 #include "utils/cpu_test_utils.hpp"
 #include "utils/filter_cpu_info.hpp"
+#include "utils/general_utils.h"
 #include "openvino/op/topk.hpp"
 
 using namespace CPUTestUtils;
 using namespace ov::test;
 using SortMode = ov::op::TopKMode;
 using SortType = ov::op::TopKSortType;
+
+namespace ov {
+namespace test {
 
 typedef std::tuple<int64_t,                     // keepK
                    int64_t,                     // axis
@@ -27,23 +31,13 @@ typedef std::tuple<int64_t,                     // keepK
     basicTopKParams;
 
 typedef std::tuple<basicTopKParams, CPUSpecificParams, ov::AnyMap> TopKLayerCPUTestParamsSet;
-
 class TopKLayerCPUTest : public testing::WithParamInterface<TopKLayerCPUTestParamsSet>,
                          virtual public SubgraphBaseTest,
                          public CPUTestsBase {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<TopKLayerCPUTestParamsSet> obj) {
-        basicTopKParams basicParamsSet;
-        CPUSpecificParams cpuParams;
-        ov::AnyMap additionalConfig;
-        std::tie(basicParamsSet, cpuParams, additionalConfig) = obj.param;
-
-        int64_t keepK, axis;
-        SortMode mode;
-        std::tuple<SortType, bool> sortTypeStable;
-        ElementType netPrecision, inPrc, outPrc;
-        InputShape inputShape;
-        std::tie(keepK, axis, mode, sortTypeStable, netPrecision, inPrc, outPrc, inputShape) = basicParamsSet;
+    static std::string getTestCaseName(const testing::TestParamInfo<TopKLayerCPUTestParamsSet>& obj) {
+        const auto &[basicParamsSet, cpuParams, additionalConfig] = obj.param;
+        const auto &[keepK, axis, mode, sortTypeStable, netPrecision, inPrc, outPrc, inputShape] = basicParamsSet;
         SortType sort = std::get<0>(sortTypeStable);
         bool stable = std::get<1>(sortTypeStable);
 
@@ -80,27 +74,16 @@ public:
 protected:
     void SetUp() override {
         targetDevice = ov::test::utils::DEVICE_CPU;
-
-        basicTopKParams basicParamsSet;
-        CPUSpecificParams cpuParams;
-        ov::AnyMap additionalConfig;
-        std::tie(basicParamsSet, cpuParams, additionalConfig) = this->GetParam();
-
+        const auto &[basicParamsSet, cpuParams, additionalConfig] = this->GetParam();
         std::tie(inFmts, outFmts, priority, selectedType) = cpuParams;
-
-        int64_t keepK;
-        SortMode mode;
-        std::tuple<SortType, bool> sortTypeStable;
-        ElementType inPrc, outPrc;
-        InputShape inputShape;
-        std::tie(keepK, axis, mode, sortTypeStable, netPrecision, inPrc, outPrc, inputShape) = basicParamsSet;
+        const auto& [keepK, _axis, mode, sortTypeStable, _netPrecision, inPrc, outPrc, inputShape] = basicParamsSet;
+        axis = _axis;
+        netPrecision = _netPrecision;
         sort = std::get<0>(sortTypeStable);
         stable = std::get<1>(sortTypeStable);
 
-        if (additionalConfig[ov::hint::inference_precision.name()] == ov::element::bf16)
-            inPrc = outPrc = netPrecision = ElementType::bf16;
-        else
-            inPrc = outPrc = netPrecision;
+        if (intel_cpu::contains_key_value(additionalConfig, {ov::hint::inference_precision.name(), ov::element::bf16}))
+            netPrecision = ElementType::bf16;
         configuration.insert(additionalConfig.begin(), additionalConfig.end());
 
         if (!ov::with_cpu_x86_avx512_core() && netPrecision == ElementType::bf16) {
@@ -240,10 +223,22 @@ private:
     ElementType netPrecision;
     bool staticShape;
 };
-
 TEST_P(TopKLayerCPUTest, CompareWithRefs) {
     run();
     CheckPluginRelatedResults(compiledModel, "TopK");
+}
+
+class TopKLayerInvalidK : public TopKLayerCPUTest {};
+
+TEST_P(TopKLayerInvalidK, CompareWithRefsNegative) {
+    bool exception_caught = false;
+    set_callback_exception([&exception_caught](const std::exception& ex) {
+        exception_caught = true;
+        EXPECT_NE(dynamic_cast<const ov::Exception*>(&ex), nullptr)
+            << "Expected ov::Exception but got: " << ex.what();
+    });
+    run();
+    EXPECT_TRUE(exception_caught) << "Expected an ov::Exception for invalid K value";
 }
 
 namespace {
@@ -414,4 +409,20 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::ValuesIn(additionalConfig)),
     TopKLayerCPUTest::getTestCaseName);
 
+INSTANTIATE_TEST_SUITE_P(
+    smoke_TopK_negative,
+    TopKLayerInvalidK,
+    ::testing::Combine(::testing::Combine(::testing::Values(0, 22),
+                                          ::testing::Values(0),
+                                          ::testing::Values(SortMode::MAX),
+                                          ::testing::Values(std::tuple<SortType, bool>{SortType::SORT_VALUES, false}),
+                                          ::testing::Values(ElementType::f32),
+                                          ::testing::Values(ElementType::dynamic),
+                                          ::testing::Values(ElementType::dynamic),
+                                          ::testing::Values(InputShape{{}, {{21, 21, 21, 21}}})),
+                       ::testing::Values(CPUSpecificParams({nchw, x}, {nchw, nchw}, {}, {})),
+                       ::testing::Values(additionalConfig[0])),
+    TopKLayerCPUTest::getTestCaseName);
 }  // namespace
+}  // namespace test
+}  // namespace ov

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -126,6 +126,8 @@ Configuration::Configuration(const ov::AnyMap& config, const Configuration& defa
             }
         } else if (ov::cache_mode == key) {
             cache_mode = value.as<CacheMode>();
+        } else if (ov::template_plugin::export_hsm_format == key) {
+            export_hsm_format = value.as<bool>();
         } else if (throwOnUnsupported) {
             OPENVINO_THROW("Property was not found: ", key);
         }
@@ -173,6 +175,10 @@ ov::Any Configuration::Get(const std::string& name) const {
         return compiled_model_runtime_properties;
     } else if (name == ov::cache_mode) {
         return cache_mode;
+    } else if (name == ov::internal::cache_header_alignment) {
+        return 4096;  // page size in bytes
+    } else if (name == ov::template_plugin::export_hsm_format || name == ov::internal::emit_hsm_format) {
+        return export_hsm_format;
     } else {
         OPENVINO_THROW("Property was not found: ", name);
     }

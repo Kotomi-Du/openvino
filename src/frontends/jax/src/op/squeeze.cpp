@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,10 +8,7 @@
 #include "openvino/op/constant.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace jax {
-namespace op {
+namespace ov::frontend::jax::op {
 
 using namespace ov::op;
 
@@ -23,7 +20,4 @@ OutputVector translate_squeeze(const NodeContext& context) {
     return {std::make_shared<v0::Squeeze>(x, dimensions_node)};
 };
 
-}  // namespace op
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax::op

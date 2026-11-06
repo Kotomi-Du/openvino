@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -50,6 +50,8 @@ void OV_CREATE_EXTENSION(std::vector<ov::Extension::Ptr>& ext);
  *
  * @param ext of extensions
  */
-#define OPENVINO_CREATE_EXTENSIONS(extensions)                                               \
-    OPENVINO_EXTENSION_C_API void OV_CREATE_EXTENSION(std::vector<ov::Extension::Ptr>& ext); \
-    OPENVINO_EXTENSION_C_API void OV_CREATE_EXTENSION(std::vector<ov::Extension::Ptr>& ext) { ext = extensions; }
+#define OPENVINO_CREATE_EXTENSIONS(extensions)                                                \
+    OPENVINO_EXTENSION_C_API void OV_CREATE_EXTENSION(std::vector<ov::Extension::Ptr>& ext);  \
+    OPENVINO_EXTENSION_C_API void OV_CREATE_EXTENSION(std::vector<ov::Extension::Ptr>& ext) { \
+        ext = extensions;                                                                     \
+    }

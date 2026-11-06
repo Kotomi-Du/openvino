@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -36,6 +36,7 @@
 #include "ov_ops/fully_connected.hpp"
 #include "transformations/cpu_opset/common/op/power_static.hpp"
 #include "transformations/rt_info/dequantization_node.hpp"
+#include "transformations/rt_info/disable_precision_conversion.hpp"
 #include "utils/general_utils.h"
 
 namespace {
@@ -67,7 +68,7 @@ bool isConvertableToPowerStatic(const std::shared_ptr<BaseOp>& node) {
     }
     auto const_shape = node->get_input_shape(constPort);
     return ov::shape_size(const_shape) == 1 && input_rank.get_length() >= static_cast<int64_t>(const_shape.size()) &&
-           !ov::intel_cpu::one_of(node->get_input_node_shared_ptr(nonConstPort)->get_type_info(),
+           !ov::intel_cpu::any_of(node->get_input_node_shared_ptr(nonConstPort)->get_type_info(),
                                   ov::op::v0::NormalizeL2::get_type_info_static(),
                                   ov::op::v0::Interpolate::get_type_info_static(),
                                   ov::op::v1::Convolution::get_type_info_static(),
@@ -184,6 +185,12 @@ ov::intel_cpu::ConvertToPowerStatic::ConvertToPowerStatic() {
         }
         toReplace->set_friendly_name(node->get_friendly_name());
         ov::copy_runtime_info(node, toReplace);
+        // DisablePrecisionConversion is non-copyable and dropped by copy_runtime_info, re-apply it
+        const auto& rt_info = node->get_rt_info();
+        const auto dpc_it = rt_info.find(ov::DisablePrecisionConversion::get_type_info_static());
+        if (dpc_it != rt_info.end()) {
+            toReplace->get_rt_info().insert(*dpc_it);
+        }
         ov::replace_node(node, toReplace);
         return true;
     };

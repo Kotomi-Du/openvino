@@ -1,9 +1,10 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/pass/visualize_tree.hpp"
 
+#include <cctype>
 #include <cmath>
 #include <fstream>
 
@@ -159,9 +160,7 @@ static std::string get_attribute_values(const std::map<std::string, ov::Any>& at
             item.second.print(ss);
             ss << "}";
         } else {
-            ss << "{"
-               << "[EMPTY]"
-               << "}";
+            ss << "{[EMPTY]}";
         }
 
         first = false;
@@ -169,18 +168,60 @@ static std::string get_attribute_values(const std::map<std::string, ov::Any>& at
     return ss.str();
 }
 
-static std::string name_of_subgraph_file(const std::shared_ptr<ov::Node> op,
-                                         const std::string& current_file_name,
-                                         const size_t& i) {
+static char hex_digit(unsigned char value) {
+    OPENVINO_ASSERT(value < 16, "Hexadecimal digit value must be less than 16");
+    return static_cast<char>(value < 10 ? '0' + value : 'a' + (value - 10));
+}
+
+// std::isalnum() is locale-dependent above 7-bit ASCII; this bound keeps is_safe() locale-independent.
+constexpr unsigned char ascii_limit = 0x80;
+
+// Allowlist, not a denylist of path-sensitive characters, since those are platform-dependent
+// (e.g. ':' only matters on NTFS).
+static bool is_safe(unsigned char c) {
+    return (c < ascii_limit && std::isalnum(c)) || c == '_' || c == '.' || c == '-';
+}
+
+static std::filesystem::path name_of_subgraph_file(const std::shared_ptr<ov::Node> op,
+                                                   const std::filesystem::path& current_file_name,
+                                                   const size_t i) {
     // friendly is never empty it is either friendly (set by user) or unique (auto-generated) name
-    auto node_name = op->get_friendly_name();
-    std::replace(node_name.begin(), node_name.end(), '/', '-');
-    auto postfix = "_node_" + node_name + "_subgraph_#" + std::to_string(i);
+    const auto& node_name = op->get_friendly_name();
+
+    std::string sanitized_name;
+    sanitized_name.reserve(node_name.size());
+    for (unsigned char c : node_name) {
+        if (is_safe(c)) {
+            sanitized_name += static_cast<char>(c);
+        } else {
+            // '~' is not in is_safe()'s allowlist, so it only ever appears here as an escape's
+            // lead byte, keeping this "~xy" encoding unambiguous.
+            sanitized_name += '~';
+            sanitized_name += hex_digit(c >> 4);
+            sanitized_name += hex_digit(c & 0xF);
+        }
+    }
+
     auto file_name = current_file_name;
-    auto insert_pos = file_name.find_last_of('.');
-    file_name.insert(insert_pos, postfix);
+    file_name.replace_extension("._node_" + sanitized_name + "_subgraph_#" + std::to_string(i));
     return file_name;
 }
+
+#if defined(ENABLE_OPENVINO_DEBUG) && !defined(_WIN32)
+static std::string quote_shell_argument(const std::filesystem::path& path) {
+    const auto path_string = ov::util::path_to_string(path);
+    std::string quoted_path = "'";
+    for (const auto character : path_string) {
+        if (character == '\'') {
+            quoted_path += "'\\''";
+        } else {
+            quoted_path += character;
+        }
+    }
+    quoted_path += "'";
+    return quoted_path;
+}
+#endif
 
 static void collect_symbol_print_values(const std::shared_ptr<ov::Model>& m,
                                         std::unordered_map<std::shared_ptr<ov::Symbol>, size_t>& symbol_to_number) {
@@ -281,7 +322,10 @@ bool ov::pass::VisualizeTree::run_on_model(const std::shared_ptr<ov::Model>& f) 
 }
 
 ov::pass::VisualizeTree::VisualizeTree(const std::string& file_name, node_modifiers_t nm, bool dot_only)
-    : m_name{file_name},
+    : VisualizeTree(ov::util::make_path(file_name), std::move(nm), dot_only) {}
+
+ov::pass::VisualizeTree::VisualizeTree(std::filesystem::path file_name, node_modifiers_t nm, bool dot_only)
+    : m_name{std::move(file_name)},
       m_node_modifiers{std::move(nm)},
       m_dot_only{dot_only} {}
 
@@ -612,7 +656,7 @@ std::string ov::pass::VisualizeTree::get_attributes(std::shared_ptr<Node> node) 
     }
 
     std::stringstream ss;
-    ss << "    " << node->get_name() << " [" << ov::util::join(attributes, " ") << "]\n";
+    ss << "    " << node->get_name() << " [" << ov::util::join<std::ostream>(attributes, " ") << "]\n";
 
     return ss.str();
 }
@@ -676,26 +720,29 @@ std::string ov::pass::VisualizeTree::get_node_name(std::shared_ptr<Node> node) {
 }
 
 void ov::pass::VisualizeTree::render() const {
-    std::string ext = ov::util::get_file_ext(m_name);
-    std::string output_format = ext.substr(1);
-    std::string dot_file = m_name;
-    if (ov::util::to_lower(ext) != ".dot") {
-        dot_file += ".dot";
+    constexpr auto dot_ext = ".dot";
+    const auto ext = m_name.extension();
+    auto dot_file = m_name;
+    if (ext != dot_ext) {
+        dot_file += dot_ext;
     }
-    std::ofstream out(dot_file);
-    if (out) {
+
+    // Keep the dump under its parent as sanitize_path() does (file_util.cpp:102).
+    dot_file = ov::util::sanitize_path(m_name.parent_path(), dot_file.filename());
+    if (std::ofstream out(dot_file); out) {
         out << "digraph \n{\n";
         out << m_ss.str();
         out << "}\n";
         out.close();
 
-        if (!m_dot_only && ov::util::to_lower(ext) != ".dot") {
+        if (!m_dot_only && ext != dot_ext) {
 #if defined(ENABLE_OPENVINO_DEBUG) && !defined(_WIN32)
             std::stringstream ss;
             if (system("command -v dot > /dev/null 2>&1") != 0) {
                 OPENVINO_THROW("Graphviz 'dot' command not found in PATH");
             }
-            ss << "dot -T" << output_format << " " << dot_file << " -o" << m_name;
+            ss << "dot -T" << ext.string().substr(1) << " " << quote_shell_argument(dot_file) << " -o"
+               << quote_shell_argument(m_name);
             auto cmd = ss.str();
             auto stream = popen(cmd.c_str(), "r");
             if (stream) {

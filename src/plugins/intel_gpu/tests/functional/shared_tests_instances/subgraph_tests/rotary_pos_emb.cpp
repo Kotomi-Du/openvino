@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,6 +13,33 @@ INSTANTIATE_TEST_SUITE_P(smoke_RoPETestFlux,
                             ::testing::Values(ov::element::f16, ov::element::f32),
                             ::testing::Values(ov::test::utils::DEVICE_GPU)),
                          RoPETestFlux::getTestCaseName);
+
+class GPURoPETestQwenVL : public RoPETestQwenVL {
+protected:
+    void SetUp() override {
+        RoPETestQwenVL::SetUp();
+        const auto& [element_type, _targetDevice, split_op_type] = this->GetParam();
+        if (element_type == ov::element::f16) {
+            abs_threshold = 0.015f;
+        }
+    }
+};
+
+TEST_P(GPURoPETestQwenVL, CompareWithRefs) {
+    SKIP_IF_CURRENT_TEST_IS_DISABLED();
+    run();
+    auto function = compiledModel.get_runtime_model();
+    CheckNumberOfNodesWithType(function, {"RoPE"}, 1);
+};
+
+const std::vector<std::string> vit_param = {"VariadicSplit", "Slice", "StridedSlice"};
+INSTANTIATE_TEST_SUITE_P(smoke_RoPEQwenVL,
+                         GPURoPETestQwenVL,
+                         ::testing::Combine(
+                            ::testing::Values(ov::element::f16, ov::element::f32),
+                            ::testing::Values(ov::test::utils::DEVICE_GPU),
+                            ::testing::ValuesIn(vit_param)),
+                         GPURoPETestQwenVL::getTestCaseName);
 
 INSTANTIATE_TEST_SUITE_P(smoke_RoPETestChatGLM,
                          RoPETestChatGLMStridedSlice,
@@ -42,6 +69,27 @@ INSTANTIATE_TEST_SUITE_P(smoke_RoPETestRotateHalfWithoutTranspose,
                             ::testing::Values(ov::test::utils::DEVICE_GPU)),
                          RoPETestRotateHalfWithoutTranspose::getTestCaseName);
 
+class GPURoPETestRotateHalfRMS : public RoPETestRotateHalfRMS {
+protected:
+    void validate() override {
+        RoPETestRotateHalfRMS::validate();
+        auto runtime_model = compiledModel.get_runtime_model();
+        CheckNumberOfNodesWithType(runtime_model, {"RoPE"}, 1);
+        CheckNumberOfNodesWithType(runtime_model, {"rms"}, 0);
+    }
+};
+
+TEST_P(GPURoPETestRotateHalfRMS, CompareWithRefs) {
+    run();
+}
+
+INSTANTIATE_TEST_SUITE_P(smoke_RoPETestRotateHalfRMS,
+                         GPURoPETestRotateHalfRMS,
+                         ::testing::Combine(
+                            ::testing::Values(ov::element::f16),
+                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                         GPURoPETestRotateHalfRMS::getTestCaseName);
+
 INSTANTIATE_TEST_SUITE_P(smoke_RoPETestChatGLM,
                          RoPETestChatGLMSlice,
                          ::testing::Combine(
@@ -70,6 +118,35 @@ INSTANTIATE_TEST_SUITE_P(smoke_RoPETestChatGLM,
                             ::testing::Values(ov::test::utils::DEVICE_GPU)),
                          RoPETestChatGLM2DRoPEStridedSlice::getTestCaseName);
 
+INSTANTIATE_TEST_SUITE_P(smoke_RoPETestChatGLM,
+                         RoPETestChatGLMHF,
+                         ::testing::Combine(
+                            ::testing::Values(ov::element::f16, ov::element::f32),
+                            ::testing::Values(ov::test::utils::DEVICE_GPU),
+                            ::testing::Values(true, false)),
+                         RoPETestChatGLMHF::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_RoPETestGPTOSS,
+                         RoPETestGPTOSS,
+                         ::testing::Combine(
+                            ::testing::Values(ov::element::f16, ov::element::f32),
+                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                         RoPETestGPTOSS::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_RoPETestLtxVideo,
+                         RoPETestLtxVideo,
+                         ::testing::Combine(
+                            ::testing::Values(ov::element::f16, ov::element::f32),
+                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                         RoPETestLtxVideo::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_RoPETestCohere,
+                         RoPETestCohere,
+                         ::testing::Combine(
+                            ::testing::Values(ov::element::f16, ov::element::f32),
+                            ::testing::Values(ov::test::utils::DEVICE_GPU),
+                            ::testing::Bool()),
+                         RoPETestCohere::getTestCaseName);
 
 }  // namespace test
 }  // namespace ov

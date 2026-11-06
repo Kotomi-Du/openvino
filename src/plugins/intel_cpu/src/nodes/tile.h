@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,9 +15,7 @@
 #include "node.h"
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class Tile : public Node, public TileBroadcastCommon {
 public:
@@ -39,8 +37,8 @@ protected:
 private:
     void plainExecute(const dnnl::stream& strm);
 
-    static constexpr size_t TILE_INPUT = 0lu;
-    static constexpr size_t TILE_REPEATS = 1lu;
+    static constexpr size_t TILE_INPUT = 0LU;
+    static constexpr size_t TILE_REPEATS = 1LU;
 
     int axis = -1;
     int tiles = 0;
@@ -48,6 +46,4 @@ private:
     VectorDims originRepeats;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

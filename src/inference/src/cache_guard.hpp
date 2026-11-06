@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -64,6 +64,8 @@ private:
     CacheGuard& m_cacheGuard;
     std::string m_hash;
     std::shared_ptr<std::mutex> m_mutex;
+    // `m_lock' must be declared after `m_mutex' - see member initializer list
+    std::unique_lock<std::mutex> m_lock;
     std::atomic_int& m_refCount;
 };
 

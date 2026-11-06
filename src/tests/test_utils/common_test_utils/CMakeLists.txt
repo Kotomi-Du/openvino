@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -23,8 +23,6 @@ function(add_common_utils ADD_TARGET_NAME)
             EXCLUDED_SOURCE_PATHS
                 ${TARGET_EXCLUDED_SOURCE_PATHS}
             ADD_CLANG_FORMAT
-            DEPENDENCIES
-                openvino_template_plugin
             LINK_LIBRARIES
                 PUBLIC
                     gtest
@@ -42,6 +40,10 @@ function(add_common_utils ADD_TARGET_NAME)
                         "${CMAKE_CURRENT_SOURCE_DIR}/src"
                         "${OpenVINO_SOURCE_DIR}/src/plugins/template/include"
     )
+
+    if(ENABLE_TEMPLATE)
+        add_dependencies(${ADD_TARGET_NAME} openvino_template_plugin)
+    endif()
 
     ov_developer_package_export_targets(TARGET ${ADD_TARGET_NAME}
                                         INSTALL_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include/")
@@ -67,7 +69,11 @@ function(add_common_utils ADD_TARGET_NAME)
             $<TARGET_PROPERTY:openvino::runtime::dev,INTERFACE_INCLUDE_DIRECTORIES>)
     target_include_directories(${ADD_TARGET_NAME} SYSTEM PUBLIC "$<BUILD_INTERFACE:${OV_TESTS_ROOT}/test_utils>")
 
-    target_compile_definitions(${ADD_TARGET_NAME} PUBLIC ${ARGN})
+    target_compile_definitions(${ADD_TARGET_NAME} 
+        PUBLIC
+            ${ARGN}
+        PRIVATE
+            $<$<BOOL:${ENABLE_TEMPLATE_REGISTRATION}>:ENABLE_TEMPLATE_REGISTRATION>)
 endfunction()
 
 # Keep old name so that library can be used from NPU repo

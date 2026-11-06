@@ -1,36 +1,47 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "kleidiai_mm.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include "cpu_memory.h"
+#include "cpu_types.h"
+#include "kleidiai_common.hpp"
 #include "memory_desc/cpu_blocked_memory_desc.h"
+#include "memory_desc/cpu_memory_desc.h"
 #include "memory_desc/cpu_memory_desc_utils.h"
+#include "nodes/common/blocked_desc_creator.h"
+#include "nodes/executors/acl/acl_fullyconnected_utils.hpp"
+#include "nodes/executors/common/offset_helper.hpp"
+#include "nodes/executors/debug_messages.hpp"
 #include "nodes/executors/executor.hpp"
 #include "nodes/executors/fullyconnected_config.hpp"
 #include "nodes/executors/memory_arguments.hpp"
-#include "openvino/core/parallel.hpp"
+#include "openvino/core/except.hpp"
+#include "openvino/core/type/element_type.hpp"
+#include "utils/arm_isa_support.h"
 #include "utils/cpu_utils.hpp"
 #include "utils/debug_capabilities.h"
-#include "utils/precision_support.h"
+#include "utils/general_utils.h"
 
-#define FLOAT_MAX 3.4028235e38f
-#define FLOAT_MIN (-3.4028235e38f)
-
-namespace ov {
-namespace intel_cpu {
+namespace ov::intel_cpu {
 
 using namespace executor;
 using namespace ov::element;
 
 template <typename T>
 static std::vector<T> normalizeDimsTo2D(const std::vector<T>& dims) {
-    return {std::accumulate(dims.begin(), dims.end() - 1, (T)1, std::multiplies<T>()), dims[dims.size() - 1]};
+    return {std::accumulate(dims.begin(), dims.end() - 1, static_cast<T>(1), std::multiplies<T>()),
+            dims[dims.size() - 1]};
 }
 
 static bool useDynamicQuantizationImpl(const FCAttrs& attrs, const MemoryDescPtr& weightDesc) {
@@ -38,146 +49,260 @@ static bool useDynamicQuantizationImpl(const FCAttrs& attrs, const MemoryDescPtr
         return false;
     }
 
-    if (!hasIntDotProductSupport()) {
+    if (!hasArmISASupport(ArmISA::DOTPROD) && !hasArmISASupport(ArmISA::I8MM)) {
         return false;
     }
 
-    if (weightDesc->getPrecision() != element::i8) {
-        return false;
-    }
-
-    return true;
+    return weightDesc->getPrecision() == element::i8 || weightDesc->getPrecision() == element::i4 ||
+           weightDesc->getPrecision() == element::u4;
 }
 
 bool MatMulKleidiAIExecutor::supports(const FCConfig& config) {
-    return !static_cast<bool>(config.descs.at(ARG_WEI)->getPrecision() != element::f32 &&
-                              !useDynamicQuantizationImpl(config.attrs, config.descs.at(ARG_WEI)));
+    VERIFY(hasArmISASupport(ArmISA::ASIMD), UNSUPPORTED_ISA);
+
+    // ASYM INT4 groupwise kernel is N×K only (no K×N variant); it cannot
+    // consume non-transposed weights, and scale/zero-point repacking for that
+    // layout isn't implemented. Reject so another executor is selected.
+    const auto& weiPrec = config.descs.at(ARG_WEI)->getPrecision();
+    if (weiPrec == element::u4 && config.attrs.weightsNonTransposed) {
+        return false;
+    }
+
+    return config.descs.at(ARG_WEI)->getPrecision() == element::f32 ||
+           useDynamicQuantizationImpl(config.attrs, config.descs.at(ARG_WEI));
+}
+
+bool MatMulKleidiAIExecutor::isGroupQuantizationEnabled(const MemoryArgs& memory) {
+    auto scales = memory.at(ARG_WEI | ARG_ATTR_SCALES)->getDesc().getShape().getStaticDims();
+    if (scales.size() == 1) {
+        return false;
+    }
+    return (scales[1] > 1);
+}
+
+bool MatMulKleidiAIExecutor::isAsymmetricQuantizationEnabled(const MemoryArgs& memory) {
+    const auto zpIt = memory.find(ARG_WEI | ARG_ATTR_ZERO_POINTS);
+    return zpIt != memory.end() && zpIt->second != nullptr && !zpIt->second->getDesc().empty();
 }
 
 MatMulKleidiAIExecutor::MatMulKleidiAIExecutor(const FCAttrs& attrs,
                                                const MemoryArgs& memory,
                                                const ExecutorContext::CPtr& context)
-    : m_attrs(attrs),
-      m_memoryArgs(memory) {
+    : executorContext(context) {
     auto srcMem = memory.at(ARG_SRC);
     auto weiMem = memory.at(ARG_WEI);
     auto weiDims = weiMem->getDesc().getShape().getDims();
     auto N = weiDims[0];
     auto K = weiDims[1];
 
-    if (memory.at(ARG_BIAS)->getDataAs<float>() == nullptr) {
+    const bool hasBias = !memory.at(ARG_BIAS)->getDesc().empty();
+    if (hasBias) {
+        biasMem = memory.at(ARG_BIAS);
+    } else {
         auto biasDesc = std::make_shared<CpuBlockedMemoryDesc>(f32, Shape({N}));
         biasMem = std::make_shared<Memory>(context->getEngine(), biasDesc);
         biasMem->nullify();
-    } else {
-        biasMem = memory.at(ARG_BIAS);
     }
+
     if (memory.at(ARG_SRC)->getPrecision() != memory.at(ARG_WEI)->getPrecision()) {
         aclfcAttrs.isConvertedWeights = true;
     }
+
     auto originalWeightsDesc = memory.at(ARG_WEI)->getDescPtr();
     const auto& wgtDims = originalWeightsDesc->getShape().getStaticDims();
     const VectorDims wgtDims2D = reshapeDownToRank<2>(wgtDims);
     originalWeightsDesc = std::make_shared<CpuBlockedMemoryDesc>(originalWeightsDesc->getPrecision(), Shape{wgtDims2D});
     auto dnnlSrcDesc = MemoryDescUtils::convertToDnnlMemoryDesc(originalWeightsDesc);
 
-    // Whether dynamic quantization is enabled
-    useDynamicQuant = useDynamicQuantizationImpl(attrs, originalWeightsDesc);
+    kernelLookupKey = 0;
 
+    const bool useDynamicQuant = useDynamicQuantizationImpl(attrs, originalWeightsDesc);
     if (!useDynamicQuant) {
-        auto dstDesc = originalWeightsDesc->cloneWithNewPrecision(memory.at(ARG_SRC)->getDescPtr()->getPrecision());
-        auto dnnlDstDesc = MemoryDescUtils::convertToDnnlMemoryDesc(dstDesc);
-        packedWeights = acl_fc_executor::reorderWeights(memory, context, aclfcAttrs, dnnlSrcDesc, dnnlDstDesc);
-
-        const size_t rhsPackedSize = kai_get_rhs_packed_size_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(N, K);
-        auto rhsPackedDesc = std::make_shared<CpuBlockedMemoryDesc>(u8, Shape({rhsPackedSize}));
-        rhsPackedMem = std::make_shared<Memory>(context->getEngine(), rhsPackedDesc);
-
-        float* bias = biasMem->getDataAs<float>();
-        float* rhs_packed = static_cast<float*>(rhsPackedMem->getData());
-        float* rhs = static_cast<float*>(packedWeights->getData());
-        const size_t rhs_stride = N * sizeof(float);
-
-        const size_t nr = ukernel_f32.get_nr();
-        const size_t kr = ukernel_f32.get_kr();
-        const size_t sr = ukernel_f32.get_sr();
-
-        kai_run_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(1,
-                                                         N,
-                                                         K,
-                                                         nr,
-                                                         kr,
-                                                         sr,          // Packing arguments
-                                                         rhs_stride,  // RHS stride
-                                                         rhs,         // RHS
-                                                         bias,        // Bias
-                                                         nullptr,     // Scale
-                                                         rhs_packed,  // RHS packed
-                                                         0,
-                                                         nullptr);
+        kernelLookupKey = kernelLookup::WEIGHT_FP32;
     } else {
-        MemoryPtr weightsMemory = memory.at(ARG_WEI);
-        if (!attrs.weightsNonTransposed) {
-            auto dnnlSrcDesc = MemoryDescUtils::convertToDnnlMemoryDesc(originalWeightsDesc);
-            auto dnnlDstDesc = acl_fc_executor::makeTransposedWeightDescriptor(dnnlSrcDesc, dnnlSrcDesc);
-            weightsMemory = acl_fc_executor::reorderData(dnnlSrcDesc, dnnlDstDesc, memory.at(ARG_WEI), context);
+        const auto weightPrecision = memory.at(ARG_WEI)->getDescPtr()->getPrecision();
+        if (weightPrecision == element::i4 || weightPrecision == element::u4) {
+            kernelLookupKey |= kernelLookup::WEIGHT_INT4;
+        } else if (weightPrecision == element::i8) {
+            kernelLookupKey |= kernelLookup::WEIGHT_INT8;
+        } else {
+            OPENVINO_THROW_NOT_IMPLEMENTED("Unsupported weight format by KleidiAI executor: ", weightPrecision);
         }
 
-        mr = ukernel_i8.get_mr();
-        nr = ukernel_i8.get_nr();
-        kr = ukernel_i8.get_kr();
-        sr = ukernel_i8.get_sr();
+        if (hasArmISASupport(ArmISA::I8MM)) {
+            kernelLookupKey |= kernelLookup::ISA_I8MM;
+        } else if (hasArmISASupport(ArmISA::DOTPROD)) {
+            kernelLookupKey |= kernelLookup::ISA_DOTPROD;
+        } else {
+            OPENVINO_THROW_NOT_IMPLEMENTED("KleidiAI quantized kernels require Arm dotprod or i8mm support.");
+        }
 
-        float* bias = biasMem->getDataAs<float>();
-        int8_t* rhs_native_qs8cx = weightsMemory->getDataAs<int8_t>();
-        float* rhs_scales = static_cast<float*>(memory.at(ARG_WEI | ARG_ATTR_SCALES)->getData());
-
-        const size_t rhsPackedSize = kai_get_rhs_packed_size_rhs_pack_kxn_qsi8cxp_qsi8cx_neon(N, K, nr, kr, sr);
-        auto rhsPackedDesc = std::make_shared<CpuBlockedMemoryDesc>(i8, Shape({rhsPackedSize}));
-        rhsPackedMem = std::make_shared<Memory>(context->getEngine(), rhsPackedDesc);
-        int8_t* rhs_packed_qs8cx = static_cast<int8_t*>(rhsPackedMem->getData());
-
-        kai_rhs_pack_qsi8cx_params params;
-        params.lhs_zero_point = 1;
-
-        kai_run_rhs_pack_kxn_qsi8cxp_qsi8cx_neon(1,
-                                                 N,
-                                                 K,
-                                                 nr,
-                                                 kr,
-                                                 sr,
-                                                 rhs_native_qs8cx,
-                                                 bias,
-                                                 rhs_scales,
-                                                 rhs_packed_qs8cx,
-                                                 0,
-                                                 &params);
-
-        // Create scratchpad to initialize memory for LHS in update()
-        scratchPad = context->getScratchPad();
+        kernelLookupKey |= isGroupQuantizationEnabled(memory) ? kernelLookup::QUANT_GROUP : kernelLookup::QUANT_CHANNEL;
+        kernelLookupKey |=
+            isAsymmetricQuantizationEnabled(memory) ? kernelLookup::QUANT_ASYMMETRIC : kernelLookup::QUANT_SYMMETRIC;
     }
+
+    const auto createPackedMemory = [&](size_t size, const element::Type& precision) {
+        auto desc = std::make_shared<CpuBlockedMemoryDesc>(precision, Shape({size}));
+        rhsPackedMem = std::make_shared<Memory>(context->getEngine(), desc);
+    };
+
+    const auto packQuantizedWeights = [&](bool isTransposed, const MemoryCPtr& weightsMemory) {
+        createPackedMemory(_kernel->get_rhsPackedSize(), i8);
+        auto* rhsScales = static_cast<float*>(memory.at(ARG_WEI | ARG_ATTR_SCALES)->getData());
+        std::vector<float> transposedScales;
+        if (isTransposed && isGroupQuantizationEnabled(memory)) {
+            const auto numGroups = memory.at(ARG_WEI | ARG_ATTR_SCALES)->getDesc().getShape().getStaticDims()[1];
+            transposedScales.resize(N * numGroups);
+            for (size_t g = 0; g < numGroups; ++g) {
+                for (size_t n = 0; n < N; ++n) {
+                    transposedScales[n * numGroups + g] = rhsScales[g * N + n];
+                }
+            }
+            rhsScales = transposedScales.data();
+        }
+        _kernel->packData(isTransposed, weightsMemory, biasMem, hasBias, rhsScales, rhsPackedMem);
+    };
+
+    switch (kernelLookupKey) {
+    case WEIGHT_FP32: {
+        _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::F32_NEON_MLA>>(N, K);
+
+        auto dstDesc = originalWeightsDesc->cloneWithNewPrecision(memory.at(ARG_SRC)->getDescPtr()->getPrecision());
+        auto dnnlDstDesc = MemoryDescUtils::convertToDnnlMemoryDesc(dstDesc);
+        if (!attrs.weightsNonTransposed) {
+            dnnlDstDesc = acl_fc_executor::makeTransposedWeightDescriptor(dnnlDstDesc, dnnlSrcDesc);
+            aclfcAttrs.isWeightsRepacked = true;
+        }
+
+        const MemoryCPtr packedWeights =
+            acl_fc_executor::reorderWeights(memory, context, aclfcAttrs, dnnlSrcDesc, dnnlDstDesc);
+        createPackedMemory(_kernel->get_rhsPackedSize(), u8);
+        _kernel->packData(false, packedWeights, biasMem, hasBias, nullptr, rhsPackedMem);
+        break;
+    }
+
+    case WEIGHT_INT4 | ISA_I8MM | QUANT_GROUP | QUANT_SYMMETRIC:
+        _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I4_NEON_IMM_GROUP>>(N,
+                                                                                                     K,
+                                                                                                     lhsPackedMem,
+                                                                                                     memory);
+        packQuantizedWeights(attrs.weightsNonTransposed, memory.at(ARG_WEI));
+        break;
+
+    case WEIGHT_INT4 | ISA_DOTPROD | QUANT_GROUP | QUANT_SYMMETRIC:
+        _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I4_NEON_DOTPROD_GROUP>>(N,
+                                                                                                         K,
+                                                                                                         lhsPackedMem,
+                                                                                                         memory);
+        packQuantizedWeights(attrs.weightsNonTransposed, memory.at(ARG_WEI));
+        break;
+
+    case WEIGHT_INT4 | ISA_I8MM | QUANT_GROUP | QUANT_ASYMMETRIC:
+        _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I4_NEON_IMM_GROUP_ASYM>>(N,
+                                                                                                          K,
+                                                                                                          lhsPackedMem,
+                                                                                                          memory);
+        packQuantizedWeights(attrs.weightsNonTransposed, memory.at(ARG_WEI));
+        break;
+
+    case WEIGHT_INT4 | ISA_DOTPROD | QUANT_GROUP | QUANT_ASYMMETRIC:
+        _kernel =
+            std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I4_NEON_DOTPROD_GROUP_ASYM>>(N,
+                                                                                                        K,
+                                                                                                        lhsPackedMem,
+                                                                                                        memory);
+        packQuantizedWeights(attrs.weightsNonTransposed, memory.at(ARG_WEI));
+        break;
+
+    case WEIGHT_INT4 | ISA_I8MM | QUANT_CHANNEL | QUANT_SYMMETRIC:
+        _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I4_NEON_IMM>>(N, K, lhsPackedMem);
+        packQuantizedWeights(attrs.weightsNonTransposed, memory.at(ARG_WEI));
+        break;
+
+    case WEIGHT_INT4 | ISA_DOTPROD | QUANT_CHANNEL | QUANT_SYMMETRIC:
+        _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I4_NEON_DOTPROD>>(N, K, lhsPackedMem);
+        packQuantizedWeights(attrs.weightsNonTransposed, memory.at(ARG_WEI));
+        break;
+
+    case WEIGHT_INT8 | ISA_DOTPROD | QUANT_CHANNEL | QUANT_SYMMETRIC:
+    case WEIGHT_INT8 | ISA_I8MM | QUANT_CHANNEL | QUANT_SYMMETRIC: {
+        const bool useI8MM = (kernelLookupKey & ISA_I8MM) != 0;
+        if (useI8MM) {
+            // The M == 1 GEMV paired with the i8mm GEMM is a dotprod kernel, so it needs FEAT_DotProd
+            const bool hasDotprod = hasArmISASupport(ArmISA::DOTPROD);
+            _kernel = std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I8_NEON_IMM>>(N,
+                                                                                                   K,
+                                                                                                   lhsPackedMem,
+                                                                                                   hasDotprod);
+        } else {
+            _kernel =
+                std::make_shared<kai_common::uKernel<kai_common::KAIKernelTag::I8_NEON_DOTPROD>>(N, K, lhsPackedMem);
+        }
+
+        MemoryPtr weightsMemory = memory.at(ARG_WEI);
+        if (!attrs.weightsNonTransposed) {
+            const auto srcDesc = MemoryDescUtils::convertToDnnlMemoryDesc(originalWeightsDesc);
+            const auto dstDesc = acl_fc_executor::makeTransposedWeightDescriptor(srcDesc, srcDesc);
+            weightsMemory = acl_fc_executor::reorderData(srcDesc, dstDesc, memory.at(ARG_WEI), context);
+        }
+        packQuantizedWeights(false, weightsMemory);
+        break;
+    }
+
+    default:
+        OPENVINO_THROW_NOT_IMPLEMENTED("Unsupported KleidiAI kernel configuration. Lookup key: ", kernelLookupKey);
+    }
+
+    scratchPad = context->getScratchPad();
+}
+
+void MatMulKleidiAIExecutor::setKaiExecutorImplAsGatherMatmul() {
+    KaiExecutorImpl = IMPL_TYPE::GatherMatmul;
+}
+
+void MatMulKleidiAIExecutor::set_gather_idx(const std::vector<std::pair<int32_t, int32_t>>& idxMap) {
+    OPENVINO_ASSERT(KaiExecutorImpl == IMPL_TYPE::GatherMatmul,
+                    "gather_idx is supported only for GatherMatmul Implementation");
+    gather_idx = idxMap;
 }
 
 bool MatMulKleidiAIExecutor::update(const MemoryArgs& memory) {
     const auto& weiDesc = memory.at(ARG_WEI)->getDescPtr();
+    const auto& srcDesc = memory.at(ARG_SRC)->getDescPtr();
     const auto& dstDesc = memory.at(ARG_DST)->getDescPtr();
     const auto& wgtDims = weiDesc->getShape().getStaticDims();
     // Weights are transposed by MatMulConstTransposesExtraction
     // K is the IC of weight
     // the weight is reshaped to [-1, K] in ConvertMatMulToFC
+    OPENVINO_ASSERT(wgtDims.size() == 2, "Weights Shape must be 2D");
     K = wgtDims[1];
     N = wgtDims[0];
 
     const auto& outDims = dstDesc->getShape().getStaticDims();
-    if (outDims.size() > 2) {
-        M = std::accumulate(outDims.begin(), outDims.end() - 1, 1, std::multiplies<size_t>());
+    if (KaiExecutorImpl == IMPL_TYPE::GatherMatmul && outDims.size() == 3) {
+        M = outDims[1];
+    } else if (outDims.size() > 2) {
+        M = std::accumulate(outDims.begin(), outDims.end() - 1, 1, std::multiplies<>());
     } else {
         M = outDims[0];
     }
-    // Assign LHS memory
-    if (useDynamicQuant) {
-        const size_t lhsPackedSize = kai_get_lhs_packed_size_lhs_quant_pack_qai8dxp_f32(M, K, mr, kr, sr);
-        auto lhsPackedDesc = std::make_shared<CpuBlockedMemoryDesc>(i8, Shape({lhsPackedSize}));
+    size_t totalScratchpadSize = 0;
+    if (KaiExecutorImpl == IMPL_TYPE::GatherMatmul) {
+        const auto& creatorsMap = BlockedDescCreator::getCommonCreators();
+        const auto srcPrc = srcDesc->getPrecision();
+        const auto dstPrc = dstDesc->getPrecision();
+        m_tmpInputDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(srcPrc, Shape({M, K}));
+        m_tmpOutputDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(dstPrc, Shape({M, N}));
+        auto srcSize = rnd_up(m_tmpInputDesc->getCurrentMemSize(), 64);  // 64 bytes is the cache line size
+        auto dstSize = rnd_up(m_tmpOutputDesc->getCurrentMemSize(), 64);
+        totalScratchpadSize = srcSize + dstSize;
+    }
+    // Assign LHS memory using newer logic
+    lhsPackedSize = _kernel->getLHSPackedSize(M);
+    totalScratchpadSize = rnd_up(lhsPackedSize, 64) + totalScratchpadSize;
+    if (totalScratchpadSize > 0) {
+        auto lhsPackedDesc = std::make_shared<CpuBlockedMemoryDesc>(i8, Shape({totalScratchpadSize}));
         lhsPackedMem = scratchPad->createScratchPadMem(lhsPackedDesc);
     }
     return true;
@@ -185,96 +310,61 @@ bool MatMulKleidiAIExecutor::update(const MemoryArgs& memory) {
 
 void MatMulKleidiAIExecutor::execute(const MemoryArgs& memory) {
     auto srcMem = memory.at(ARG_SRC);
-    auto weiMem = memory.at(ARG_WEI);
     auto dstMem = memory.at(ARG_DST);
-    auto srcDims = normalizeDimsTo2D(srcMem->getDesc().getShape().getDims());
-    auto weiDims = weiMem->getDesc().getShape().getDims();
-    auto M = srcDims[0];
-    auto K = srcDims[1];
-    auto N = weiDims[0];
-
-    const size_t lhs_stride = K * sizeof(float);
-    const size_t dst_stride_row = N * sizeof(float);
-    const size_t dst_stride_col = sizeof(float);
-    float* lhs = srcMem->getDataAs<float>();
-    float* dst = dstMem->getDataAs<float>();
-
-    size_t n_blocks = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-    if (!useDynamicQuant) {
-        float* rhs_packed = static_cast<float*>(rhsPackedMem->getData());
-
-        parallel_for(n_blocks, [&](size_t n_block) {
-            size_t n_start = (n_block * BLOCK_SIZE);
-            size_t n_end = std::min(n_start + BLOCK_SIZE, N);
-            size_t n_block_size = n_end - n_start;
-            const size_t rhs_packed_offset = ukernel_f32.get_rhs_packed_offset(n_start, K);
-            const size_t dst_offset = ukernel_f32.get_dst_offset(0, n_start, dst_stride_row);
-            const float* rhs_ptr = (rhs_packed + rhs_packed_offset / sizeof(float));
-            float* dst_ptr = (dst + dst_offset / (sizeof(float)));
-            ukernel_f32.run_matmul(M,
-                                   n_block_size,
-                                   K,
-                                   lhs,
-                                   lhs_stride,
-                                   rhs_ptr,
-                                   dst_ptr,
-                                   dst_stride_row,
-                                   dst_stride_col,
-                                   FLOAT_MIN,
-                                   FLOAT_MAX);
+    auto srcDims = srcMem->getDesc().getShape().getDims();
+    size_t M_value = 0, K_value = 0;
+    if (KaiExecutorImpl == IMPL_TYPE::GatherMatmul) {
+        OPENVINO_ASSERT(!gather_idx.empty(), "gather_idx is not set");
+        M_value = srcDims[1];
+        K_value = srcDims[2];
+        const auto element_size = m_tmpInputDesc->getPrecision().size();
+        auto* input_ptr = lhsPackedMem->getDataAs<uint8_t>() + lhsPackedSize;
+        auto* output_ptr =
+            input_ptr + rnd_up(m_tmpInputDesc->getCurrentMemSize(), 64);  // 64 bytes is the cache line size
+        auto tmpInput = std::make_shared<Memory>(executorContext->getEngine(), m_tmpInputDesc, input_ptr);
+        auto tmpOutput = std::make_shared<Memory>(executorContext->getEngine(), m_tmpOutputDesc, output_ptr);
+        auto src_offset = OffsetHelper::createOffsetHelper(*srcMem);
+        auto tmp_input_offset = OffsetHelper::createOffsetHelper(*tmpInput);
+        executorContext->getCpuParallel()->parallel_for(gather_idx.size(), [&](size_t m) {
+            auto* dst_row = tmp_input_offset(m);
+            const auto row_id = gather_idx[m].first;
+            const auto batch_index = gather_idx[m].second;
+            const auto* src_data = src_offset(batch_index, row_id);
+            std::memcpy(dst_row, src_data, K * element_size);
         });
+        // update M
+        M_value = gather_idx.size();
+        srcMem = tmpInput;
+        dstMem = tmpOutput;
     } else {
-        // Create packed LHS and RHS
-        int8_t* lhs_packed_qa8dx = lhsPackedMem->getDataAs<int8_t>();
-        int8_t* rhs_packed_qs8cx = rhsPackedMem->getDataAs<int8_t>();
+        srcDims = normalizeDimsTo2D(srcDims);
+        M_value = srcDims[0];
+        K_value = srcDims[1];
+    }
+    _kernel->execute(executorContext->getCpuParallel(), M_value, K_value, dstMem, srcMem);
 
-        kai_run_lhs_quant_pack_qai8dxp_f32(M,
-                                           K,  // Dimensions
-                                           mr,
-                                           kr,
-                                           sr,
-                                           0,                // Packing dimensions
-                                           lhs,              // LHS (F32)
-                                           lhs_stride,       // LHS stride
-                                           lhs_packed_qa8dx  // LHS packed
-        );
-
-        const size_t lhs_packed_offset = ukernel_i8.get_lhs_packed_offset(0, K);
-        const void* lhs_ptr = static_cast<const void*>(lhs_packed_qa8dx + lhs_packed_offset);
-
-        parallel_for(n_blocks, [&](size_t n_block) {
-            size_t n_start = (n_block * BLOCK_SIZE);
-            size_t n_end = std::min(n_start + BLOCK_SIZE, N);
-            size_t n_block_size = n_end - n_start;
-            const size_t rhs_packed_offset = ukernel_i8.get_rhs_packed_offset(n_start, K);
-            const size_t dst_offset = ukernel_i8.get_dst_offset(0, n_start, dst_stride_row);
-            const void* rhs_ptr = static_cast<const void*>(rhs_packed_qs8cx + rhs_packed_offset);
-            float* dst_ptr = (dst + dst_offset / sizeof(float));
-            ukernel_i8.run_matmul(M,
-                                  n_block_size,
-                                  K,
-                                  lhs_ptr,
-                                  rhs_ptr,
-                                  dst_ptr,
-                                  dst_stride_row,
-                                  dst_stride_col,
-                                  FLOAT_MIN,
-                                  FLOAT_MAX);
+    if (KaiExecutorImpl == IMPL_TYPE::GatherMatmul) {
+        dstMem = memory.at(ARG_DST);
+        const auto element_size = m_tmpInputDesc->getPrecision().size();
+        auto* input_ptr = lhsPackedMem->getDataAs<uint8_t>() + lhsPackedSize;
+        auto* output_ptr =
+            input_ptr + rnd_up(m_tmpInputDesc->getCurrentMemSize(), 64);  // 64 bytes is the cache line size
+        auto tmpInput = std::make_shared<Memory>(executorContext->getEngine(), m_tmpInputDesc, input_ptr);
+        auto tmpOutput = std::make_shared<Memory>(executorContext->getEngine(), m_tmpOutputDesc, output_ptr);
+        auto dst_offset = OffsetHelper::createOffsetHelper(dstMem);
+        auto tmp_dst_offset = OffsetHelper::createOffsetHelper(tmpOutput);
+        executorContext->getCpuParallel()->parallel_for(gather_idx.size(), [&](size_t m) {
+            const auto* src_row = tmp_dst_offset(m);
+            const auto row_id = gather_idx[m].first;
+            const auto batch_index = gather_idx[m].second;
+            auto* dst_row = dst_offset(batch_index, row_id);
+            std::memcpy(dst_row, src_row, N * element_size);
         });
     }
 }
 
-void MatMulKleidiAIExecutor::moveMemToNumaNode(int numaNodeID) {
-    if (curNumaNode == numaNodeID) {
-        return;
-    }
-    curNumaNode = numaNodeID;
-    mbind_move(packedWeights, numaNodeID);
-    if (m_attrs.withBias) {
-        mbind_move(m_memoryArgs.at(ARG_BIAS), numaNodeID);
-    }
+void MatMulKleidiAIExecutor::moveMemToNumaNode([[maybe_unused]] int numaNodeID) {
+    OPENVINO_THROW_NOT_IMPLEMENTED("'moveMemToNumaNode' is not implemented by the executor");
 }
 
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu

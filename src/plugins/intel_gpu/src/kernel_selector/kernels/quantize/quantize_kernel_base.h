@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ namespace kernel_selector {
 class QuantizeKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~QuantizeKernelBase() {}
+    ~QuantizeKernelBase() override = default;
 
     bool Validate(const Params& p) const override;
     KernelsData GetKernelsData(const Params& params) const override;

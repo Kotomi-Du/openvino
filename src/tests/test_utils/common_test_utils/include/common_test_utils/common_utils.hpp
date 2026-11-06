@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -16,6 +18,10 @@
 #include <vector>
 
 #include "openvino/core/partial_shape.hpp"
+
+namespace ov::test::opt {
+inline constexpr auto FORCE = true;
+}
 
 namespace ov {
 namespace test {
@@ -207,9 +213,27 @@ inline std::ostream& operator<<(std::ostream& os, const ov::AnyMap& config) {
 
 std::string generateTestFilePrefix();
 
+// Stateful generator for the prime-modulo pattern. Each call to operator() returns the
+// next byte of the sequence: the k-th call (0-based) yields (k % 251).
+// 251 is prime, so the byte period never aligns with any power-of-two page / granularity
+// boundary, which makes off-by-page corruption easy to spot.
+struct ModuloSequenceGenerator {
+    static constexpr uint8_t modulus = 251;
+    size_t index = 0;
+    constexpr uint8_t operator()() {
+        return static_cast<uint8_t>(index++ % modulus);
+    }
+};
+
+// Build a vector<uint8_t> holding the prime-modulo pattern (see ModuloSequenceGenerator).
+std::vector<uint8_t> make_modulo_sequence_pattern(size_t size);
+
 size_t getVmSizeInKB();
 
 size_t getVmRSSInKB();
+
+size_t count_resident_pages(const void* data, size_t size);
+
 }  // namespace utils
 }  // namespace test
 }  // namespace ov

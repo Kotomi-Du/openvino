@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,8 +14,10 @@ namespace kernel_selector {
 ParamsKey EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableInputLayout(DataLayout::fs_b_yx_fsv32);
     k.EnableInputLayout(DataLayout::byxf);
@@ -38,26 +40,27 @@ JitConstants EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32::GetJitConstants(const e
 
 bool EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32::Validate(const Params& params) const {
     if (!EltwiseKernelBase::Validate(params)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     const auto& ewParams = static_cast<const eltwise_params&>(params);
 
     const auto& inputs = ewParams.inputs;
     if (inputs.size() != 2) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     for (auto in : inputs) {
-        if (in.GetLayout() != DataLayout::fs_b_yx_fsv32 && in.GetLayout() != DataLayout::byxf)
-            return false;
+        if (in.GetLayout() != DataLayout::fs_b_yx_fsv32 && in.GetLayout() != DataLayout::byxf) {
+            DO_NOT_USE_THIS_KERNEL(params.layerID);
+        }
     }
 
     const auto& input1 = inputs[0];
     const auto& input2 = inputs[1];
 
     if (input1.Feature().v % 32 != 0 || input2.Feature().v % 32 != 0) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     return true;
@@ -149,8 +152,7 @@ KernelsPriority EltwiseKernel_mixed_byxf_and_fs_b_yx_fsv32::GetKernelsPriority(c
         (p.outputs[0].GetLayout() ==
          p.inputs[1].GetLayout())) {  // There is no need for reordering kernel, better use something more optimal
         return FORCE_PRIORITY_9;
-    } else {  // There is need for byxf/fsv32 reordering kernel use this one
+    }  // There is need for byxf/fsv32 reordering kernel use this one
         return FORCE_PRIORITY_2;
-    }
 }
 }  // namespace kernel_selector

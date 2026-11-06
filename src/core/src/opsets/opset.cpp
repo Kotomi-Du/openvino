@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -97,9 +97,7 @@ std::string ov::OpSet::to_upper_name(const std::string& name) {
 
 const std::map<std::string, std::function<const ov::OpSet&()>>& ov::get_available_opsets() {
 #define _OPENVINO_REG_OPSET(OPSET) \
-    {                              \
-#        OPSET, ov::get_##OPSET    \
-    }
+    { #OPSET, ov::get_##OPSET }
     const static std::map<std::string, std::function<const ov::OpSet&()>> opset_map = {_OPENVINO_REG_OPSET(opset1),
                                                                                        _OPENVINO_REG_OPSET(opset2),
                                                                                        _OPENVINO_REG_OPSET(opset3),
@@ -115,7 +113,8 @@ const std::map<std::string, std::function<const ov::OpSet&()>>& ov::get_availabl
                                                                                        _OPENVINO_REG_OPSET(opset13),
                                                                                        _OPENVINO_REG_OPSET(opset14),
                                                                                        _OPENVINO_REG_OPSET(opset15),
-                                                                                       _OPENVINO_REG_OPSET(opset16)};
+                                                                                       _OPENVINO_REG_OPSET(opset16),
+                                                                                       _OPENVINO_REG_OPSET(opset17)};
 #undef _OPENVINO_REG_OPSET
     return opset_map;
 }
@@ -297,6 +296,17 @@ const ov::OpSet& ov::get_opset16() {
     std::call_once(flag, [&]() {
 #define _OPENVINO_OP_REG(NAME, NAMESPACE) opset.insert<NAMESPACE::NAME>();
 #include "openvino/opsets/opset16_tbl.hpp"
+#undef _OPENVINO_OP_REG
+    });
+    return opset;
+}
+
+const ov::OpSet& ov::get_opset17() {
+    static OpSet opset;
+    static std::once_flag flag;
+    std::call_once(flag, [&]() {
+#define _OPENVINO_OP_REG(NAME, NAMESPACE) opset.insert<NAMESPACE::NAME>();
+#include "openvino/opsets/opset17_tbl.hpp"
 #undef _OPENVINO_OP_REG
     });
     return opset;

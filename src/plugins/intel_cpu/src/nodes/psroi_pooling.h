@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,19 +15,17 @@
 #include "node.h"
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class PSROIPooling : public Node {
 public:
     PSROIPooling(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context);
 
-    void getSupportedDescriptors() override{};
+    void getSupportedDescriptors() override {};
     void initSupportedPrimitiveDescriptors() override;
-    void createPrimitive() override{};
+    void createPrimitive() override {};
     void execute(const dnnl::stream& strm) override;
-    bool created() const override;
+    [[nodiscard]] bool created() const override;
 
     static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
 
@@ -39,7 +37,7 @@ private:
     size_t pooledWidth = 0;
     size_t spatialBinsX = 0;
     size_t spatialBinsY = 0;
-    std::string mode = "";
+    std::string mode;
 
     int channels = 0;
     int height = 0;
@@ -50,20 +48,22 @@ private:
     int nh = 0;
     int nw = 0;
 
+    size_t inBatchNum = 0;
+
     // for Deformable PSROIPolling
     bool noTrans;
     int partSize = 1;
-    float transStd = 1.f;
+    float transStd = 1.F;
 
     void unpackParams(const BlockedMemoryDesc& srcDesc,
                       const BlockedMemoryDesc& dstDesc,
-                      int& hInputStride,
-                      int& wInputStride,
-                      int& hOutputStride,
-                      int& wOutputStride,
-                      int& inBlockSize,
-                      int& outBlockSize,
-                      int& outBlockCount,
+                      size_t& hInputStride,
+                      size_t& wInputStride,
+                      size_t& hOutputStride,
+                      size_t& wOutputStride,
+                      size_t& inBlockSize,
+                      size_t& outBlockSize,
+                      size_t& outBlockCount,
                       uint64_t& inputChannelsPadding,
                       uint64_t& outputChannelsPadding);
 
@@ -71,8 +71,8 @@ private:
     void executeAverage(const inputType* srcData,
                         outputType* dstData,
                         const float* bottomRois,
-                        const int n,
-                        const int roiBatchInd,
+                        int n,
+                        int roiBatchInd,
                         const BlockedMemoryDesc& srcDesc,
                         const BlockedMemoryDesc& dstDesc);
 
@@ -80,8 +80,8 @@ private:
     void executeBilinear(const inputType* srcData,
                          outputType* dstData,
                          const float* bottomRois,
-                         const int currentRoi,
-                         const int roiBatchInd,
+                         int currentRoi,
+                         int roiBatchInd,
                          const BlockedMemoryDesc& srcDesc,
                          const BlockedMemoryDesc& dstDesc);
 
@@ -90,10 +90,10 @@ private:
                                    outputType* dstData,
                                    const float* bottomRois,
                                    const float* bottomTrans,
-                                   const int numClasses,
-                                   const int channelsEachClass,
-                                   const int currentRoi,
-                                   const int roiBatchInd);
+                                   int numClasses,
+                                   int channelsEachClass,
+                                   int currentRoi,
+                                   int roiBatchInd);
 
     template <typename inputType, typename outputType>
     void executeSpecified();
@@ -102,6 +102,4 @@ private:
     struct PSROIPoolingExecute;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

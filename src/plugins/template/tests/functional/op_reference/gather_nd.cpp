@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "base_reference_test.hpp"
+#include "common_test_utils/test_assertions.hpp"
 
 using namespace reference_tests;
 using namespace ov;
@@ -89,6 +90,11 @@ std::vector<GatherNDParams> generateParams() {
                        0,
                        reference_tests::Tensor(IN_ET, {}, std::vector<T>{15}),
                        "gather_nd_single_indices"),
+        GatherNDParams(reference_tests::Tensor(IN_ET, {3, 3}, std::vector<T>{10, 11, 12, 13, 14, 15, 16, 17, 18}),
+                       reference_tests::Tensor(element::i32, {2}, std::vector<int32_t>{-2, -1}),
+                       0,
+                       reference_tests::Tensor(IN_ET, {}, std::vector<T>{15}),
+                       "gather_nd_single_negative_indices"),
         GatherNDParams(reference_tests::Tensor(IN_ET, {2, 2}, std::vector<T>{10, 11, 12, 13}),
                        reference_tests::Tensor(element::i32, {2, 2}, std::vector<int32_t>{0, 0, 1, 1}),
                        0,
@@ -300,6 +306,11 @@ std::vector<GatherNDParams> generateParams_v8() {
                        0,
                        reference_tests::Tensor(IN_ET, {2, 1, 2}, std::vector<T>{12, 13, 10, 11}),
                        "gather_nd_8_batch_1d_from_2d"),
+        GatherNDParams(reference_tests::Tensor(IN_ET, {2, 2}, std::vector<T>{10, 11, 12, 13}),
+                       reference_tests::Tensor(element::i32, {2, 1, 1}, std::vector<int32_t>{-1, -2}),
+                       0,
+                       reference_tests::Tensor(IN_ET, {2, 1, 2}, std::vector<T>{12, 13, 10, 11}),
+                       "gather_nd_8_batch_1d_from_2d_negative"),
         GatherNDParams(
             reference_tests::Tensor(IN_ET, {2, 2, 2}, std::vector<T>{10, 11, 12, 13, 20, 21, 22, 23}),
             reference_tests::Tensor(element::i32, {2, 2, 3}, std::vector<int32_t>{0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0}),
@@ -405,4 +416,19 @@ INSTANTIATE_TEST_SUITE_P(smoke_GatherND_With_Hardcoded_Refs,
                          ReferenceGatherND8Test,
                          testing::ValuesIn(generateCombinedParams_v8()),
                          ReferenceGatherND8Test::getTestCaseName);
+
+class ReferenceGatherND8LayerTestNegative : public ReferenceGatherND8Test {};
+
+TEST_P(ReferenceGatherND8LayerTestNegative, IndicesOutOfRangeThrows) {
+    OV_EXPECT_THROW_HAS_SUBSTRING(Exec(), ov::Exception, "Accessing out-of-range dimension");
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    smoke_GatherNDNegative,
+    ReferenceGatherND8LayerTestNegative,
+    ::testing::Values(GatherNDParams(reference_tests::Tensor(element::f32, {16, 64}, std::vector<float>(16 * 64, 1.0f)),
+                                     reference_tests::Tensor(element::i64, {1, 1}, std::vector<int64_t>{40}),
+                                     0,
+                                     reference_tests::Tensor(element::f32, {1, 64}, std::vector<float>(64, 0.0f)))),
+    ReferenceGatherND8LayerTestNegative::getTestCaseName);
 }  // namespace

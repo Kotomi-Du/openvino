@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
 import pytest
 
 from openvino import PartialShape, Dimension, Model, Type
-from openvino.exceptions import UserInputError
+from openvino.exceptions import OVTypeError, UserInputError
 from openvino.utils.types import make_constant_node
 
 import openvino.opset1 as ov_opset1
@@ -14,6 +14,7 @@ import openvino.opset5 as ov_opset5
 import openvino.opset10 as ov_opset10
 import openvino.opset15 as ov_opset15
 import openvino.opset16 as ov_opset16
+import openvino.opset17 as ov_opset17
 import openvino.opset11 as ov
 from openvino.op.util import VariableInfo, Variable
 
@@ -600,7 +601,10 @@ def test_roi_pooling_deprecation():
 
 
 @pytest.mark.parametrize(
-    ("data_shape", "rois", "batch_indices", "pooled_h", "pooled_w", "sampling_ratio", "spatial_scale", "mode", "aligned_mode", "expected_shape"),
+    (
+        "data_shape", "rois", "batch_indices", "pooled_h", "pooled_w", "sampling_ratio",
+        "spatial_scale", "mode", "aligned_mode", "expected_shape"
+    ),
     [
         ([2, 3, 5, 6], [7, 4], [7], 2, 2, 1, 1.0, "avg", "asymmetric", [7, 3, 2, 2]),
         ([10, 3, 5, 5], [7, 4], [7], 3, 4, 1, 1.0, "avg", "half_pixel_for_nn", [7, 3, 3, 4]),
@@ -608,7 +612,10 @@ def test_roi_pooling_deprecation():
         ([10, 3, 5, 5], [3, 4], [3], 3, 4, 1, float(1), "avg", "half_pixel", [3, 3, 3, 4]),
     ],
 )
-def test_roi_align(data_shape, rois, batch_indices, pooled_h, pooled_w, sampling_ratio, spatial_scale, mode, aligned_mode, expected_shape):
+def test_roi_align(
+    data_shape, rois, batch_indices, pooled_h, pooled_w, sampling_ratio,
+    spatial_scale, mode, aligned_mode, expected_shape
+):
     data_parameter = ov.parameter(data_shape, name="Data", dtype=np.float32)
     rois_parameter = ov.parameter(rois, name="Rois", dtype=np.float32)
     batch_indices_parameter = ov.parameter(batch_indices, name="Batch_indices", dtype=np.int32)
@@ -632,7 +639,10 @@ def test_roi_align(data_shape, rois, batch_indices, pooled_h, pooled_w, sampling
 
 
 @pytest.mark.parametrize(
-    ("data_shape", "rois", "batch_indices", "pooled_h", "pooled_w", "sampling_ratio", "spatial_scale", "clockwise_mode", "expected_shape"),
+    (
+        "data_shape", "rois", "batch_indices", "pooled_h", "pooled_w", "sampling_ratio",
+        "spatial_scale", "clockwise_mode", "expected_shape"
+    ),
     [
         ([2, 3, 5, 6], [7, 5], [7], 2, 2, 1, 1.0, True, [7, 3, 2, 2]),
         ([10, 3, 5, 5], [7, 5], [7], 3, 4, 1, 1.0, True, [7, 3, 3, 4]),
@@ -640,7 +650,9 @@ def test_roi_align(data_shape, rois, batch_indices, pooled_h, pooled_w, sampling
         ([10, 3, 5, 5], [3, 5], [3], 3, 4, 1, float(1), False, [3, 3, 3, 4]),
     ],
 )
-def test_roi_align_rotated(data_shape, rois, batch_indices, pooled_h, pooled_w, sampling_ratio, spatial_scale, clockwise_mode, expected_shape):
+def test_roi_align_rotated(
+    data_shape, rois, batch_indices, pooled_h, pooled_w, sampling_ratio, spatial_scale, clockwise_mode, expected_shape
+):
     data_parameter = ov.parameter(data_shape, name="Data", dtype=np.float32)
     rois_parameter = ov.parameter(rois, name="Rois", dtype=np.float32)
     batch_indices_parameter = ov.parameter(batch_indices, name="Batch_indices", dtype=np.int32)
@@ -998,6 +1010,33 @@ def test_read_value():
     assert read_value_attributes["variable_shape"] == [2, 2]
 
 
+@pytest.mark.parametrize(("variable_type", "expected_type"), [
+    ("i32", Type.i32),
+    ("f32", Type.f32),
+    ("boolean", Type.boolean),
+])
+def test_read_value_with_type_name(variable_type, expected_type):
+    init_value = ov.parameter([2, 2], name="init_value", dtype=expected_type)
+
+    node = ov.read_value(init_value, "var_id_667", variable_type, [2, 2])
+    assert node.get_output_element_type(0) == expected_type
+    assert node.get_attributes()["variable_type"] == variable_type
+
+    node = ov.read_value("var_id_668", variable_type, [2, 2])
+    assert node.get_output_element_type(0) == expected_type
+    assert node.get_attributes()["variable_type"] == variable_type
+
+
+@pytest.mark.parametrize("variable_type", ["nonsense", "real", "to_string"])
+def test_read_value_with_unknown_type_name(variable_type):
+    init_value = ov.parameter([2, 2], name="init_value", dtype=np.float32)
+
+    with pytest.raises(OVTypeError, match=f"Unidentified data type {variable_type}"):
+        ov.read_value(init_value, "var_id_667", variable_type, [2, 2])
+    with pytest.raises(OVTypeError, match=f"Unidentified data type {variable_type}"):
+        ov.read_value("var_id_668", variable_type, [2, 2])
+
+
 def test_read_value_ctors():
     data = np.ones((1, 64), dtype=np.float32)
     # check mixed args&kwargs creation
@@ -1022,6 +1061,35 @@ def test_read_value_ctors():
         ov.read_value(data, "variable_id_1", 2)
 
     assert "The necessary overload for read_value was not found" in str(e.value)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"variable_id": "v1"},
+    {"variable_id": "v1", "variable_type": np.float32, "variable_shape": [1, 64]},
+    {"variable_id": "v1", "variable_type": np.float32, "variable_shape": [1, 64], "name": "read_value"},
+])
+def test_read_value_variable_id_overload_with_kwargs_only(kwargs):
+    # Keywords alone must select the overload without init_value, as the same call does positionally
+    read_value = ov.read_value(**kwargs)
+
+    assert read_value.get_type_name() == "ReadValue"
+    assert read_value.get_variable_id() == "v1"
+    assert read_value.get_input_size() == 0
+    if "variable_shape" in kwargs:
+        assert read_value.get_output_partial_shape(0) == PartialShape([1, 64])
+        assert read_value.get_output_element_type(0) == Type.f32
+    if "name" in kwargs:
+        assert read_value.friendly_name == "read_value"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"name": "read_value"},
+    {"variable_type": np.float32, "variable_shape": [1, 64]},
+])
+def test_read_value_kwargs_only_without_required_args(kwargs):
+    # No overload gets all of its required parameters from these keywords
+    with pytest.raises(TypeError, match="The necessary overload for read_value was not found"):
+        ov.read_value(**kwargs)
 
 
 def test_read_value_dyn_variable_pshape():
@@ -1720,9 +1788,18 @@ def test_matrix_nms():
 @pytest.mark.parametrize(
     ("boxes_shape", "scores_shape", "max_output_boxes", "expected_shape"),
     [
-        ([1, 1000, 4], [1, 1, 1000], [1000], [PartialShape([Dimension(0, 1000), Dimension(3)]), PartialShape([Dimension(0, 1000), Dimension(3)])]),
-        ([1, 700, 4], [1, 1, 700], [600], [PartialShape([Dimension(0, 600), Dimension(3)]), PartialShape([Dimension(0, 600), Dimension(3)])]),
-        ([1, 300, 4], [1, 1, 300], [300], [PartialShape([Dimension(0, 300), Dimension(3)]), PartialShape([Dimension(0, 300), Dimension(3)])]),
+        (
+            [1, 1000, 4], [1, 1, 1000], [1000],
+            [PartialShape([Dimension(0, 1000), Dimension(3)]), PartialShape([Dimension(0, 1000), Dimension(3)])]
+        ),
+        (
+            [1, 700, 4], [1, 1, 700], [600],
+            [PartialShape([Dimension(0, 600), Dimension(3)]), PartialShape([Dimension(0, 600), Dimension(3)])]
+        ),
+        (
+            [1, 300, 4], [1, 1, 300], [300],
+            [PartialShape([Dimension(0, 300), Dimension(3)]), PartialShape([Dimension(0, 300), Dimension(3)])]
+        ),
     ],
 )
 @pytest.mark.parametrize("op_name", ["NonMaxSuppression", "NonMaxSuppressionV3"])
@@ -1730,7 +1807,9 @@ def test_non_max_suppression(boxes_shape, scores_shape, max_output_boxes, expect
     boxes_parameter = ov.parameter(boxes_shape, name="Boxes", dtype=np.float32)
     scores_parameter = ov.parameter(scores_shape, name="Scores", dtype=np.float32)
 
-    node = ov.non_max_suppression(boxes_parameter, scores_parameter, make_constant_node(max_output_boxes, np.int64), name=op_name)
+    node = ov.non_max_suppression(
+        boxes_parameter, scores_parameter, make_constant_node(max_output_boxes, np.int64), name=op_name
+    )
     assert node.get_type_name() == "NonMaxSuppression"
     assert node.get_friendly_name() == op_name
     assert node.get_output_size() == 3
@@ -1740,16 +1819,29 @@ def test_non_max_suppression(boxes_shape, scores_shape, max_output_boxes, expect
 
 
 @pytest.mark.parametrize(
-    ("boxes_shape", "scores_shape", "max_output_boxes", "iou_threshold", "score_threshold", "soft_nms_sigma", "expected_shape"),
+    (
+        "boxes_shape", "scores_shape", "max_output_boxes", "iou_threshold",
+        "score_threshold", "soft_nms_sigma", "expected_shape"
+    ),
     [
-        ([1, 100, 4], [1, 1, 100], [100], 0.1, 0.4, 0.5, [PartialShape([Dimension(0, 100), Dimension(3)]), PartialShape([Dimension(0, 100), Dimension(3)])]),
-        ([1, 700, 4], [1, 1, 700], [600], 0.1, 0.4, 0.5, [PartialShape([Dimension(0, 600), Dimension(3)]), PartialShape([Dimension(0, 600), Dimension(3)])]),
-        ([1, 300, 4], [1, 1, 300], [300], 0.1, 0.4, 0.5, [PartialShape([Dimension(0, 300), Dimension(3)]), PartialShape([Dimension(0, 300), Dimension(3)])]),
+        (
+            [1, 100, 4], [1, 1, 100], [100], 0.1, 0.4, 0.5,
+            [PartialShape([Dimension(0, 100), Dimension(3)]), PartialShape([Dimension(0, 100), Dimension(3)])]
+        ),
+        (
+            [1, 700, 4], [1, 1, 700], [600], 0.1, 0.4, 0.5,
+            [PartialShape([Dimension(0, 600), Dimension(3)]), PartialShape([Dimension(0, 600), Dimension(3)])]
+        ),
+        (
+            [1, 300, 4], [1, 1, 300], [300], 0.1, 0.4, 0.5,
+            [PartialShape([Dimension(0, 300), Dimension(3)]), PartialShape([Dimension(0, 300), Dimension(3)])]
+        ),
     ],
 )
 @pytest.mark.parametrize("op_name", ["NonMaxSuppression", "NonMaxSuppressionV3"])
-def test_non_max_suppression_non_default_args(boxes_shape, scores_shape, max_output_boxes, iou_threshold,
-                                              score_threshold, soft_nms_sigma, expected_shape, op_name):
+def test_non_max_suppression_non_default_args(
+    boxes_shape, scores_shape, max_output_boxes, iou_threshold, score_threshold, soft_nms_sigma, expected_shape, op_name
+):
     boxes_parameter = ov.parameter(boxes_shape, name="Boxes", dtype=np.float32)
     scores_parameter = ov.parameter(scores_shape, name="Scores", dtype=np.float32)
 
@@ -1758,7 +1850,10 @@ def test_non_max_suppression_non_default_args(boxes_shape, scores_shape, max_out
     score_threshold = make_constant_node(score_threshold, np.float32)
     soft_nms_sigma = make_constant_node(soft_nms_sigma, np.float32)
 
-    node = ov.non_max_suppression(boxes_parameter, scores_parameter, max_output_boxes, iou_threshold, score_threshold, soft_nms_sigma, name=op_name)
+    node = ov.non_max_suppression(
+        boxes_parameter, scores_parameter, max_output_boxes, iou_threshold,
+        score_threshold, soft_nms_sigma, name=op_name
+    )
     assert node.get_type_name() == "NonMaxSuppression"
     assert node.get_friendly_name() == op_name
     assert node.get_output_size() == 3
@@ -1904,6 +1999,48 @@ def test_nv12_to_rgb():
     assert node_separate_planes.get_output_size() == 1
     assert node_separate_planes.get_output_element_type(0) == Type.f32
     assert list(node_separate_planes.get_output_shape(0)) == expected_output_shape
+
+
+def test_rgb_to_nv12():
+    # Single plane
+    arg = ov.parameter([1, 480, 640, 3], name="input", dtype=np.float32)
+    node_single_plane = ov_opset17.rgb_to_nv12(arg)
+
+    assert node_single_plane.get_type_name() == "RGBtoNV12"
+    assert node_single_plane.get_output_size() == 1
+    assert node_single_plane.get_output_element_type(0) == Type.f32
+    assert list(node_single_plane.get_output_shape(0)) == [1, 720, 640, 1]
+
+    # Two planes
+    node_two_planes = ov_opset17.rgb_to_nv12(arg, single_plane=False)
+
+    assert node_two_planes.get_type_name() == "RGBtoNV12"
+    assert node_two_planes.get_output_size() == 2
+    assert node_two_planes.get_output_element_type(0) == Type.f32
+    assert node_two_planes.get_output_element_type(1) == Type.f32
+    assert list(node_two_planes.get_output_shape(0)) == [1, 480, 640, 1]
+    assert list(node_two_planes.get_output_shape(1)) == [1, 240, 320, 2]
+
+
+def test_bgr_to_nv12():
+    # Single plane
+    arg = ov.parameter([1, 480, 640, 3], name="input", dtype=np.float32)
+    node_single_plane = ov_opset17.bgr_to_nv12(arg)
+
+    assert node_single_plane.get_type_name() == "BGRtoNV12"
+    assert node_single_plane.get_output_size() == 1
+    assert node_single_plane.get_output_element_type(0) == Type.f32
+    assert list(node_single_plane.get_output_shape(0)) == [1, 720, 640, 1]
+
+    # Two planes
+    node_two_planes = ov_opset17.bgr_to_nv12(arg, single_plane=False)
+
+    assert node_two_planes.get_type_name() == "BGRtoNV12"
+    assert node_two_planes.get_output_size() == 2
+    assert node_two_planes.get_output_element_type(0) == Type.f32
+    assert node_two_planes.get_output_element_type(1) == Type.f32
+    assert list(node_two_planes.get_output_shape(0)) == [1, 480, 640, 1]
+    assert list(node_two_planes.get_output_shape(1)) == [1, 240, 320, 2]
 
 
 def test_softsign():

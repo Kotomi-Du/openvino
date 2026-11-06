@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -48,6 +48,7 @@ struct primitive_type {
     virtual layout calc_output_layout(const program_node& node, const kernel_impl_params& params) const = 0;
     virtual std::vector<layout> calc_output_layouts(const program_node& node, const kernel_impl_params& impl_param) const = 0;
     virtual kernel_impl_params get_fake_aligned_params(kernel_impl_params const& orig_impl_param) const = 0;
+    virtual bool has_fake_alignment() const = 0;
     virtual std::string to_string(const program_node& node) const = 0;
 };
 }  // namespace cldnn

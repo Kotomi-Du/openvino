@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -154,10 +154,8 @@ struct PrintToStringParamName {
     template<class T>
     std::string operator()(const testing::TestParamInfo<ExperimentalDetectronGenerateProposalsSingleImageParamsWithLayout<T> > &param) {
         std::stringstream buf;
-        ExperimentalDetectronGenerateProposalsSingleImageParams<T> p;
-        format::type layout;
-        bool is_caching_test;
-        std::tie(p, layout, is_caching_test) = param.param;
+
+        const auto& [p, layout, is_caching_test] = param.param;
 
         buf << "min_size=" << p.min_size << "_";
         buf << "nms_threshold=" << p.nms_threshold << "_";
@@ -175,10 +173,7 @@ struct experimental_detectron_generate_proposals_single_image_test
         : public ::testing::TestWithParam<ExperimentalDetectronGenerateProposalsSingleImageParamsWithLayout<T> > {
 public:
     void test() {
-        ExperimentalDetectronGenerateProposalsSingleImageParams<T> param;
-        format::type data_layout;
-        bool is_caching_test;
-        std::tie(param, data_layout, is_caching_test) = this->GetParam();
+        const auto& [param, data_layout, is_caching_test] = this->GetParam();
         const auto data_type = ov::element::from<T>();
 
         auto &engine = get_test_engine();
@@ -252,7 +247,7 @@ public:
 
         const auto rois = outputs.at(reorder_result_id).get_memory();
 
-        const cldnn::mem_lock<T> rois_ptr(rois, get_test_stream());
+        const cldnn::mem_lock<T, mem_lock_type::read> rois_ptr(rois, get_test_stream());
         ASSERT_EQ(rois_ptr.size(), param.post_nms_count * 4);
 
         cldnn::topology reorder_topology;
@@ -263,7 +258,7 @@ public:
         const auto second_output_result = reorder_net.execute();
         const auto plane_data_mem = second_output_result.at("plane_scores").get_memory();
 
-        const cldnn::mem_lock<T> roi_scores_ptr(plane_data_mem, get_test_stream());
+        const cldnn::mem_lock<T, mem_lock_type::read> roi_scores_ptr(plane_data_mem, get_test_stream());
         ASSERT_EQ(roi_scores_ptr.size(), param.post_nms_count);
 
         const auto &expected_roi_scores = param.expected_roi_scores;

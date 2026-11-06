@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,8 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace ov {
-namespace intel_cpu {
+namespace ov::intel_cpu {
 
 enum impl_desc_type : int64_t {
     unknown = 0x00000000,
@@ -49,12 +48,9 @@ enum impl_desc_type : int64_t {
     sve384 = 1 << 30,
     sve512 = 1 << 31,
 
-    // shl backend
-    shl = 1ll << 32,
+    gv = 1LL << 32,
 
-    gv = 1ll << 33,
-
-    kleidiai = 1ll << 34,
+    kleidiai = 1LL << 33,
 
     // real types
     ref_any = ref | any,
@@ -127,7 +123,6 @@ enum impl_desc_type : int64_t {
     jit_sve384 = jit | sve384,
     jit_sve512 = jit | sve512,
 
-    gemm_shl = gemm | shl,
     gemm_kleidiai = gemm | kleidiai,
 
     jit_gv = jit | gv
@@ -136,7 +131,6 @@ enum impl_desc_type : int64_t {
 std::vector<std::string> extractTypeAndImplName(const std::string& priority);
 const char* impl_type_to_string(impl_desc_type type);
 impl_desc_type parse_impl_name(std::string impl_desc_name);
-bool contains(const std::vector<impl_desc_type>& priorities, const impl_desc_type impl_type_str);
+bool contains(const std::vector<impl_desc_type>& priorities, impl_desc_type impl_type_str);
 
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu

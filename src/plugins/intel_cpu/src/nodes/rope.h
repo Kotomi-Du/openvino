@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,9 +16,7 @@
 #include "openvino/core/node.hpp"
 #include "ov_ops/rotary_positional_embeddings.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class RoPE : public Node {
 public:
@@ -42,13 +40,16 @@ private:
     struct Executor {
         virtual void execute(const dnnl::stream& strm,
                              const std::vector<MemoryPtr>& inputs,
-                             const std::vector<MemoryPtr>& outputs) = 0;
+                             const std::vector<MemoryPtr>& outputs,
+                             const CpuParallelPtr& cpu_parallel) = 0;
         virtual ~Executor() = default;
     };
     template <typename T>
     struct RoPEExecutorRotateHalf;
     template <typename T>
     struct RoPEExecutorInterleaved;
+    template <typename T>
+    struct RoPEExecutorLtxVideo;
     template <typename T>
     struct RoPEExecutorChatGLM;
     template <typename T>
@@ -57,6 +58,4 @@ private:
     std::shared_ptr<Executor> m_executor;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

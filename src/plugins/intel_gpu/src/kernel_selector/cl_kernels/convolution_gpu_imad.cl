@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -180,8 +180,12 @@ KERNEL (fused_convolution_eltwise_gpu_imad)(
             #if INPUT0_LAYOUT_B_FS_YX_FSV16
                 #if ((FILTER_GROUPS_NUM > 1) && (FILTER_IFM_NUM % PACK != 0))
                     INPUT0_TYPE* input_zp_int8_arr = (INPUT0_TYPE*) &data_zp_val;
-                    for (uint v = 0; v < PACK; v++) {
+                    uint valid_ifm_in_pack = (kd + 1) * PACK <= FILTER_IFM_NUM ? PACK : (FILTER_IFM_NUM % PACK);
+                    for (uint v = 0; v < valid_ifm_in_pack; v++) {
                         input_zp_int8_arr[v] = activations_zp[feature_location + v];
+                    }
+                    for (uint v = valid_ifm_in_pack; v < PACK; v++) {
+                        input_zp_int8_arr[v] = 0;
                     }
                 #else
                     data_zp_val = *(__global PACKED_TYPE*)(activations_zp + (kd + g * CEIL_DIV(FILTER_IFM_NUM, PACK)) * PACK);
@@ -215,10 +219,14 @@ KERNEL (fused_convolution_eltwise_gpu_imad)(
                     #endif
                     INPUT0_TYPE* input_int8_arr = (INPUT0_TYPE*) &in[reg];
                     in_addr = in_start_addr + reg * INPUT0_Y_PITCH * FSV;
-                    for (uint v = 0; v < PACK; v++) {
+                    uint valid_ifm_in_pack_input = (kd + 1) * PACK <= FILTER_IFM_NUM ? PACK : (FILTER_IFM_NUM % PACK);
+                    for (uint v = 0; v < valid_ifm_in_pack_input; v++) {
                         int f_addr = ((feature_location + v) / FSV + INPUT0_PAD_BEFORE_FEATURE_NUM / FSV) * \
-                                      INPUT0_FEATURE_PITCH * FSV  + (feature_location + v) % FSV;
+                                      INPUT0_FEATURE_PITCH * FSV + (feature_location + v) % FSV;
                         input_int8_arr[v] = conv_input[in_addr + f_addr];
+                    }
+                    for (uint v = valid_ifm_in_pack_input; v < PACK; v++) {
+                        input_int8_arr[v] = 0;
                     }
                     #ifdef SHOULD_USE_DATA_ZP
                         }
@@ -231,7 +239,7 @@ KERNEL (fused_convolution_eltwise_gpu_imad)(
                     #endif
                         in[reg] = *(__global PACKED_TYPE*)(conv_input + in_addr);
                         in_addr += (INPUT0_SIZE_X + IWPAD) * 16;
-                 #endif
+                #endif
             #else
                 #ifdef BLOCK_LOAD_INPUTS
                     in[reg] = AS_PACKED_TYPE(_sub_group_block_read((const __global uint*) &conv_input[in_addr]));

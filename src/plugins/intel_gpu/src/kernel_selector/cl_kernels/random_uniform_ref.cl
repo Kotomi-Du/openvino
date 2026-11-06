@@ -1,8 +1,9 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "include/batch_headers/fetch_data.cl"
+#include "include/batch_headers/bf16_utils.cl"
 
 #define N_ROUNDS 10
 #define STATISTIC_MAXIMIZING_MULTIPLIER_N 0xD2511F53UL
@@ -12,7 +13,7 @@
 
 #define FNAME(type) fill_##type
 #define FUNC_NAME(type) FNAME(type)
-#define FILL_FUNC(func, result, min_value, max_value, output, output_index) FUNC_CALL(func)(result, min_value, max_value, output, output_index)
+#define FILL_FUNC(func, result, min_value, max_value, output, output_index, output_size) FUNC_CALL(func)(result, min_value, max_value, output, output_index, output_size)
 
 inline ulong FUNC(unite_high_low)(uint high, uint low) {
     return ((ulong)high << 32) + low;
@@ -70,10 +71,11 @@ inline void FUNC(fill_float)(const uint4 res,
                 float min_val,
                 float max_val,
                 __global float *output,
-                uint output_index) {
+                uint output_index,
+               uint output_size) {
     float diff = max_val - min_val;
     for (uint i = 0; i < 4; ++i) {
-        if (output_index + i < OUTPUT_LENGTH) {
+        if (output_index + i < output_size) {
             output[output_index + i] = FUNC_CALL(uint32_to_float)(res[i]) * diff + min_val;
         }
     }
@@ -83,10 +85,11 @@ inline void FUNC(fill_int)(const uint4 res,
               int min_val,
               int max_val,
               __global int *output,
-              uint output_index) {
+              uint output_index,
+               uint output_size) {
     int diff = max_val - min_val;
     for (uint i = 0; i < 4; ++i) {
-        if (output_index + i < OUTPUT_LENGTH) {
+        if (output_index + i < output_size) {
             output[output_index + i] = (int) (res[i] % diff + min_val);
         }
     }
@@ -96,10 +99,11 @@ inline void FUNC(fill_long)(const uint4 res,
                long min_val,
                long max_val,
                __global long *output,
-               uint output_index) {
+               uint output_index,
+               uint output_size) {
     long diff = max_val - min_val;
     output[output_index] = (long)(FUNC_CALL(unite_high_low)(res[1], res[0]) % diff + min_val);
-    if (output_index + 1 < OUTPUT_LENGTH) {
+    if (output_index + 1 < output_size) {
         output[output_index + 1] = (long)(FUNC_CALL(unite_high_low)(res[3], res[2]) % diff + min_val);
     }
 }
@@ -114,20 +118,43 @@ inline void FUNC(fill_half)(const uint4 res,
                half min_val,
                half max_val,
                __global half *output,
-               uint output_index) {
+               uint output_index,
+               uint output_size) {
     half diff = max_val - min_val;
     for (uint i = 0; i < 4; ++i) {
-        if (output_index + i < OUTPUT_LENGTH) {
+        if (output_index + i < output_size) {
             output[output_index + i] = FUNC_CALL(uint32_to_float16)(res[i]) * diff + min_val;
         }
     }
 }
 
-KERNEL(random_uniform_ref)(const __global INPUT0_TYPE* shape, const __global INPUT1_TYPE *min_val,
+inline float FUNC(uint32_to_bfloat16)(uint x) {
+    ushort x_uint16 = (ushort) x;
+    ushort out_val = (ushort)(127 << 7) | (x_uint16 & 0x7fu);
+    return _convert_as_bfloat16_float(out_val) - 1.0f;
+}
+
+inline void FUNC(fill_bf16)(const uint4 res,
+               float min_val,
+               float max_val,
+               __global ushort *output,
+               uint output_index,
+               uint output_size) {
+    float diff = max_val - min_val;
+    for (uint i = 0; i < 4; ++i) {
+        if (output_index + i < output_size) {
+            float val = FUNC_CALL(uint32_to_bfloat16)(res[i]) * diff + min_val;
+            output[output_index + i] = _convert_bfloat16_as_ushort(val);
+        }
+    }
+}
+
+KERNEL(random_uniform_ref)(OPTIONAL_SHAPE_INFO_ARG
+                            const __global INPUT0_TYPE* shape, const __global INPUT1_TYPE *min_val,
                             const __global INPUT2_TYPE* max_val, __global OUTPUT_TYPE *output) {
     const uint plain_index = get_global_id(0);
     uint4 result = FUNC_CALL(run_philox)(plain_index);
-    FILL_FUNC(FUNC_NAME(OUTPUT_TYPE), result, *min_val, *max_val, output, plain_index * OUTPUT_STEP);
+    FILL_FUNC(FUNC_NAME(OUTPUT_TYPE_NAME), result, DECODE_INPUT1_COMPUTE_TYPE(*min_val), DECODE_INPUT2_COMPUTE_TYPE(*max_val), output, plain_index * OUTPUT_STEP, OUTPUT_LENGTH);
 }
 
 #undef FILL_FUNC

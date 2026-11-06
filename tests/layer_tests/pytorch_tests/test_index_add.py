@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
@@ -16,10 +16,10 @@ class TestIndexAdd(PytorchLayerTest):
     def create_model(self, dim, index, src, mode, alpha):
         class aten_index_add(torch.nn.Module):
             def __init__(self, dim, index, src, mode, alpha):
-                super(aten_index_add, self).__init__()
+                super().__init__()
                 self.dim = dim
                 self.index = index
-                self.src = src                    
+                self.src = src
                 self.inplace = mode == "inplace"
                 self.alpha = alpha
                 if mode == "out":
@@ -38,7 +38,7 @@ class TestIndexAdd(PytorchLayerTest):
 
         op_name = "aten::index_add_" if mode == "inplace" else "aten::index_add"
 
-        return aten_index_add(dim, index, src, mode, alpha), None, op_name
+        return aten_index_add(dim, index, src, mode, alpha), op_name
 
     @pytest.mark.nightly
     @pytest.mark.precommit
@@ -51,9 +51,14 @@ class TestIndexAdd(PytorchLayerTest):
         ],
     )
     @pytest.mark.parametrize("src", [torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])])
-    @pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float64"])
+    @pytest.mark.precommit_torch_export
+    @pytest.mark.parametrize("dtype,alpha", [
+        (dtype, alpha)
+        for dtype in ["int32", "int64", "float32", "float64"]
+        for alpha in [1, -1, 0.5, 0.25]
+        if dtype.startswith("float") or isinstance(alpha, int)
+    ])
     @pytest.mark.parametrize("mode", ["inplace", "out", "default"])
-    @pytest.mark.parametrize("alpha", [1, -1, 0.5, 0.25])
     def test_scatter_reduce(self, dim, index, src, dtype, mode, alpha, ie_device, precision, ir_version):
         if isinstance(src, torch.Tensor):
             src = src.to(getattr(torch, dtype))

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -17,10 +17,7 @@ using namespace std;
 using namespace ov;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 OutputVector translate_segment_sum_op(const NodeContext& node) {
     default_op_checks(node, 2, {"SegmentSum", "SEGMENT_SUM"}, true);
     auto data = node.get_input(0);
@@ -61,7 +58,4 @@ OutputVector translate_segment_sum_op(const NodeContext& node) {
     set_node_name(node.get_name(), emb_segment_sum);
     return {emb_segment_sum};
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,9 +6,7 @@
 
 #include "openvino/op/op.hpp"
 
-namespace ov {
-namespace op {
-namespace internal {
+namespace ov::op::internal {
 class While : public Op {
 public:
     OPENVINO_OP("While", "internal");
@@ -25,7 +23,7 @@ public:
 
     std::shared_ptr<Node> clone_with_new_inputs(const OutputVector& new_args) const override;
 
-    const int32_t get_subblock_index() const {
+    int32_t get_subblock_index() const {
         return m_sub_block;
     }
 
@@ -35,6 +33,4 @@ private:
     std::vector<std::pair<ov::element::Type, ov::PartialShape>> m_output_infos;
 };
 
-}  // namespace internal
-}  // namespace op
-}  // namespace ov
+}  // namespace ov::op::internal

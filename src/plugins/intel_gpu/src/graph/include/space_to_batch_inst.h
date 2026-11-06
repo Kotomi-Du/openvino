@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -37,11 +37,7 @@ public:
 
     bool need_reset_output_memory() const override {
         const auto desc = _impl_params->typed_desc<space_to_batch>();
-        if (!desc->shape_constant) {
-            return true;
-        }
-
-        return false;
+        return desc->shape_constant == 0;
     }
 
     typed_primitive_inst(network& network, space_to_batch_node const& desc);

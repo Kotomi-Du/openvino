@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -55,9 +55,7 @@ using namespace ov::op;
 using namespace std;
 using namespace ov::frontend::tensorflow;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
+namespace ov::frontend::tensorflow {
 
 void set_node_name(const string& node_name, const shared_ptr<Node>& node) {
     const auto& outputs = node->outputs();
@@ -85,6 +83,7 @@ PadType convert_tf_padding(const frontend::NodeContext& node, const string& tf_p
                                  "AvgPool",
                                  "AvgPool3D",
                                  "CONV_2D",
+                                 "CONV_3D",
                                  "MAX_POOL_2D",
                                  "AVERAGE_POOL_2D",
                                  "TRANSPOSE_CONV",
@@ -114,7 +113,7 @@ PadType convert_tf_padding(const frontend::NodeContext& node, const string& tf_p
                op_type == "MaxPool3D" || op_type == "MaxPoolWithArgmax" || op_type == "ExtractImagePatches" ||
                op_type == "DepthwiseConv2dNative" || op_type == "AvgPool" || op_type == "AvgPool3D" ||
                op_type == "CONV_2D" || op_type == "MAX_POOL_2D" || op_type == "AVERAGE_POOL_2D" ||
-               op_type == "DEPTHWISE_CONV_2D") {
+               op_type == "DEPTHWISE_CONV_2D" || op_type == "CONV_3D") {
         if (tf_padding == "SAME") {
             // According to the formulas for calculating auto_pad values of the
             // Conv layer in the Operation specification,
@@ -277,7 +276,7 @@ OutputVector translate_convolution_op(const frontend::NodeContext& node, size_t 
         // assumption to use regular convolution for all other cases is taken from the legacy frontend
         // this solution is sufficient for all observed models in the validation
         // in general, it has limitation and it needs to use grouped convolution when num_groups is not static
-        // 118107: remove this assumtpion when it obtains complete shape propagation in the core
+        // 118107: remove this assumption when it obtains complete shape propagation in the core
         conv = make_shared<v1::Convolution>(input, filter, strides, pads_begin, pads_end, dilations, auto_pad);
     }
 
@@ -657,6 +656,4 @@ OutputVector pre_translate_string_tensor_input(const ov::Output<ov::Node>& input
     return std::make_shared<v15::StringTensorUnpack>(input)->outputs();
 }
 
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow

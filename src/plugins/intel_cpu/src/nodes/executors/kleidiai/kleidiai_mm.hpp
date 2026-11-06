@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #pragma once
@@ -8,30 +8,18 @@
 
 #include "arm_neon.h"
 #include "cpu_memory.h"
+#include "kleidiai_common.hpp"
 #include "nodes/executors/acl/acl_fullyconnected_utils.hpp"
 #include "nodes/executors/fullyconnected_config.hpp"
 
-// F32
-#include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla.h"
-#include "kai/ukernels/matmul/matmul_clamp_f32_f32_f32p/kai_matmul_clamp_f32_f32_f32p_interface.h"
-#include "kai/ukernels/matmul/pack/kai_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon.h"
-
-// INT8
-#include "kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp/kai_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod.h"
-#include "kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi8cxp/kai_matmul_clamp_f32_qai8dxp_qsi8cxp_interface.h"
-#include "kai/ukernels/matmul/pack/kai_lhs_quant_pack_qai8dxp_f32.h"
-#include "kai/ukernels/matmul/pack/kai_rhs_pack_kxn_qsi8cxp_qsi8cx_neon.h"
-
-namespace ov {
-namespace intel_cpu {
-
+namespace ov::intel_cpu {
 class MatMulKleidiAIExecutor : public Executor {
 public:
     MatMulKleidiAIExecutor(const FCAttrs& attrs, const MemoryArgs& memory, const ExecutorContext::CPtr& context);
 
     void execute(const MemoryArgs& memory) override;
 
-    impl_desc_type implType() const override {
+    [[nodiscard]] impl_desc_type implType() const override {
         return impl_desc_type::kleidiai;
     }
 
@@ -42,47 +30,45 @@ public:
 
     void moveMemToNumaNode(int numaNodeID) override;
 
-private:
-    static constexpr kai_matmul_clamp_f32_f32_f32p_ukernel ukernel_f32{
-        kai_get_m_step_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_n_step_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_nr_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_kr_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_sr_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_lhs_offset_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_rhs_packed_offset_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_dst_offset_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_get_dst_size_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla,
-        kai_run_matmul_clamp_f32_f32_f32p8x1biasf32_6x8x4_neon_mla};
-    static constexpr kai_matmul_clamp_f32_qai8dxp_qsi8cxp_ukernel ukernel_i8{
-        kai_get_m_step_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_n_step_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_mr_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_nr_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_kr_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_sr_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_lhs_packed_offset_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_rhs_packed_offset_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_dst_offset_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_get_dst_size_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod,
-        kai_run_matmul_clamp_f32_qai8dxp1x4_qsi8cxp4x4_1x4_neon_dotprod};
+    void setKaiExecutorImplAsGatherMatmul();
+    void set_gather_idx(const std::vector<std::pair<int32_t, int32_t>>& idxMap);
 
-    const FCAttrs& m_attrs;
-    const MemoryArgs& m_memoryArgs;
+    enum kernelLookup : std::uint16_t {
+        WEIGHT_FP32 = 1,
+        WEIGHT_INT8 = 1 << 2,
+        WEIGHT_INT4 = 1 << 3,
+        ISA_DOTPROD = 1 << 4,
+        ISA_I8MM = 1 << 5,
+        QUANT_CHANNEL = 1 << 6,
+        QUANT_GROUP = 1 << 7,
+        QUANT_SYMMETRIC = 1 << 8,
+        QUANT_ASYMMETRIC = 1 << 9
+    };
+
+private:
+    static bool isGroupQuantizationEnabled(const MemoryArgs& memory);
+    //  IMPL_TYPE :: Default
+    //      [M, K] * [N, K] -> [M, N]
+    //  IMPL_TYPE :: GatherMatmul
+    //      [B, M, K] -> gather -> [M', K] * [N', K] -> scatter -> [B, N, K]
+    enum class IMPL_TYPE : uint8_t { Default, GatherMatmul };
+    static bool isAsymmetricQuantizationEnabled(const MemoryArgs& memory);
     DnnlScratchPadPtr scratchPad;
+    IMPL_TYPE KaiExecutorImpl = IMPL_TYPE::Default;
+    std::vector<std::pair<int32_t, int32_t>> gather_idx;
+    MemoryDescPtr m_tmpInputDesc = nullptr;
+    MemoryDescPtr m_tmpOutputDesc = nullptr;
+    size_t lhsPackedSize = 0;
     ACLFCAttrs aclfcAttrs;
     MemoryPtr biasMem;
     MemoryPtr rhsPackedMem;
     MemoryPtr lhsPackedMem;
-    MemoryCPtr packedWeights;
-    size_t M, N, K;
-    size_t mr, nr, kr, sr;
-    static constexpr size_t BLOCK_SIZE = 8;
-    int curNumaNode = -1;
-    bool useDynamicQuant = false;
+    size_t M = 0UL, N = 0UL, K = 0UL;
+    ExecutorContext::CPtr executorContext;
+    std::shared_ptr<kai_common::uKernelBase> _kernel;
+    size_t kernelLookupKey = 0;
 };
 
 using MatMulKleidiAIExecutorPtr = std::shared_ptr<MatMulKleidiAIExecutor>;
 
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu

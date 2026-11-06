@@ -1,10 +1,22 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
 set(TARGET_NAME openvino_npu_al)
 
-file(GLOB_RECURSE SOURCES *.cpp *.hpp *.h)
+set(SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/compat_string_parser.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/config/config.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/config/npuw.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/config/options.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/npu_private_properties.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/npuw_private_properties.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/prefix.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/profiling.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/weights_pointer_attribute.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/config/config.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/config/npuw.cpp
+)
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SOURCES})
 
 add_library(${TARGET_NAME} STATIC ${SOURCES})
@@ -15,10 +27,6 @@ target_include_directories(${TARGET_NAME}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-
-if(ENABLE_MLIR_COMPILER)
-    target_compile_definitions(${TARGET_NAME} PRIVATE ENABLE_MLIR_COMPILER)
-endif()
 
 target_link_libraries(${TARGET_NAME}
     PUBLIC
@@ -36,4 +44,4 @@ ov_install_static_lib(${TARGET_NAME} ${NPU_PLUGIN_COMPONENT})
 
 ov_developer_package_export_targets(TARGET openvino::npu_al
                                     INSTALL_INCLUDE_DIRECTORIES
-                                        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+                                        ${CMAKE_CURRENT_SOURCE_DIR}/include/)

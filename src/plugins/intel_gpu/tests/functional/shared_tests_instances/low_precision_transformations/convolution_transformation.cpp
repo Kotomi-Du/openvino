@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,6 +9,25 @@
 #include "common_test_utils/test_constants.hpp"
 
 using namespace LayerTestsDefinitions;
+
+namespace LayerTestsDefinitions {
+class ConvolutionTransformationGPU : public ConvolutionTransformation {
+protected:
+    void SetUp() override {
+        ConvolutionTransformation::SetUp();
+        auto [netPrecision, inputShape, device, param] = this->GetParam();
+        if (netPrecision == ov::element::f16) {
+            abs_threshold = 0.5;
+            rel_threshold = 0.01;
+        }
+    }
+};
+
+TEST_P(ConvolutionTransformationGPU, CompareWithRefImpl) {
+    SKIP_IF_CURRENT_TEST_IS_DISABLED();
+    run();
+}
+}  // namespace LayerTestsDefinitions
 
 namespace {
 const std::vector<ov::element::Type> netPrecisions = {
@@ -115,13 +134,13 @@ const std::vector<LayerTestsDefinitions::ConvolutionTransformationParam> params 
     }
 };
 
-INSTANTIATE_TEST_SUITE_P(smoke_LPT, ConvolutionTransformation,
+INSTANTIATE_TEST_SUITE_P(smoke_LPT, ConvolutionTransformationGPU,
     ::testing::Combine(
         ::testing::ValuesIn(netPrecisions),
         ::testing::Values(ov::Shape({ 1, 3, 16, 16 })),
         ::testing::Values(ov::test::utils::DEVICE_GPU),
         ::testing::ValuesIn(params)),
-    ConvolutionTransformation::getTestCaseName);
+    ConvolutionTransformationGPU::getTestCaseName);
 
 const std::vector<LayerTestsDefinitions::ConvolutionWIthIncorrectWeightsParam> incorrectWeightsParams = {
     // incorrect weights

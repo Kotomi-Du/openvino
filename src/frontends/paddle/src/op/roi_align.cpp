@@ -1,14 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "default_opset.hpp"
 #include "openvino/frontend/paddle/node_context.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 using AlignedMode = default_opset::ROIAlign::AlignedMode;
 using PoolingMode = default_opset::ROIAlign::PoolingMode;
 NamedOutputs roi_align(const NodeContext& node) {
@@ -25,7 +22,9 @@ NamedOutputs roi_align(const NodeContext& node) {
 
     // TODO: support multiple batches #83232
     if (data_node.get_partial_shape().rank().is_static() && data_node.get_partial_shape()[0].is_static())
-        PADDLE_OP_CHECK(node, data_node.get_partial_shape()[0] == 1, "roi_align currenty only support batch_size = 1!");
+        PADDLE_OP_CHECK(node,
+                        data_node.get_partial_shape()[0] == 1,
+                        "roi_align currently only support batch_size = 1!");
 
     const auto roi_node_shape = std::make_shared<default_opset::ShapeOf>(roi_node, element::i32);
     const auto start = default_opset::Constant::create(element::i64, {1}, {0});
@@ -53,7 +52,4 @@ NamedOutputs roi_align(const NodeContext& node) {
                                                                                          aligned_mode)},
                                               {"Out"});
 }
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

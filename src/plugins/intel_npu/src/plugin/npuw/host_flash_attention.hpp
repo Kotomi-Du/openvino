@@ -1,0 +1,552 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#pragma once
+
+#include <map>
+#include <memory>
+#include <optional>
+
+#include "openvino/core/except.hpp"
+#include "openvino/openvino.hpp"
+#include "openvino/runtime/icompiled_model.hpp"
+#include "openvino/runtime/isync_infer_request.hpp"
+#include "openvino/runtime/itensor.hpp"
+#include "openvino/runtime/so_ptr.hpp"
+
+namespace ov {
+namespace npuw {
+
+// HFA Tile Model input tensor identifiers
+// Represents the input layout for Host Flash Attention tile models
+// Input names: [past_acc, past_max, past_d, k_tile, v_tile, q, mask_tile]
+enum class HFATileInputId : uint8_t {
+    PAST_ACC = 0,   // Accumulated attention output from previous tiles
+    PAST_MAX = 1,   // Maximum values from previous tiles (for numerical stability)
+    PAST_D = 2,     // Normalization denominator from previous tiles
+    K_TILE = 3,     // Current K (key) tile slice
+    V_TILE = 4,     // Current V (value) tile slice
+    Q = 5,          // Query tensor (full, not tiled)
+    MASK_TILE = 6,  // Current attention mask tile slice
+
+    // Sentinel value for enum range
+    COUNT
+};
+
+// HFA Regular Tile Model output tensor identifiers
+// Represents the output layout for regular (non-final) tile models
+// Output names: [acc, maxx, d]
+enum class HFATileOutputId : uint8_t {
+    ACC = 0,   // Accumulated attention output
+    MAXX = 1,  // Maximum values for numerical stability
+    D = 2,     // Normalization denominator
+
+    // Sentinel value for enum range
+    COUNT
+};
+
+// Helper functions to convert enum values to string representations for logging/debugging
+inline const char* hfa_tile_input_id_to_string(HFATileInputId id) {
+    switch (id) {
+    case HFATileInputId::PAST_ACC:
+        return "PAST_ACC";
+    case HFATileInputId::PAST_MAX:
+        return "PAST_MAX";
+    case HFATileInputId::PAST_D:
+        return "PAST_D";
+    case HFATileInputId::K_TILE:
+        return "K_TILE";
+    case HFATileInputId::V_TILE:
+        return "V_TILE";
+    case HFATileInputId::Q:
+        return "Q";
+    case HFATileInputId::MASK_TILE:
+        return "MASK_TILE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+inline const char* hfa_tile_output_id_to_string(HFATileOutputId id) {
+    switch (id) {
+    case HFATileOutputId::ACC:
+        return "ACC";
+    case HFATileOutputId::MAXX:
+        return "MAXX";
+    case HFATileOutputId::D:
+        return "D";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+namespace function {
+
+// HostFlashAttention structure definition
+struct HostFlashAttention {
+    // Tiled model for flash attention execution (regular tiles)
+    std::shared_ptr<ov::Model> _tile_model;
+
+    // Final tiled model for flash attention execution (with division and transpose)
+    std::shared_ptr<ov::Model> _final_tile_model;
+
+    // Tile configuration.
+    // _past_tile_size: K/V chunk size for REGULAR tiles. Equal to _query_size, except for
+    // a SWA layer whose past capacity is shrunk below one query chunk.
+    int64_t _past_tile_size = 0;
+    // _final_tile_size: K/V length for the FINAL tile. Always equal to _query_size (HFA only
+    // supports PREFILL, which fills the KV cache in exact _past_tile_size increments).
+    int64_t _final_tile_size = 0;
+
+    // Query length used for tile_size/PREFILL-GENERATE/context_length logic.
+    // Equal to Q shape[2] when PropagateSliceUp did not touch this SDPA (in which
+    // case it may legitimately be 1 for a true single-token GENERATE model).
+    // When PropagateSliceUp DID fire, this holds the original (pre-slice) query
+    // length recovered from rt_info, not the sliced-down physical shape[2] — the
+    // PREFILL/chunk-rounding math must keep using the original chunk size even
+    // though the actual per-call Q is now physically 1.
+    std::size_t _query_size = 0;
+
+    // Context size (extracted from K concat output shape - kv_cache_size dimension)
+    // Represents the total KV cache length available for attention computation
+    std::size_t _context_size = 0;
+
+    // Sequence dimension indices for K and V tensors
+    // These indicate which dimension is the sequence/cache dimension in past_key and past_value tensors
+    // Extracted from Concat operations in the SDPA pattern
+    std::size_t _k_seq_dim = 0;
+    std::size_t _v_seq_dim = 0;
+
+    // Direct SDPA parameter indices (extracted during pattern analysis in from())
+    std::size_t _query_param_idx = 0u;
+    std::size_t _present_key_param_idx = 0u;
+    std::size_t _present_value_param_idx = 0u;
+    std::size_t _attention_mask_param_idx = 0u;
+
+    // KV cache block parameter indices (for split KV cache support)
+    // After SplitKVCacheIntoBlocks transformation, KV cache is split into multiple block parameters
+    // These vectors store all block parameter indices in order
+    std::vector<std::size_t> _past_key_block_indices;    // [block_0_idx, block_1_idx, ..., block_N_idx]
+    std::vector<std::size_t> _past_value_block_indices;  // [block_0_idx, block_1_idx, ..., block_N_idx]
+
+    // Tile model parameter index mapping
+    // Maps tile parameter IDs (PAST_ACC, K_TILE, Q, etc.) to actual input indices
+    // Tile model I/O: Inputs[past_acc, past_max, past_d, k_tile, v_tile, q, mask_tile]
+    //                 Outputs[acc, max, d] for regular tiles or [output] for final tile
+    // This is created after tile model generation in from() method
+    std::map<HFATileInputId, std::size_t> _tile_param_index_map;
+
+    // Tile model output index mapping
+    // Maps tile output IDs (UPDATED_ACC, UPDATED_MAX, UPDATED_D) to actual output indices
+    // Only applicable to regular tile model (final tile has single output at index 0)
+    // This is created after tile model generation in from() method
+    std::map<HFATileOutputId, std::size_t> _tile_output_index_map;
+
+    // Validation helpers
+    bool is_valid() const {
+        return _tile_model != nullptr && _final_tile_model != nullptr && _past_tile_size > 0 && _final_tile_size > 0;
+    }
+
+    // Factory method
+    // Creates a FlashAttention instance from an SDPA model
+    // if fused_flash_attention is true, uses the FlashAttentionTile Op optimized on compiler side
+    // if enable_mask_skipping is true, enables mask skipping optimization for regular tile
+    static std::optional<HostFlashAttention> from(const std::shared_ptr<ov::Model>& model,
+                                                  bool fused_flash_attention = true,
+                                                  bool enable_mask_skipping = false);
+};
+
+}  // namespace function
+
+namespace compiled {
+
+// Simplified host flash attention parameter info
+// Contains parameter indices from the original SDPA model
+struct HostFlashAttentionInfo {
+    std::size_t _query_size = 0u;  // query length for tile_size/PREFILL-GENERATE/context_length logic
+                                   // (original, pre-slice length if PropagateSliceUp touched this SDPA)
+    std::size_t _context_size = 0u;
+
+    // Sequence dimension indices for K and V tensors in the original SDPA model
+    // These indicate which dimension is the sequence/cache dimension in past_key and past_value tensors
+    // Copied from function::HostFlashAttention::_k_seq_dim and _v_seq_dim
+    std::size_t _k_seq_dim = 0u;
+    std::size_t _v_seq_dim = 0u;
+
+    // NOTE: SDPA parameter map is not stored to save memory.
+    // Indices are pre-cached below during compilation.
+
+    // Pre-cached SDPA parameter indices
+    struct {
+        std::size_t query = 0u;
+        // Support multiple KV cache blocks after split transformation
+        std::vector<std::size_t> past_key_blocks;    // All past_key block parameter indices
+        std::vector<std::size_t> past_value_blocks;  // All past_value block parameter indices
+        std::size_t present_key = 0u;
+        std::size_t present_value = 0u;
+        std::size_t attention_mask = 0u;
+    } _sdpa_indices;
+
+    // Pre-cached tile input indices
+    struct {
+        std::size_t q = 0u;
+        std::size_t k = 0u;
+        std::size_t v = 0u;
+        std::size_t mask = 0u;
+        std::size_t acc = 0u;
+        std::size_t max = 0u;
+        std::size_t d = 0u;
+    } _tile_input_indices;
+
+    // Pre-cached tile output indices
+    struct {
+        std::size_t acc = 0u;
+        std::size_t max = 0u;
+        std::size_t d = 0u;
+    } _tile_output_indices;
+};
+
+// Compile-time host flash attention information
+struct HostFlashAttention {
+    // Upper bound on the number of tiles a single HFA inference may be split into. Only used to
+    // reject corrupted _context_size / _query_size combinations coming from a cache blob.
+    static constexpr std::size_t kMaxTiles = 1u << 20;
+
+    // Models to compile (will be cleared after compilation)
+    std::shared_ptr<ov::Model> _tile_model_to_compile;
+    std::shared_ptr<ov::Model> _final_tile_model_to_compile;
+
+    // Compiled tile model for NPU execution (regular tiles)
+    ov::SoPtr<ov::ICompiledModel> _compiled_tile_model;
+
+    // Compiled FINAL tile model for NPU execution (with division and transpose)
+    ov::SoPtr<ov::ICompiledModel> _compiled_final_tile_model;
+
+    // Attention parameter info from original SDPA model (not from tile models)
+    HostFlashAttentionInfo _sdpa_attention_info;
+
+    // Tile configuration. See function::HostFlashAttention for the detailed semantics of these
+    // two fields.
+    int64_t _past_tile_size = 0;
+    int64_t _final_tile_size = 0;
+
+    /// Whether tensor views can be used for tile extraction (depends on compiler and driver support)
+    bool _can_use_tensor_view = false;
+
+    HostFlashAttention() = default;
+
+    // Constructor that extracts metadata
+    explicit HostFlashAttention(const function::HostFlashAttention& func_hfa);
+
+    // Set the compiled tile model and clear the model to compile
+    void set_compiled_tile_model(ov::SoPtr<ov::ICompiledModel> compiled_model) {
+        _compiled_tile_model = std::move(compiled_model);
+        _tile_model_to_compile.reset();  // Free memory after compilation
+    }
+
+    // Set the compiled FINAL tile model and clear the model to compile
+    void set_compiled_final_tile_model(ov::SoPtr<ov::ICompiledModel> compiled_model) {
+        _compiled_final_tile_model = std::move(compiled_model);
+        _final_tile_model_to_compile.reset();  // Free memory after compilation
+    }
+
+    // Past K/V split into per-block inputs by SplitKVCacheIntoBlocks.
+    bool is_block_mode() const {
+        const auto& indices = _sdpa_attention_info._sdpa_indices;
+        return indices.past_key_blocks.size() > 1 && indices.past_value_blocks.size() > 1;
+    }
+
+    bool is_valid() const;
+};
+
+}  // namespace compiled
+
+namespace runtime {
+namespace host_flash_attention {
+
+// Key for HFA tiled attention mask cache
+struct HFATileMaskKey {
+    ov::SoPtr<ov::ITensor> mask_tensor;  // Original mask tensor
+    int64_t mask_offset;                 // Offset in the mask sequence dimension
+    int64_t tile_length;                 // Length of the tile
+
+    bool operator<(const HFATileMaskKey& other) const {
+        if (mask_tensor._ptr != other.mask_tensor._ptr)
+            return mask_tensor._ptr < other.mask_tensor._ptr;
+        if (mask_offset != other.mask_offset)
+            return mask_offset < other.mask_offset;
+        return tile_length < other.tile_length;
+    }
+};
+
+/// HFA runtime context - manages cache and buffers for tiled attention.
+/// @warning NOT thread-safe. Each inference request must have its own instance.
+struct HFARuntimeContext {
+    // ============================================================================
+    // Type Aliases
+    // ============================================================================
+
+    /// Memory allocator: (type, shape, device) -> tensor
+    using AllocatorFn =
+        std::function<ov::SoPtr<ov::ITensor>(const ov::element::Type&, const ov::Shape&, const std::string&)>;
+
+    /// State tensors for accumulation: acc, max, sum
+    struct StateBuffers {
+        ov::SoPtr<ov::ITensor> acc;  // Accumulated output
+        ov::SoPtr<ov::ITensor> max;  // Max values for stability
+        ov::SoPtr<ov::ITensor> sum;  // Normalization denominator
+    };
+
+    // ============================================================================
+    // Mask Cache Optimization
+    // ============================================================================
+
+    /// Cached mask tiles: (tensor, offset, length) -> tile
+    std::map<HFATileMaskKey, ov::SoPtr<ov::ITensor>> m_mask_tile_cache;
+
+    /// Pre-allocated buffers for mask extraction on cache miss (REGULAR tiles)
+    std::vector<ov::SoPtr<ov::ITensor>> m_mask_tile_buffers;
+
+    /// Pre-allocated buffer for mask extraction on cache miss (FINAL tile only, at most one
+    /// FINAL tile call per run() so a single buffer suffices).
+    ov::SoPtr<ov::ITensor> m_final_mask_tile_buffer;
+
+    // ============================================================================
+    // State Double-Buffering Optimization
+    // ============================================================================
+
+    /// Two state buffers: [current, next] (swap after each inference)
+    std::optional<std::array<StateBuffers, 2>> m_state_buffers;
+
+    /// Current active buffer index (0 or 1)
+    size_t m_current_buffer_idx = 0;
+
+    // ============================================================================
+    // Initialization
+    // ============================================================================
+
+    /// Initialize mask cache: allocate temporary buffers for REGULAR (past) tile mask extraction,
+    /// plus one dedicated buffer for the FINAL tile (which may be a different length whenever
+    /// _past_tile_size != _final_tile_size, e.g. the SWA short-past case).
+    /// Call once during setup before inference.
+    template <typename HFADesc>
+    void initialize_mask_cache(const HFADesc& hfa_desc, const std::string& device_name, AllocatorFn allocator) {
+        m_mask_tile_buffers.clear();
+        m_final_mask_tile_buffer = {};
+
+        // _tile_input_indices.mask is built from final_tile_model only (see
+        // build_tile_param_mapping), but create_hfa_tile_model always places the first 6 params
+        // in the same fixed order and appends mask_tile (if present) as the last one — so the
+        // same index is valid for the regular tile model too, whenever it also has a mask input.
+        const size_t mask_input_idx = hfa_desc._sdpa_attention_info._tile_input_indices.mask;
+
+        // Final tile model always has a mask input (mask-skipping only applies to regular tiles).
+        const auto& final_inputs = hfa_desc._compiled_final_tile_model->inputs();
+        if (mask_input_idx < final_inputs.size()) {
+            const auto& final_mask_port = final_inputs[mask_input_idx];
+            m_final_mask_tile_buffer =
+                allocator(final_mask_port.get_element_type(), final_mask_port.get_shape(), device_name);
+        }
+
+        // Regular tile model may omit the mask input entirely when mask-skipping is enabled.
+        const auto& regular_inputs = hfa_desc._compiled_tile_model->inputs();
+        if (mask_input_idx >= regular_inputs.size()) {
+            return;
+        }
+
+        const size_t past_tile_size = static_cast<size_t>(hfa_desc._past_tile_size);
+        if (past_tile_size == 0) {
+            return;
+        }
+
+        const auto& mask_port = regular_inputs[mask_input_idx];
+        const auto mask_shape = mask_port.get_shape();
+        const auto mask_dtype = mask_port.get_element_type();
+
+        // Upper bound on the number of concurrently-cached regular-tile mask tiles. Doesn't need
+        // to be exact — context_size includes the final tile's present KV, which isn't itself
+        // chunked into past_tile_size units, so the division may not be exact.
+        const size_t context_size = hfa_desc._sdpa_attention_info._context_size;
+        const size_t max_num_tiles = context_size / past_tile_size + (context_size % past_tile_size != 0);
+
+        m_mask_tile_buffers.reserve(max_num_tiles);
+        for (size_t i = 0; i < max_num_tiles; ++i) {
+            auto mask_tile = allocator(mask_dtype, mask_shape, device_name);
+            m_mask_tile_buffers.push_back(mask_tile);
+        }
+    }
+
+    /// Reset all resources (mask cache + state buffers)
+    void reset();
+
+    // ============================================================================
+    // Mask Cache Queries
+    // ============================================================================
+
+    /// Find cached mask tile, returns nullptr if not found
+    ov::SoPtr<ov::ITensor> find_cached_mask_tile(const ov::SoPtr<ov::ITensor>& mask_tensor,
+                                                 int64_t mask_offset,
+                                                 int64_t tile_length) const;
+
+    /// Get temporary buffer for mask extraction (throws if out of bounds)
+    ov::SoPtr<ov::ITensor> get_mask_tile_buffer(size_t index) const;
+
+    /// Get the dedicated FINAL tile mask extraction buffer (throws if not initialized)
+    ov::SoPtr<ov::ITensor> get_final_mask_tile_buffer() const {
+        if (!m_final_mask_tile_buffer) {
+            throw std::runtime_error("HFA: final tile mask buffer not initialized");
+        }
+        return m_final_mask_tile_buffer;
+    }
+
+    /// Number of temporary mask tile buffers
+    size_t num_mask_tile_buffers() const {
+        return m_mask_tile_buffers.size();
+    }
+
+    // ============================================================================
+    // Mask Cache Modifications
+    // ============================================================================
+
+    /// Cache a mask tile (overwrites if key exists)
+    void cache_mask_tile(const ov::SoPtr<ov::ITensor>& mask_tensor,
+                         int64_t mask_offset,
+                         int64_t tile_length,
+                         const ov::SoPtr<ov::ITensor>& cached_tile);
+
+    /// Clear mask cache (keeps buffers allocated)
+    void clear_mask_cache();
+
+    // ============================================================================
+    // State Buffer Initialization
+    // ============================================================================
+
+    /// Initialize double-buffering: buffer[0] = provided, buffer[1] = allocated
+    template <typename HFADesc>
+    void initialize_state_buffers(const StateBuffers& initial_buffers,
+                                  const HFADesc& hfa_desc,
+                                  const std::string& device_name,
+                                  AllocatorFn allocator) {
+        m_state_buffers.emplace();
+        auto& buffers = *m_state_buffers;
+        m_current_buffer_idx = 0;
+
+        // Buffer 0: reuse provided tensors
+        buffers[0] = initial_buffers;
+
+        // Buffer 1: allocate independent tensors
+        const auto dtype = initial_buffers.acc->get_element_type();
+        buffers[1].acc = allocator(dtype, initial_buffers.acc->get_shape(), device_name);
+        buffers[1].max = allocator(dtype, initial_buffers.max->get_shape(), device_name);
+        buffers[1].sum = allocator(dtype, initial_buffers.sum->get_shape(), device_name);
+    }
+
+    // ============================================================================
+    // State Buffer Queries
+    // ============================================================================
+
+    /// Get current state buffers (throws if not initialized)
+    const StateBuffers& get_current_state_buffers() const {
+        if (!m_state_buffers.has_value()) {
+            throw std::runtime_error("HFA: State buffers not initialized");
+        }
+        return (*m_state_buffers)[m_current_buffer_idx];
+    }
+
+    /// Get mutable current state buffers
+    StateBuffers& get_current_state_buffers() {
+        if (!m_state_buffers.has_value()) {
+            throw std::runtime_error("HFA: State buffers not initialized");
+        }
+        return (*m_state_buffers)[m_current_buffer_idx];
+    }
+
+    // ============================================================================
+    // State Buffer Modifications
+    // ============================================================================
+
+    /// Initialize state tensors: acc=0, max=-inf, sum=0 (static utility)
+    static void initialize_state_tensors(ov::SoPtr<ov::ITensor>& acc,
+                                         ov::SoPtr<ov::ITensor>& max,
+                                         ov::SoPtr<ov::ITensor>& sum);
+
+    /// Prepare next buffer asynchronously (call during NPU execution)
+    void prepare_next_state_buffers();
+
+    /// Switch to next buffer after inference
+    void switch_buffers();
+
+    /// Check if state buffers initialized
+    bool has_state_buffers() const {
+        return m_state_buffers.has_value();
+    }
+};
+
+// A base class to decide host flash attention execution
+class Selector {
+public:
+    enum class Case { PREFILL, GENERATE, UNKNOWN };
+
+    using Ptr = std::shared_ptr<Selector>;
+    virtual ~Selector() = default;
+    virtual void prepare(int64_t past_len) = 0;
+    virtual int64_t context_length() const = 0;
+
+    Case this_case() const {
+        return _case;
+    }
+
+protected:
+    Case _case = Case::UNKNOWN;
+};
+
+// Selector that processes all tiles unconditionally (no dynamic range optimization)
+class All final : public Selector {
+public:
+    void prepare(int64_t past_len) override {}
+
+    int64_t context_length() const override {
+        OPENVINO_NOT_IMPLEMENTED;
+    }
+};
+
+// Define execution selection based on position ids
+class PositionIDs final : public Selector {
+    std::size_t _position_ids_idx = 0u;
+    int64_t _current_length = 0;
+    int64_t _past_length = 0;
+    std::size_t _original_query_length = 0u;  // original query length before PropagateSliceUp
+
+    std::reference_wrapper<const ov::ISyncInferRequest> _rq;
+
+    PositionIDs(std::size_t param_idx, std::size_t original_query_length, const ov::ISyncInferRequest& rq);
+    void prepare(int64_t past_len) override;
+    int64_t context_length() const override;
+
+public:
+    static Selector::Ptr find(std::size_t original_query_length, const ov::ISyncInferRequest& rq);
+};
+
+// Define execution selection based on the history size alone. For a plain compiled model with no
+// "position_ids" input, driven by a host that reports the number of tokens already in the KV cache
+// through the npuw_history_size variable state (e.g. LiteRT). Prefill only, like HFA itself.
+class HistorySize final : public Selector {
+    int64_t _past_length = 0;
+    std::size_t _original_query_length = 0u;  // original query length before PropagateSliceUp
+
+public:
+    explicit HistorySize(std::size_t original_query_length);
+    void prepare(int64_t past_len) override;
+    int64_t context_length() const override;
+
+    // Returns nullptr unless rq exposes the npuw_history_size state and the host has set it, i.e.
+    // unless the host is known to report the history. Meant to be called once, on the first infer().
+    static Selector::Ptr find(std::size_t original_query_length, const ov::ISyncInferRequest& rq);
+};
+
+}  // namespace host_flash_attention
+}  // namespace runtime
+
+}  // namespace npuw
+}  // namespace ov

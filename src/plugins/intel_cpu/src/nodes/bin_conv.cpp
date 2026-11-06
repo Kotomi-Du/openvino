@@ -1,10 +1,8 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "bin_conv.h"
-
-#include <cpu/x64/xbyak/xbyak.h>
 
 #include <cassert>
 #include <common/c_types_map.hpp>
@@ -19,10 +17,6 @@
 #include <string>
 #include <vector>
 
-#include "cpu/x64/cpu_isa_traits.hpp"
-#include "cpu/x64/injectors/jit_uni_depthwise_injector.hpp"
-#include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
-#include "cpu/x64/jit_generator.hpp"
 #include "cpu_types.h"
 #include "dnnl_extension_utils.h"
 #include "eltwise.h"
@@ -38,13 +32,23 @@
 #include "openvino/core/enum_names.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node.hpp"
-#include "openvino/core/parallel.hpp"
 #include "openvino/core/type.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/op/binary_convolution.hpp"
+#include "openvino/runtime/system_conf.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/general_utils.h"
 #include "utils/ngraph_utils.hpp"
+
+#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
+#    include <xbyak/xbyak.h>
+
+#    include "cpu/x64/cpu_isa_traits.hpp"
+#    include "cpu/x64/injectors/jit_uni_depthwise_injector.hpp"
+#    include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
+#    include "cpu/x64/jit_generator.hpp"
+#    include "utils/cpu_utils.hpp"
+#endif
 
 // WA for xbyak.h
 #ifdef _WIN32
@@ -59,27 +63,29 @@
 using namespace dnnl;
 using namespace dnnl::impl;
 using namespace dnnl::impl::cpu;
-using namespace dnnl::impl::cpu::x64;
 using namespace dnnl::impl::utils;
+#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
+using namespace dnnl::impl::cpu::x64;
 using namespace Xbyak;
+#endif
 
 namespace ov::intel_cpu::node {
 #if defined(OPENVINO_ARCH_X86_64)
 #    define GET_OFF(field) offsetof(jit_bin_conv_call_args, field)
 
 template <cpu_isa_t isa>
-struct jit_uni_bin_conv_kernel_f32 : public jit_uni_bin_conv_kernel, public jit_generator {
+struct jit_uni_bin_conv_kernel_f32 : public jit_uni_bin_conv_kernel, public jit_generator_t {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_bin_conv_kernel_f32)
 
     explicit jit_uni_bin_conv_kernel_f32(jit_bin_conv_params jcp,
                                          jit_dw_conv_params jcp_dw_conv,
                                          const dnnl_primitive_attr& attr)
         : jit_uni_bin_conv_kernel(jcp, jcp_dw_conv, attr),
-          jit_generator(jit_name()) {}
+          jit_generator_t(jit_name()) {}
 
     void create_ker() override {
-        jit_generator::create_kernel();
-        ker_ = (decltype(ker_))jit_ker();
+        jit_generator_t::create_kernel();
+        ker_ = jit_kernel_cast<decltype(ker_)>(jit_ker());
     }
 
     void generate() override {
@@ -88,12 +94,12 @@ struct jit_uni_bin_conv_kernel_f32 : public jit_uni_bin_conv_kernel, public jit_
         for (int i = 0; i < end_idx; i++) {
             auto& post_op = p.entry_[i];
             if (post_op.is_eltwise()) {
-                eltwise_injectors.push_back(std::make_shared<jit_uni_eltwise_injector<isa>>(this,
-                                                                                            post_op.eltwise,
-                                                                                            data_type::f32,
-                                                                                            true,
-                                                                                            eltwise_reserved,
-                                                                                            mask_post_op_reserved));
+                eltwise_injectors.push_back(std::make_shared<jit_uni_eltwise_injector_t<isa>>(this,
+                                                                                              post_op.eltwise,
+                                                                                              data_type::f32,
+                                                                                              true,
+                                                                                              eltwise_reserved,
+                                                                                              mask_post_op_reserved));
             } else if (post_op.is_depthwise()) {
                 depthwise_injectors.push_back(
                     std::make_shared<jit_uni_depthwise_injector_f32<isa>>(this, post_op, mask_post_op_reserved));
@@ -120,7 +126,7 @@ struct jit_uni_bin_conv_kernel_f32 : public jit_uni_bin_conv_kernel, public jit_
         cmp(reg_oc_work, jcp_.nb_oc_blocking * jcp_.oc_block);
         jne(main_loop_label, T_NEAR);
 
-        solve_common(jcp_.nb_oc_blocking, jcp_.oc_block);
+        solve_common(static_cast<int32_t>(jcp_.nb_oc_blocking), static_cast<int32_t>(jcp_.oc_block));
 
         sub(reg_oc_work, jcp_.nb_oc_blocking * jcp_.oc_block);
 
@@ -133,7 +139,7 @@ struct jit_uni_bin_conv_kernel_f32 : public jit_uni_bin_conv_kernel, public jit_
             cmp(reg_oc_work, jcp_.oc_block);
             jl(tail_label, T_NEAR);
 
-            solve_common(1, jcp_.oc_block);
+            solve_common(1, static_cast<int32_t>(jcp_.oc_block));
 
             sub(reg_oc_work, jcp_.oc_block);
             add(reg_kernel_base,
@@ -157,7 +163,7 @@ struct jit_uni_bin_conv_kernel_f32 : public jit_uni_bin_conv_kernel, public jit_
         L(tail_label);
 
         if (jcp_.oc % jcp_.oc_block != 0) {
-            solve_common(1, jcp_.oc % jcp_.oc_block);
+            solve_common(1, static_cast<int32_t>(jcp_.oc % jcp_.oc_block));
         }
 
         L(exit_label);
@@ -239,11 +245,11 @@ private:
     Xbyak::Opmask mask_post_op_reserved = Xbyak::Opmask(1);
     Xbyak::Reg64 eltwise_reserved = rax;
 
-    size_t vlen = cpu_isa_traits<isa>::vlen;
+    size_t vlen = cpu_isa_traits_t<isa>::vlen;
 
     Xbyak::Label l_table;
 
-    nstl::vector<std::shared_ptr<jit_uni_eltwise_injector<isa>>> eltwise_injectors;
+    nstl::vector<std::shared_ptr<jit_uni_eltwise_injector_t<isa>>> eltwise_injectors;
     nstl::vector<std::shared_ptr<jit_uni_depthwise_injector_f32<isa>>> depthwise_injectors;
 
     void cvt2ps(dnnl::memory::data_type type_in, Vmm vmm_in, const Xbyak::Operand& op, bool scalar_load) {
@@ -364,8 +370,9 @@ private:
         int nbits = 8;
 
         for (int ki = 0; ki < kw; ki++) {
-            int jj_start = nstl::max(0, div_up(pad_l - ki * dilate_w, stride_w));
-            int jj_end = ur_w - nstl::max(0, div_up(ki * dilate_w + pad_r - (kw - 1) * dilate_w, stride_w));
+            int jj_start = nstl::max(0, static_cast<int>(div_up(pad_l - ki * dilate_w, stride_w)));
+            int jj_end =
+                ur_w - nstl::max(0, static_cast<int>(div_up(ki * dilate_w + pad_r - (kw - 1) * dilate_w, stride_w)));
 
             int _start = (!jcp_.exclude_pad) ? 0 : jj_start;
             int _end = (!jcp_.exclude_pad) ? ur_w : jj_end;
@@ -449,7 +456,7 @@ private:
         int kw = jcp_.kw;
 
         int nbits = 8;
-        int inp_mult = div_up(jcp_.ic_block, nbits);
+        auto inp_mult = static_cast<int>(div_up(jcp_.ic_block, nbits));
         int out_mult = jcp_.oc_block;
 
         Label icb_main_loop;
@@ -483,7 +490,7 @@ private:
         int dilate_h = jcp_.dilate_h + 1;
 
         int nbits = 8;
-        const int inp_mult = dilate_h * div_up(jcp_.ic, nbits);
+        const int inp_mult = dilate_h * static_cast<int>(div_up(jcp_.ic, nbits));
 
         Label t_overflow_label;
         Label no_t_overflow_label;
@@ -556,7 +563,7 @@ private:
 
     void width_blk_step(int ur_w, int pad_l, int pad_r, int oc_blocks, int oc_step) {
         int nbits = 8;
-        int repeats = isa == x64::sse41 && oc_step > (jcp_.oc_block / 2) ? 2 : 1;
+        int repeats = isa == x64::sse41 && oc_step > (static_cast<int>(jcp_.oc_block / 2)) ? 2 : 1;
 
         for (int r = 0; r < repeats; r++) {
             for (int ii = 0; ii < oc_blocks; ii++) {
@@ -570,7 +577,7 @@ private:
 
         kh_loop(ur_w, pad_l, pad_r, oc_blocks, oc_step);
 
-        if (isa == x64::avx512_core && oc_step != jcp_.oc_block) {
+        if (isa == x64::avx512_core && oc_step != static_cast<int>(jcp_.oc_block)) {
             int mask = (1 << oc_step) - 1;
             mov(reg_tmp_32, mask);
             kmovw(ktail_mask, reg_tmp_32);
@@ -579,25 +586,27 @@ private:
         const auto& p = attr_.post_ops_;
         for (int r = 0; r < repeats; r++) {
             int tail_size = isa == x64::sse41 ? nstl::min(jcp_.oc_block / 2, oc_step - r * jcp_.oc_block / 2) : oc_step;
-            bool is_scalar_store = isa == x64::sse41 ? tail_size < jcp_.oc_block / 2 : tail_size < jcp_.oc_block;
+            bool is_scalar_store = isa == x64::sse41 ? static_cast<size_t>(tail_size) < jcp_.oc_block / 2
+                                                     : static_cast<size_t>(tail_size) < jcp_.oc_block;
 
             std::vector<int> kw_padding(ur_w);
 
             if (jcp_.exclude_pad) {
                 mov(reg_tmp_32, jcp_.ic);
-                imul(reg_tmp_32, ptr[param1 + GET_OFF(kh_padding)]);
+                imul(reg_tmp_64, ptr[param1 + GET_OFF(kh_padding)]);
 
                 for (int jj = 0; jj < ur_w; jj++) {
                     kw_padding[jj] = 0;
                 }
 
-                for (int ki = 0; ki < jcp_.kw; ki++) {
-                    int jj_start = nstl::max(0, div_up(pad_l - ki * (jcp_.dilate_w + 1), jcp_.stride_w));
-                    int jj_end =
-                        ur_w - nstl::max(0,
-                                         div_up(ki * (jcp_.dilate_w + 1) + pad_r - (jcp_.kw - 1) * (jcp_.dilate_w + 1),
-                                                jcp_.stride_w));
-                    for (int jj = jj_start; jj < jj_end; jj++) {
+                for (size_t ki = 0; ki < jcp_.kw; ki++) {
+                    int jj_start =
+                        nstl::max(0, static_cast<int>(div_up(pad_l - ki * (jcp_.dilate_w + 1), jcp_.stride_w)));
+                    int jj_end = ur_w - nstl::max(0,
+                                                  static_cast<int>(div_up(ki * (jcp_.dilate_w + 1) + pad_r -
+                                                                              (jcp_.kw - 1) * (jcp_.dilate_w + 1),
+                                                                          jcp_.stride_w)));
+                    for (auto jj = jj_start; jj < jj_end; jj++) {
                         kw_padding[jj]++;
                     }
                 }
@@ -609,7 +618,7 @@ private:
             for (int jj = 0; jj < ur_w; jj++) {
                 if (jcp_.exclude_pad) {
                     mov(reg_shift, kw_padding[jj]);
-                    imul(reg_shift, reg_tmp_32);
+                    imul(reg_shift, reg_tmp_64);
                     uni_vmovq(Xmm(vmm_shift.getIdx()), reg_shift);
                     uni_vbroadcastss(vmm_shift, Xmm(vmm_shift.getIdx()));
                     uni_vcvtdq2ps(vmm_shift, vmm_shift);
@@ -678,7 +687,7 @@ private:
                                         uni_vpxor(vmm_sum, vmm_sum, vmm_sum);
                                         cvt2ps(jcp_.dst_dt, vmm_sum, ptr[reg_output + o_off * jcp_.typesize_out], true);
 
-                                        if (oc < jcp_.oc_block / 2) {
+                                        if (static_cast<size_t>(oc) < jcp_.oc_block / 2) {
                                             uni_vpslldq(vmm_sum, vmm_sum, oc * sizeof(float));
                                         } else {
                                             auto ymm_prev_dst = Ymm(vmm_sum.getIdx());
@@ -770,7 +779,8 @@ private:
             for (int r = 0; r < repeats; r++) {
                 int tail_size =
                     isa == x64::sse41 ? nstl::min(jcp_.oc_block / 2, oc_step - r * jcp_.oc_block / 2) : oc_step;
-                bool is_scalar_store = isa == x64::sse41 ? tail_size < jcp_.oc_block / 2 : tail_size < jcp_.oc_block;
+                bool is_scalar_store = isa == x64::sse41 ? static_cast<size_t>(tail_size) < jcp_.oc_block / 2
+                                                         : static_cast<size_t>(tail_size) < jcp_.oc_block;
                 if (is_scalar_store) {
                     for (int jj = 0; jj < ur_w; jj++) {
                         auto vmm_dst = Vmm(1 + r * jcp_.ur_w * jcp_.nb_oc_blocking + jj);
@@ -837,19 +847,19 @@ private:
         int str_w = jcp_.stride_w;
 
         int nbits = 8;
-        const int inp_mult = div_up(jcp_.ic, nbits);
+        const auto inp_mult = static_cast<int32_t>(div_up(jcp_.ic, nbits));
         int out_mult = [&]() {
             if (jcp_.with_dw_conv) {
-                return jcp_.oc_block;
+                return static_cast<int>(jcp_.oc_block);
             }
             if (jcp_.with_binarization) {
-                return div_up(jcp_.oc, nbits);
+                return static_cast<int>(div_up(jcp_.oc, nbits));
             }
-            return jcp_.oc;
+            return static_cast<int>(jcp_.oc);
         }();
 
         int l_pad = jcp_.l_pad;
-        int r_pad = nstl::max(0, (jcp_.ow - 1) * str_w + (kw - 1) * dilate_w - (iw + l_pad - 1));
+        int r_pad = nstl::max(0, static_cast<int>((jcp_.ow - 1) * str_w + (kw - 1) * dilate_w - (iw + l_pad - 1)));
         int r_pad1 = (ur_w * n_oi - 1) * str_w + (kw - 1) * dilate_w - (iw + l_pad - 1);
         if (r_pad1 > 0) {
             n_oi--;
@@ -939,7 +949,7 @@ private:
 
         // offset = 4
         for (size_t d = 0; d < simd_w; ++d) {
-            dd(x64::float2int(jcp_.ic * jcp_.kw * jcp_.kh));
+            dd(x64::float2int(static_cast<float>(jcp_.ic * jcp_.kw * jcp_.kh)));
         }
 
         // offset = 5
@@ -1002,11 +1012,11 @@ BinaryConvolution::BinaryConvolution(const std::shared_ptr<ov::Node>& op, const 
         paddingL = binConv->get_pads_begin();
         paddingR = binConv->get_pads_end();
 
-        if (mayiuse(x64::avx512_core)) {
+        if (ov::with_cpu_x86_avx512_core()) {
             implType = impl_desc_type::jit_avx512;
-        } else if (mayiuse(x64::avx2)) {
+        } else if (ov::with_cpu_x86_avx2()) {
             implType = impl_desc_type::jit_avx2;
-        } else if (mayiuse(x64::sse41)) {
+        } else if (ov::with_cpu_x86_sse42()) {
             implType = impl_desc_type::jit_sse42;
         } else {
             implType = impl_desc_type::ref;
@@ -1028,25 +1038,21 @@ void BinaryConvolution::getSupportedDescriptors() {
         }
     }
 
-    if (getParentEdges().size() != expectedInputEdgesNum) {
-        THROW_CPU_NODE_ERR("has incorrect number of input edges");
-    }
+    CPU_NODE_ASSERT(getParentEdges().size() == expectedInputEdgesNum, "has incorrect number of input edges");
 
-    if (getChildEdges().empty()) {
-        THROW_CPU_NODE_ERR("has incorrect number of output edges");
-    }
+    CPU_NODE_ASSERT(!getChildEdges().empty(), "has incorrect number of output edges");
 
-    if (getInputShapeAtPort(0).getRank() != 4) {
-        THROW_CPU_NODE_ERR("doesn't support 0th input with rank: ", getInputShapeAtPort(0).getRank());
-    }
+    CPU_NODE_ASSERT(getInputShapeAtPort(0).getRank() == 4,
+                    "doesn't support 0th input with rank: ",
+                    getInputShapeAtPort(0).getRank());
 
-    if (getInputShapeAtPort(1).getRank() != 4) {
-        THROW_CPU_NODE_ERR("doesn't support 1st input with rank: ", getInputShapeAtPort(1).getRank());
-    }
+    CPU_NODE_ASSERT(getInputShapeAtPort(1).getRank() == 4,
+                    "doesn't support 1st input with rank: ",
+                    getInputShapeAtPort(1).getRank());
 
-    if (getOutputShapeAtPort(0).getRank() != 4) {
-        THROW_CPU_NODE_ERR("doesn't support output with rank: ", getOutputShapeAtPort(0).getRank());
-    }
+    CPU_NODE_ASSERT(getOutputShapeAtPort(0).getRank() == 4,
+                    "doesn't support output with rank: ",
+                    getOutputShapeAtPort(0).getRank());
 }
 
 void BinaryConvolution::initSupportedPrimitiveDescriptors() {
@@ -1114,9 +1120,7 @@ void BinaryConvolution::initSupportedPrimitiveDescriptors() {
 
 void BinaryConvolution::createPrimitive() {
     auto* selectedPrimitiveDescriptor = getSelectedPrimitiveDescriptor();
-    if (!selectedPrimitiveDescriptor) {
-        THROW_CPU_NODE_ERR("doesn't have primitive descriptors.");
-    }
+    CPU_NODE_ASSERT(selectedPrimitiveDescriptor, "doesn't have primitive descriptors.");
 
     auto srcDims = getParentEdgeAt(0)->getMemory().getStaticDims();
     auto weiDims = getParentEdgeAt(1)->getMemory().getStaticDims();
@@ -1136,8 +1140,8 @@ void BinaryConvolution::createPrimitive() {
     jcp.ow = dstDims[3];
 
     bool with_groups = group > 1;
-    jcp.kh = weiDims[static_cast<int>(with_groups) + 2];
-    jcp.kw = weiDims[static_cast<int>(with_groups) + 3];
+    jcp.kh = weiDims[static_cast<int32_t>(with_groups) + 2];
+    jcp.kw = weiDims[static_cast<int32_t>(with_groups) + 3];
 
     jcp.t_pad = paddingL[0];
     jcp.b_pad = paddingR[0];
@@ -1175,11 +1179,11 @@ void BinaryConvolution::createPrimitive() {
     jcp.nb_oc = div_up(jcp.oc, jcp.oc_block);
 
     if (implType == impl_desc_type::jit_sse42) {
-        jcp.nb_oc_blocking = nstl::min(2, jcp.nb_oc);
+        jcp.nb_oc_blocking = nstl::min(static_cast<decltype(jcp.nb_oc)>(2), jcp.nb_oc);
     } else if (implType == impl_desc_type::jit_avx2) {
-        jcp.nb_oc_blocking = nstl::min(4, jcp.nb_oc);
+        jcp.nb_oc_blocking = nstl::min(static_cast<decltype(jcp.nb_oc)>(4), jcp.nb_oc);
     } else {
-        jcp.nb_oc_blocking = nstl::min(6, jcp.nb_oc);
+        jcp.nb_oc_blocking = nstl::min(static_cast<decltype(jcp.nb_oc)>(6), jcp.nb_oc);
     }
 
     auto srcPrecision = getParentEdgeAt(0)->getMemory().getDesc().getPrecision();
@@ -1189,16 +1193,20 @@ void BinaryConvolution::createPrimitive() {
     jcp.typesize_in = srcPrecision == ov::element::u1 ? 1 : srcPrecision.size();
     jcp.typesize_out = dstPrecision == ov::element::u1 ? 1 : dstPrecision.size();
 
-    int r_pad_no_tail = nstl::max(
-        0,
-        (jcp.ow - jcp.ur_w_tail - 1) * jcp.stride_w + (jcp.kw - 1) * (jcp.dilate_w + 1) - (jcp.iw + jcp.l_pad - 1));
+    const int r_pad_no_tail_expr =
+        (static_cast<int>(jcp.ow) - static_cast<int>(jcp.ur_w_tail) - 1) * static_cast<int>(jcp.stride_w) +
+        (static_cast<int>(jcp.kw) - 1) * (static_cast<int>(jcp.dilate_w) + 1) -
+        (static_cast<int>(jcp.iw) + static_cast<int>(jcp.l_pad) - 1);
+    int r_pad_no_tail = nstl::max(0, r_pad_no_tail_expr);
+    const auto ur_w = static_cast<int>(jcp.ur_w);
+    const auto t_pad = static_cast<int>(jcp.t_pad);
+    const auto l_pad = static_cast<int>(jcp.l_pad);
+    const auto stride_w = static_cast<int>(jcp.stride_w);
+    const auto stride_h = static_cast<int>(jcp.stride_h);
 
-    bool args_ok =
-        (jcp.l_pad <= jcp.ur_w) && (r_pad_no_tail <= jcp.ur_w) &&
-        IMPLICATION(jcp.kw > 7, (jcp.t_pad == 0 && jcp.l_pad == 0) || (jcp.stride_w == 1 && jcp.stride_h == 1));
-    if (!args_ok) {
-        THROW_CPU_NODE_ERR("has unsupported parameters");
-    }
+    bool args_ok = (l_pad <= ur_w) && (r_pad_no_tail <= ur_w) &&
+                   IMPLICATION(jcp.kw > 7, (all_of(0, t_pad, l_pad)) || (all_of(1, stride_w, stride_h)));
+    CPU_NODE_ASSERT(args_ok, "has unsupported parameters");
 #if defined(OPENVINO_ARCH_X86_64)
     jit_dw_conv_params jcp_dw_conv = {};
     if (implType == impl_desc_type::jit_avx512) {
@@ -1206,7 +1214,7 @@ void BinaryConvolution::createPrimitive() {
             std::make_shared<jit_uni_bin_conv_kernel_f32<x64::avx512_core>>(jcp, jcp_dw_conv, *attr.get());
     } else if (implType == impl_desc_type::jit_avx2) {
         bin_conv_kernel = std::make_shared<jit_uni_bin_conv_kernel_f32<x64::avx2>>(jcp, jcp_dw_conv, *attr.get());
-    } else if (implType == impl_desc_type::sse42) {
+    } else if (implType == impl_desc_type::jit_sse42) {
         bin_conv_kernel = std::make_shared<jit_uni_bin_conv_kernel_f32<x64::sse41>>(jcp, jcp_dw_conv, *attr.get());
     }
     if (bin_conv_kernel) {
@@ -1274,31 +1282,41 @@ void BinaryConvolution::executeOptimized(const uint8_t* src,
                                          const std::vector<size_t>& s_str,
                                          const std::vector<size_t>& w_str,
                                          const std::vector<size_t>& d_str) {
+    const auto& cpu_parallel = context->getCpuParallel();
     auto* dst_f32 = reinterpret_cast<float*>(dst);
 
     const int MB = jcp.mb;
 
-    int ocb_work = div_up(jcp.nb_oc, jcp.nb_oc_blocking);
+    auto ocb_work = div_up(jcp.nb_oc, jcp.nb_oc_blocking);
     int nbits = 8;
 
-    parallel_for4d(MB, jcp.ngroups, ocb_work, jcp.oh, [&](int n, int g, int ocbb, int oh) {
-        int ocb = ocbb * jcp.nb_oc_blocking;
-        int ocb_num = jcp.nb_oc_blocking;
+    cpu_parallel->parallel_for4d(MB, jcp.ngroups, ocb_work, jcp.oh, [&](size_t n, size_t g, size_t ocbb, size_t oh) {
+        size_t ocb = ocbb * jcp.nb_oc_blocking;
+        size_t ocb_num = jcp.nb_oc_blocking;
 
         auto par_conv = jit_bin_conv_call_args();
 
-        const int ij = oh * jcp.stride_h;
-        const int i_t_overflow = nstl::min(jcp.kh, div_up(nstl::max(0, jcp.t_pad - ij), (jcp.dilate_h + 1)));
-        const int i_b_overflow =
-            nstl::min(jcp.kh,
-                      div_up(nstl::max(jcp.ih, ij + (jcp.kh - 1) * (jcp.dilate_h + 1) - jcp.t_pad + 1) - jcp.ih,
-                             (jcp.dilate_h + 1)));
+        // Padding-overflow math must be signed: with size_t, nstl::max(0, ...) can no longer clamp
+        // the negative t_pad - ij / ij - t_pad cases and underflows, corrupting the convolution.
+        const auto ij = static_cast<int>(oh * jcp.stride_h);
+        const auto i_t_overflow =
+            nstl::min(static_cast<int>(jcp.kh),
+                      div_up(nstl::max(0, static_cast<int>(jcp.t_pad) - ij), static_cast<int>(jcp.dilate_h) + 1));
+        const auto i_b_overflow =
+            nstl::min(static_cast<int>(jcp.kh),
+                      div_up(nstl::max(static_cast<int>(jcp.ih),
+                                       ij + (static_cast<int>(jcp.kh) - 1) * (static_cast<int>(jcp.dilate_h) + 1) -
+                                           static_cast<int>(jcp.t_pad) + 1) -
+                                 static_cast<int>(jcp.ih),
+                             static_cast<int>(jcp.dilate_h) + 1));
 
         const size_t _oc = g * jcp.nb_oc + ocb;
         const size_t _ic = g * jcp.nb_ic;
 
-        const int ih = nstl::max(ij - jcp.t_pad + i_t_overflow * (jcp.dilate_h + 1), 0);
-        par_conv.src = &src[(n * s_str[0] + _ic * jcp.ic_block * s_str[1] + ih * s_str[2]) / nbits];
+        const auto ih =
+            nstl::max(ij - static_cast<int>(jcp.t_pad) + i_t_overflow * (static_cast<int>(jcp.dilate_h) + 1), 0);
+        par_conv.src =
+            &src[(n * s_str[0] + _ic * jcp.ic_block * s_str[1] + static_cast<size_t>(ih) * s_str[2]) / nbits];
 
         if (jcp.with_binarization) {
             par_conv.dst = &dst[(n * d_str[0] + _oc * jcp.oc_block * d_str[1] + oh * d_str[2]) / nbits];
@@ -1306,16 +1324,16 @@ void BinaryConvolution::executeOptimized(const uint8_t* src,
             par_conv.dst = &dst_f32[n * d_str[0] + _oc * jcp.oc_block * d_str[1] + oh * d_str[2]];
         }
 
-        const int wh = jcp.exclude_pad ? i_t_overflow : 0;
-        par_conv.filt = &weights[(ocb * w_str[0] + wh * w_str[2]) / nbits];
+        const auto wh = jcp.exclude_pad ? i_t_overflow : 0;
+        par_conv.filt = &weights[(ocb * w_str[0] + static_cast<size_t>(wh) * w_str[2]) / nbits];
 
         par_conv.oc_work = nstl::min((ocb + ocb_num) * jcp.oc_block, jcp.oc) - ocb * jcp.oc_block;
 
         par_conv.kw_padding = 0;
-        const int kh_padding = jcp.kh - i_t_overflow - i_b_overflow;
-        par_conv.kh_padding = nstl::max(0, kh_padding);
-        par_conv.t_overflow = i_t_overflow;
-        par_conv.b_overflow = i_b_overflow;
+        const int kh_padding = static_cast<int>(jcp.kh) - i_t_overflow - i_b_overflow;
+        par_conv.kh_padding = static_cast<size_t>(nstl::max(0, kh_padding));
+        par_conv.t_overflow = static_cast<size_t>(i_t_overflow);
+        par_conv.b_overflow = static_cast<size_t>(i_b_overflow);
 
         par_conv.oc_off = _oc * jcp.oc_block * sizeof(float);
         par_conv.post_op_data = postOpsDataPtrs.data();
@@ -1330,31 +1348,32 @@ void BinaryConvolution::executeReference(const uint8_t* src,
                                          const std::vector<size_t>& s_str,
                                          const std::vector<size_t>& w_str,
                                          const std::vector<size_t>& d_str) const {
+    const auto& cpu_parallel = context->getCpuParallel();
     auto* dst_fp = reinterpret_cast<float*>(dst);
 
     const bool with_groups = jcp.ngroups > 1;
 
-    const int G = jcp.ngroups;
-    const int MB = jcp.mb;
-    const int OH = jcp.oh;
-    const int OW = jcp.ow;
-    const int IH = jcp.ih;
-    const int IW = jcp.iw;
+    const auto G = static_cast<int>(jcp.ngroups);
+    const auto MB = static_cast<int>(jcp.mb);
+    const auto OH = static_cast<int>(jcp.oh);
+    const auto OW = static_cast<int>(jcp.ow);
+    const auto IH = static_cast<int>(jcp.ih);
+    const auto IW = static_cast<int>(jcp.iw);
 
-    const int OC = jcp.oc;
-    const int IC = jcp.ic;
+    const auto OC = static_cast<int>(jcp.oc);
+    const auto IC = static_cast<int>(jcp.ic);
 
-    const int KH = jcp.kh;
-    const int KW = jcp.kw;
+    const auto KH = static_cast<int>(jcp.kh);
+    const auto KW = static_cast<int>(jcp.kw);
 
-    const int KSH = jcp.stride_h;
-    const int KSW = jcp.stride_w;
+    const auto KSH = static_cast<int>(jcp.stride_h);
+    const auto KSW = static_cast<int>(jcp.stride_w);
 
-    const int KDH = jcp.dilate_h;
-    const int KDW = jcp.dilate_w;
+    const auto KDH = static_cast<int>(jcp.dilate_h);
+    const auto KDW = static_cast<int>(jcp.dilate_w);
 
-    const int padT = jcp.t_pad;
-    const int padL = jcp.l_pad;
+    const auto padT = static_cast<int>(jcp.t_pad);
+    const auto padL = static_cast<int>(jcp.l_pad);
 
     const float pad_value = jcp.pad_value;
 
@@ -1364,7 +1383,7 @@ void BinaryConvolution::executeReference(const uint8_t* src,
         return static_cast<uint8_t>((val >> bit) & 0x0001);
     };
 
-    auto ker = [=](int32_t& d, int g, int mb, int oc, int oh, int ow) {
+    auto ker = [=](int& d, int g, int mb, int oc, int oh, int ow) {
         for (int ic = 0; ic < IC; ++ic) {
             for (int kh = 0; kh < KH; ++kh) {
                 for (int kw = 0; kw < KW; ++kw) {
@@ -1397,23 +1416,23 @@ void BinaryConvolution::executeReference(const uint8_t* src,
         }
     };
 
-    parallel_for5d(G, MB, OC, OH, OW, [&](int g, int mb, int oc, int oh, int ow) {
+    cpu_parallel->parallel_for5d(G, MB, OC, OH, OW, [&](int g, int mb, int oc, int oh, int ow) {
         int32_t a = 0;
         ker(a, g, mb, oc, oh, ow);
 
         auto base_value = [&]() -> float {
             if (pad_value == 0.0F) {
-                const int i_left_overflow = nstl::max(0, (padL - ow * KSW));
-                const int i_right_overflow = nstl::max(IW, (ow * KSW + (KW - 1) * (KDW + 1) - padL + 1)) - IW;
-                const int kw_padding = KW - div_up(i_left_overflow, (KDW + 1)) - div_up(i_right_overflow, (KDW + 1));
+                const auto i_left_overflow = nstl::max(0, (padL - ow * KSW));
+                const auto i_right_overflow = nstl::max(IW, (ow * KSW + (KW - 1) * (KDW + 1) - padL + 1)) - IW;
+                const auto kw_padding = KW - div_up(i_left_overflow, (KDW + 1)) - div_up(i_right_overflow, (KDW + 1));
 
-                const int i_top_overflow = nstl::max(0, (padT - oh * KSH));
-                const int i_bottom_overflow = nstl::max(IH, (oh * KSH + (KH - 1) * (KDH + 1) - padT + 1)) - IH;
-                const int kh_padding = KH - div_up(i_top_overflow, (KDH + 1)) - div_up(i_bottom_overflow, (KDH + 1));
+                const auto i_top_overflow = nstl::max(0, (padT - oh * KSH));
+                const auto i_bottom_overflow = nstl::max(IH, (oh * KSH + (KH - 1) * (KDH + 1) - padT + 1)) - IH;
+                const auto kh_padding = KH - div_up(i_top_overflow, (KDH + 1)) - div_up(i_bottom_overflow, (KDH + 1));
 
-                return IC * kh_padding * kw_padding;
+                return static_cast<float>(IC * kh_padding * kw_padding);
             }
-            return IC * KH * KW;
+            return static_cast<float>(IC * KH * KW);
         }();
 
         float a_fp = base_value - static_cast<float>(2 * a);
@@ -1450,9 +1469,7 @@ void BinaryConvolution::execute([[maybe_unused]] const dnnl::stream& strm) {
     }
 
     auto* selectedPrimitiveDescriptor = getSelectedPrimitiveDescriptor();
-    if (!selectedPrimitiveDescriptor) {
-        THROW_CPU_NODE_ERR("doesn't have primitive descriptors.");
-    }
+    CPU_NODE_ASSERT(selectedPrimitiveDescriptor, "doesn't have primitive descriptors.");
 
     auto implType = selectedPrimitiveDescriptor->getImplementationType();
     if (implType != impl_desc_type::ref) {

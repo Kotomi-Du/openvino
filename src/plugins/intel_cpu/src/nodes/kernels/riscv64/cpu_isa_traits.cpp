@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,35 +6,50 @@
 
 #include <csetjmp>
 #include <csignal>
+#include <cstdint>
+#include <string>
 
 #include "openvino/core/except.hpp"
+#include "xbyak_riscv/xbyak_riscv.hpp"
+#include "xbyak_riscv/xbyak_riscv_csr.hpp"
 #include "xbyak_riscv/xbyak_riscv_util.hpp"
 
 using namespace Xbyak_riscv;
 
-namespace ov {
-namespace intel_cpu {
-namespace riscv64 {
+namespace ov::intel_cpu::riscv64 {
 
 namespace {
 
 struct RVVGenerator : public CodeGenerator {
     RVVGenerator() : CodeGenerator(8) {
         // vsetivli is appeared in RVV 1.0
-        vsetivli(a0, 10, SEW::e32);
+        vsetivli(a0, 10, SEW::e32, LMUL::m1, VTA::tu, VMA::mu);
         ret();
     }
 };
 
-static thread_local sigjmp_buf jmpbuf;
+struct ZvfhGenerator : public CodeGenerator {
+    ZvfhGenerator() : CodeGenerator(32) {
+        // Probe Zvfh instructions used by Snippets Convert emitters.
+        vsetivli(a0, 1, SEW::e16, LMUL::mf2, VTA::tu, VMA::mu);
+        vfwcvt_f_f_v(v0, v0);
+        vfncvt_f_f_w(v0, v0);
+        li(a0, 1);
+        ret();
+    }
+};
 
-static bool can_compile_rvv100() {
+// NOLINTBEGIN(misc-include-cleaner) bug in clang-tidy
+template <typename Generator>
+bool can_execute_generated_code() {
 #if defined(__linux__)
-    __sighandler_t signal_handler = [](int signal) {
+    static thread_local sigjmp_buf jmpbuf;
+    __sighandler_t signal_handler = []([[maybe_unused]] int signal) {
         siglongjmp(jmpbuf, 1);
     };
 
-    struct sigaction new_sa, old_sa;
+    struct sigaction new_sa {
+    }, old_sa{};
     new_sa.sa_handler = signal_handler;
     sigemptyset(&new_sa.sa_mask);
     new_sa.sa_flags = SA_RESETHAND;
@@ -42,9 +57,9 @@ static bool can_compile_rvv100() {
 
     bool status = false;
     if (sigsetjmp(jmpbuf, 1) == 0) {
-        RVVGenerator gen;
+        Generator gen;
         gen.ready();
-        const auto caller = gen.getCode<uint32_t (*)()>();
+        const auto caller = gen.template getCode<uint32_t (*)()>();
         status = static_cast<bool>(caller());
     }
 
@@ -52,9 +67,20 @@ static bool can_compile_rvv100() {
     sigaction(SIGILL, &old_sa, nullptr);
 
     return status;
+// NOLINTEND(misc-include-cleaner) bug in clang-tidy
 #else
     return false;
 #endif
+}
+
+bool can_compile_rvv100() {
+    static const bool status = can_execute_generated_code<RVVGenerator>();
+    return status;
+}
+
+bool can_compile_zvfh() {
+    static const bool status = can_execute_generated_code<ZvfhGenerator>();
+    return status;
 }
 
 }  // namespace
@@ -73,6 +99,8 @@ bool mayiuse(const cpu_isa_t cpu_isa) {
     // [TODO] If needed, support other RVV versions
     case gv:
         return mayiuse(g) && cpu.hasExtension(RISCVExtension::V) && can_compile_rvv100();
+    case gv_zvfh:
+        return mayiuse(gv) && can_compile_zvfh();
     case isa_all:
         return false;
     case isa_undef:
@@ -89,6 +117,8 @@ std::string isa2str(cpu_isa_t isa) {
         return "g";
     case cpu_isa_t::gv:
         return "gv";
+    case cpu_isa_t::gv_zvfh:
+        return "gv_zvfh";
     case cpu_isa_t::isa_all:
         return "all";
     default:
@@ -96,6 +126,4 @@ std::string isa2str(cpu_isa_t isa) {
     }
 }
 
-}  // namespace riscv64
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::riscv64

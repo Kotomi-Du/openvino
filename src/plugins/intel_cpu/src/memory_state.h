@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,13 +13,13 @@
 #include "cpu_memory.h"
 #include "memory_desc/blocked_memory_desc.h"
 #include "memory_desc/cpu_memory_desc.h"
+#include "nodes/kernels/scaled_attn/cache_spec.hpp"
 #include "openvino/runtime/ivariable_state.hpp"
 #include "openvino/runtime/so_ptr.hpp"
 #include "openvino/runtime/tensor.hpp"
 #include "utils/plain_tensor.hpp"
 
-namespace ov {
-namespace intel_cpu {
+namespace ov::intel_cpu {
 
 class IVariableState : public ov::IVariableState {
 public:
@@ -96,7 +96,6 @@ private:
 
     MemoryPtr internal_state_mem() const override;
 
-private:
     MemoryDescPtr m_internal_desc;  // mem desc required by the graph internal tensor
     std::array<MemoryPtr, 2> m_internal_mem{};
     size_t buffer_num = 0;
@@ -116,7 +115,6 @@ private:
 
     MemoryPtr internal_state_mem() const override;
 
-private:
     MemoryPtr m_internal_mem;
     MemoryDescPtr m_internal_desc;  // mem desc required by the graph internal tensor
 };
@@ -126,8 +124,7 @@ public:
     VariableStateKVcache(const std::string& name,
                          MemoryDescPtr external_desc,
                          BlockedMemoryDescPtr dense_internal_desc,
-                         const bool quant_by_channel,
-                         const size_t group_size = 0);
+                         ov::Extensions::Cpu::CacheSpec spec);
 
     // ov::IVariableState
     ov::SoPtr<ov::ITensor> get_state() const override;
@@ -165,13 +162,16 @@ public:
         m_scale_zp = t;
     }
 
+    const ov::Extensions::Cpu::CacheSpec& get_spec() const {
+        return m_spec;
+    }
+
 private:
     // ov::intel_cpu::VariableStateBase
     void set_state_impl(const ov::SoPtr<ov::ITensor>& state) override;
     void reset_impl() override;
     void commit_impl() override;
 
-private:
     MemoryPtr m_internal_mem;  // kv cache
     MemoryPtr m_hidden_state;  // beam access table
     size_t m_internal_mem_max_size = 0;
@@ -182,11 +182,9 @@ private:
 
     // for u8 kv cache: [B, H, L, 2], 0 for scale, 1 for zp
     PlainTensor m_scale_zp;
-    bool m_quant_by_channel = false;
-    size_t m_group_size = 0;
+    ov::Extensions::Cpu::CacheSpec m_spec;
 };
 
 using MemStatePtr = std::shared_ptr<IVariableState>;
 using MemStateCPtr = std::shared_ptr<const IVariableState>;
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu

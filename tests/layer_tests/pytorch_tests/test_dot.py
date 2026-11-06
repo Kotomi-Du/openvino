@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -43,15 +43,16 @@ class TestDot(PytorchLayerTest):
 
         dtype = dtype_map.get(dtype)
 
-        ref_net = None
 
-        return aten_dot(mode, dtype), ref_net, "aten::dot"
+        return aten_dot(mode, dtype), "aten::dot"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     @pytest.mark.parametrize("mode, dtype", [
         ("", "float32"), ("", "float64"), ("", "int32"), ("", "int64"), ("", "int8"),
-        ("out", "float32"), ("out", "float64"), ("out", "int32"), ("out", "int64"), ("out", "int8")])
+        ("out", "float32"), ("out", "float64"),
+        ("out", "int32"), ("out", "int64"), ("out", "int8")])
     @pytest.mark.parametrize(
         "inputs", [([0, 1, 2, 3, 4], [5, 6, 7, 8, 9]), ([1, 2, 3], [4, 5, 6]), ([1, 1, 1], [1, 1, 1])]
     )

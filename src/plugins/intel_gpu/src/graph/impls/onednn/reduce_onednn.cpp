@@ -1,4 +1,4 @@
-// Copyright (C) 2021-2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,25 +14,37 @@
 namespace cldnn {
 namespace onednn {
 
-static void reorder_unreduced_axis_no_fusion(const cldnn::layout& input_layout, cldnn::layout& output_layout, std::vector<int64_t> axes) {
-    auto in_dims = input_layout.get_tensor().sizes();
-    auto num_dims = input_layout.format.dimension();
-    auto num_spatial = format::spatial_num(input_layout.format);
-    size_t num_others = num_dims - num_spatial;
+static void reorder_unreduced_axis_no_fusion(const kernel_impl_params& impl_params, const cldnn::layout& input_layout, cldnn::layout& output_layout, std::vector<int64_t> axes) {
+    if (impl_params.get_program().is_new_shape_infer()) {
+        if (output_layout.get_partial_shape().size() < input_layout.get_partial_shape().size()) {
+            output_layout.format = format::adjust_to_rank(output_layout.format, input_layout.get_partial_shape().size());
+            auto new_p_shape = input_layout.get_partial_shape();
+            for (auto axis : axes) {
+                new_p_shape[axis] = 1;
+            }
+            output_layout.set_partial_shape(new_p_shape);
+        }
+    } else {
+        auto in_dims = input_layout.get_tensor().sizes();
+        auto num_dims = input_layout.format.dimension();
+        auto num_spatial = format::spatial_num(input_layout.format);
+        size_t num_others = num_dims - num_spatial;
 
-    for (size_t idx = 0; idx < axes.size(); idx++) {
-        if (axes[idx] < static_cast<int64_t>(num_others))
-            in_dims[axes[idx]] = 1;
-        else
-            in_dims[(num_dims - axes[idx] - 1 + num_others)] = 1;
+        for (size_t idx = 0; idx < axes.size(); idx++) {
+            if (axes[idx] < static_cast<int64_t>(num_others)) {
+                in_dims[axes[idx]] = 1;
+            } else {
+                in_dims[(num_dims - axes[idx] - 1 + num_others)] = 1;
+            }
+        }
+
+        auto output_tensor = output_layout.get_tensor();
+        for (size_t idx = 0; idx < output_layout.get_rank(); idx++) {
+            output_tensor.raw[idx] = in_dims[idx];
+        }
+
+        output_layout.set_tensor(output_tensor);
     }
-
-    auto output_tensor = output_layout.get_tensor();
-    for (size_t idx = 0; idx < output_layout.get_rank(); idx++) {
-        output_tensor.raw[idx] = in_dims[idx];
-    }
-
-    output_layout.set_tensor(output_tensor);
 }
 
 struct reduction_onednn : typed_primitive_onednn_impl<reduce> {
@@ -55,10 +67,10 @@ protected:
 
         // A clDNN Reduce reorders un-reduced axes of its output tensor to b-f and spatial order when keep_dims is false.
         // oneDNN reduction does not allow this. So this function reverts it.
-        reorder_unreduced_axis_no_fusion(input_layout, output_layout, prim->axes);
+        reorder_unreduced_axis_no_fusion(impl_params, input_layout, output_layout, prim->axes);
 
-        auto input_md = onednn::layout_to_memory_desc(input_layout);
-        auto output_md = onednn::layout_to_memory_desc(output_layout);
+        auto input_md = onednn::layout_to_memory_desc_blocked(input_layout, dnnl::memory::format_tag::undef);
+        auto output_md = onednn::layout_to_memory_desc_blocked(output_layout, dnnl::memory::format_tag::undef);
 
         float p = 0.f;
         float eps = 0.f;
@@ -107,9 +119,7 @@ public:
         ob << typed_pd->get_p();
         ob << typed_pd->get_epsilon();
 
-        std::vector<uint8_t> prim_cache;
-        prim_cache = _prim.get_cache_blob();
-        ob << prim_cache;
+        ob << get_cache_blob();
 #endif
     }
 
@@ -122,8 +132,8 @@ public:
         dnnl::algorithm alg;
         ib >> make_data(&alg, sizeof(dnnl::algorithm));
 
-        auto input_md = onednn::layout_to_memory_desc(impl_params->get_input_layout(0));
-        auto output_md = onednn::layout_to_memory_desc(impl_params->get_output_layout());
+        auto input_md = onednn::layout_to_memory_desc_blocked(impl_params->get_input_layout(0), dnnl::memory::format_tag::undef);
+        auto output_md = onednn::layout_to_memory_desc_blocked(impl_params->get_output_layout(), dnnl::memory::format_tag::undef);
 
         float p, eps;
         ib >> p >> eps;
@@ -143,13 +153,13 @@ public:
 
         _scratchpad_md = _pd.scratchpad_desc();
 
-        _prim = dnnl::primitive(_pd, prim_cache);
+        _prim = make_primitive_from_blob(prim_cache);
 #endif
     }
 
     static std::unique_ptr<primitive_impl> create(const reduce_node& arg, const kernel_impl_params& impl_params) {
         auto& engine = impl_params.prog->get_engine();
-        auto& config = impl_params.prog->get_config();
+        const auto& config = impl_params.prog->get_config();
         auto attr = impl_params.attrs_onednn;
         auto prim_desc = get_reduction_primitive_descriptor(impl_params, *attr);
 

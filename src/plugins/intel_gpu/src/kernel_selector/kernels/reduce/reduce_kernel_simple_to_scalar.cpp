@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -58,17 +58,21 @@ ParamsKey ReduceKernelSimpleToScalar::GetSupportedKey() const {
 bool ReduceKernelSimpleToScalar::Validate(const Params& p) const {
     const reduce_params& params = static_cast<const reduce_params&>(p);
 
-    if (params.inputs.size() != 1 || params.outputs.size() != 1)
-        return false;
+    if (params.inputs.size() != 1 || params.outputs.size() != 1) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (!params.inputs[0].SimpleLayout() || !params.outputs[0].SimpleLayout())
-        return false;
+    if (!params.inputs[0].SimpleLayout() || !params.outputs[0].SimpleLayout()) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (params.inputs[0].LogicalSize() < params.engineInfo.maxWorkGroupSize)
-        return false;
+    if (params.inputs[0].LogicalSize() < params.engineInfo.maxWorkGroupSize) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (params.outputs[0].LogicalSize() != 1)
-        return false;
+    if (params.outputs[0].LogicalSize() != 1) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     std::set<ReduceMode> supported_modes = {
         ReduceMode::SUM,
@@ -78,11 +82,12 @@ bool ReduceKernelSimpleToScalar::Validate(const Params& p) const {
         ReduceMode::MEAN,
     };
 
-    if (supported_modes.find(params.reduceMode) == supported_modes.end())
-        return false;
+    if (supported_modes.find(params.reduceMode) == supported_modes.end()) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    auto& in_dims = params.inputs[0].GetDims();
-    auto& out_dims = params.outputs[0].GetDims();
+    const auto& in_dims = params.inputs[0].GetDims();
+    const auto& out_dims = params.outputs[0].GetDims();
     auto has_padding = std::count_if(in_dims.cbegin(), in_dims.cend(),
         [](Tensor::Dim d) { return d.pad.before > 0 || d.pad.after > 0; }) > 0;
     has_padding |= std::count_if(out_dims.cbegin(), out_dims.cend(),
@@ -90,8 +95,9 @@ bool ReduceKernelSimpleToScalar::Validate(const Params& p) const {
             return d.pad.before > 0 || d.pad.after > 0;
         }) > 0;
 
-    if (has_padding)
-        return false;
+    if (has_padding) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

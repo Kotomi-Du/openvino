@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -32,6 +32,14 @@ public:
         OPENVINO_NOT_IMPLEMENTED;
     }
 
+    void* data_rw() override final {
+        OPENVINO_NOT_IMPLEMENTED;
+    }
+
+    void* data_rw(const element::Type&) override final {
+        OPENVINO_NOT_IMPLEMENTED;
+    }
+
     ~IRemoteTensor() override;
 
     /**
@@ -55,11 +63,17 @@ public:
         copy_from(src, zero_offset, zero_offset, {});
     }
 
-    virtual void copy_to(const std::shared_ptr<ov::ITensor>& dst, size_t src_offset, size_t dst_offset, const ov::Shape& roi_shape) const {
+    virtual void copy_to(const std::shared_ptr<ov::ITensor>& dst,
+                         size_t src_offset,
+                         size_t dst_offset,
+                         const ov::Shape& roi_shape) const {
         OPENVINO_NOT_IMPLEMENTED;
     };
 
-    virtual void copy_from(const std::shared_ptr<const ov::ITensor>& src, size_t src_offset, size_t dst_offset, const ov::Shape& roi_shape) {
+    virtual void copy_from(const std::shared_ptr<const ov::ITensor>& src,
+                           size_t src_offset,
+                           size_t dst_offset,
+                           const ov::Shape& roi_shape) {
         OPENVINO_NOT_IMPLEMENTED;
     };
 };

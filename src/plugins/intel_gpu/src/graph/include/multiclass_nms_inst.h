@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -32,8 +32,9 @@ public:
     }
 
     const program_node& roisnum() const {
-        if (!get_primitive()->has_roisnum)
+        if (!get_primitive()->has_roisnum) {
             throw std::runtime_error("there is no roisnum input");
+        }
         return get_dependency(2);
     }
 

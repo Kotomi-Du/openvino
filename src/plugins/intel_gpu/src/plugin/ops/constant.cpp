@@ -1,37 +1,53 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "intel_gpu/plugin/program_builder.hpp"
-#include "intel_gpu/plugin/common_utils.hpp"
-#include "intel_gpu/op/convolution.hpp"
-
 #include "openvino/op/constant.hpp"
-#include "openvino/op/convolution.hpp"
-#include "openvino/op/convert.hpp"
-#include "openvino/op/deformable_convolution.hpp"
-#include "openvino/op/group_conv.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#include "intel_gpu/op/convolution.hpp"
+#include "intel_gpu/plugin/common_utils.hpp"
+#include "intel_gpu/plugin/program_builder.hpp"
+#include "intel_gpu/primitives/data.hpp"
+#include "intel_gpu/runtime/debug_configuration.hpp"
+#include "moe_offload_constant.hpp"
+#include "openvino/core/weight_sharing_util.hpp"
+#include "openvino/op/bucketize.hpp"
 #include "openvino/op/concat.hpp"
-#include "openvino/op/squared_difference.hpp"
+#include "openvino/op/convert.hpp"
+#include "openvino/op/convolution.hpp"
+#include "openvino/op/deformable_convolution.hpp"
 #include "openvino/op/gather.hpp"
-#include "openvino/op/split.hpp"
+#include "openvino/op/gather_nd.hpp"
+#include "openvino/op/group_conv.hpp"
+#include "openvino/op/loop.hpp"
+#include "openvino/op/matmul.hpp"
+#include "openvino/op/moe.hpp"
 #include "openvino/op/prelu.hpp"
 #include "openvino/op/roi_align.hpp"
 #include "openvino/op/roi_align_rotated.hpp"
-#include "openvino/op/variadic_split.hpp"
-#include "openvino/op/util/op_types.hpp"
-#include "openvino/op/loop.hpp"
+#include "openvino/op/util/scatter_base.hpp"
+#include "openvino/op/util/scatter_elements_update_base.hpp"
+#include "openvino/op/util/scatter_nd_base.hpp"
+#include "openvino/op/split.hpp"
+#include "openvino/op/squared_difference.hpp"
 #include "openvino/op/tensor_iterator.hpp"
-#include "openvino/op/bucketize.hpp"
 #include "openvino/op/util/binary_elementwise_bitwise.hpp"
-
-#include "intel_gpu/primitives/data.hpp"
-#include "intel_gpu/runtime/debug_configuration.hpp"
+#include "openvino/op/util/op_types.hpp"
+#include "openvino/op/variadic_split.hpp"
+#include "openvino/util/memory.hpp"
+#include "openvino/util/mmap_object.hpp"
+#include "ov_ops/moe_compressed.hpp"
 
 namespace ov::intel_gpu {
 
 static cldnn::tensor getConstTensor(const ov::Shape constDims) {
-    std::vector<cldnn::tensor::value_type> shuffled_dims(constDims.size());
+    std::vector<ov::Dimension::value_type> shuffled_dims(constDims.size());
 
     // cldnn tensor c-tor expects constants be in a reversed order (x, y, z, w, u, v)
     for (size_t i = 0; i < constDims.size(); i++) {
@@ -43,26 +59,38 @@ static cldnn::tensor getConstTensor(const ov::Shape constDims) {
     case 7:
         constTensor = cldnn::tensor(shuffled_dims);
         break;
-    case 6: constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]),
-                                        TensorValue(constDims[5]), TensorValue(constDims[4]),
-                                        TensorValue(constDims[3]), TensorValue(constDims[2]));
+    case 6:
+        constTensor = cldnn::tensor(TensorValue(constDims[0]),
+                                    TensorValue(constDims[1]),
+                                    TensorValue(constDims[5]),
+                                    TensorValue(constDims[4]),
+                                    TensorValue(constDims[3]),
+                                    TensorValue(constDims[2]));
         break;
-    case 5: constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]),
-                                        TensorValue(constDims[4]), TensorValue(constDims[3]), TensorValue(constDims[2]));
+    case 5:
+        constTensor = cldnn::tensor(TensorValue(constDims[0]),
+                                    TensorValue(constDims[1]),
+                                    TensorValue(constDims[4]),
+                                    TensorValue(constDims[3]),
+                                    TensorValue(constDims[2]));
         break;
-    case 4: constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]),
-                                        TensorValue(constDims[3]), TensorValue(constDims[2]));
+    case 4:
+        constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]), TensorValue(constDims[3]), TensorValue(constDims[2]));
         break;
-    case 3: constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]),
-                                        1, TensorValue(constDims[2]));
+    case 3:
+        constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]), 1, TensorValue(constDims[2]));
         break;
-    case 2: constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]), 1, 1);
+    case 2:
+        constTensor = cldnn::tensor(TensorValue(constDims[0]), TensorValue(constDims[1]), 1, 1);
         break;
-    case 1: constTensor = cldnn::tensor(1, TensorValue(constDims[0]), 1, 1);
+    case 1:
+        constTensor = cldnn::tensor(1, TensorValue(constDims[0]), 1, 1);
         break;
-    case 0: constTensor = cldnn::tensor(1, 1, 1, 1);
+    case 0:
+        constTensor = cldnn::tensor(1, 1, 1, 1);
         break;
-    default: OPENVINO_THROW("Invalid constant blob dimensions");
+    default:
+        OPENVINO_THROW("Invalid constant blob dimensions");
     }
     return constTensor;
 }
@@ -76,19 +104,41 @@ static void create_data(ProgramBuilder& p, const ov::Shape& const_shape, const s
     auto constFormat = cldnn::format::get_default_format(const_shape.size());
 
     if (props.needsBatchInterpretation) {
-        constTensor.batch[0] = static_cast<cldnn::tensor::value_type>(constTensor.count());
+        constTensor.batch[0] = static_cast<ov::Dimension::value_type>(constTensor.count());
         constTensor.feature[0] = 1;
     }
 
     cldnn::data_types out_dtype = cldnn::element_type_to_data_type(op->get_output_element_type(0));
-    cldnn::layout constLayout = p.use_new_shape_infer() ? cldnn::layout(const_shape, out_dtype, constFormat) :
-                                                          cldnn::layout(out_dtype, constFormat, constTensor);
+    cldnn::layout constLayout =
+        p.use_new_shape_infer() ? cldnn::layout(const_shape, out_dtype, constFormat) : cldnn::layout(out_dtype, constFormat, constTensor);
 
     cldnn::primitive_id initialconstPrimID = layer_type_name_ID(op);
     cldnn::primitive_id constPrimID;
-    auto data = op->get_data_ptr<char>();
+    const auto* data = op->get_data_ptr<char>();
 
-    const auto cache_key = std::make_tuple(data, const_shape, op->get_output_element_type(0));
+    // Check whether this constant comes from a shared source buffer that may be used across devices.
+    // The imported view may not own the underlying storage; though the actual backing buffer is not kept alive by the
+    // weight-sharing context, the source buffer track held on the plugin side. That means each consumer must retain
+    // a strong reference to the source buffer for as long as the imported constant may still be used.
+    // ProgramBuilder registers each source buffer as a strong reference in its internal storage,
+    // ensuring the buffer remains valid for the lifetime of the graph. Once the graph was created,
+    // the instance of CompiledModel takes on the ownership of the buffer.
+    // This ensures the validity of the buffer during the lifetime of the compiled model.
+    std::shared_ptr<ov::AlignedBuffer> weight_sharing_constant_buffer_view;
+    if (p.get_weight_sharing_ctx()) {
+        // It's assumed that the constant is a shared constant with cross-device visibility if the model has
+        // a weight sharing context and a valid source buffer and a constant id is registered in the weight sharing context.
+        auto constant_source_id = weight_sharing::Extension::get_constant_source_id(*op);
+        auto source_buffer = weight_sharing::Extension::get_constant_source_buffer(*op);
+        if (source_buffer) {
+            p.register_weight_sharing_source_buffer(source_buffer);
+            auto constant_id = weight_sharing::Extension::get_constant_id(*op);
+            weight_sharing_constant_buffer_view =
+                weight_sharing::get_buffer(*p.get_weight_sharing_ctx(), constant_source_id, constant_id);
+        }
+    }
+    const auto cache_key =
+        std::make_tuple(data, const_shape, op->get_output_element_type(0), weight_sharing_constant_buffer_view != nullptr);
 
     auto bufIter = p.blobMemCache.find(cache_key);
 
@@ -98,7 +148,28 @@ static void create_data(ProgramBuilder& p, const ov::Shape& const_shape, const s
         p.profiling_ids.push_back(initialconstPrimID);
     } else {
         cldnn::memory::ptr mem = nullptr;
-        if (constLayout.bytes_count() > 0) {
+        if (weight_sharing_constant_buffer_view) {
+            mem = p.get_engine().create_hostbuffer(
+                weight_sharing_constant_buffer_view->get_ptr(),
+                ov::util::align_size_up(weight_sharing_constant_buffer_view->size(), ov::util::get_system_page_size()),
+                cldnn::allocation_type::cl_mem,
+                constLayout);
+            p.add_primitive(*op, cldnn::data(initialconstPrimID, mem));
+            p.blobMemCache[cache_key] = initialconstPrimID;
+            constPrimID = initialconstPrimID;
+            GPU_DEBUG_LOG << "[" << initialconstPrimID << ": import shared constant] imported shared constant: source ID: "
+                          << weight_sharing::Extension::get_constant_source_id(*op)
+                          << ", constant ID: " << weight_sharing::Extension::get_constant_id(*op)
+                          << ", ptr: " << static_cast<void*>(weight_sharing_constant_buffer_view->get_ptr())
+                          << ", size: " << weight_sharing_constant_buffer_view->size()
+                          << ", layout: " << constLayout.to_short_string() << std::endl;
+            return;
+        }
+        auto partial_upload = try_prepare_partial_upload(p.get_engine(), p.get_config(), op, const_shape, out_dtype, constFormat, constLayout);
+
+        if (partial_upload.enabled) {
+            mem = partial_upload.memory;
+        } else if (constLayout.bytes_count() > 0) {
             mem = p.get_engine().allocate_memory(constLayout, false);
         } else {
             // In the case of empty const data with {0} shape, it has zero byte.
@@ -108,15 +179,29 @@ static void create_data(ProgramBuilder& p, const ov::Shape& const_shape, const s
             mem = p.get_engine().reinterpret_buffer(*one_dim_mem, constLayout);
         }
 
-        GPU_DEBUG_LOG << "[" << initialconstPrimID << ": constant] layout: "
-                        << constLayout.to_short_string() << ", mem_ptr(" << mem << ", " << mem->size() << " bytes)"<< std::endl;
-        auto& stream = p.get_engine().get_service_stream();
-        cldnn::mem_lock<char> lock{mem, stream};
-        auto buf = lock.data();
-        auto bufSize = constLayout.bytes_count();
+        GPU_DEBUG_LOG << "[" << initialconstPrimID << ": constant] layout: " << constLayout.to_short_string() << ", mem_ptr(" << mem << ", " << mem->size()
+                      << " bytes)" << std::endl;
 
-        std::memcpy(&buf[0], &data[0], bufSize);
-        p.add_primitive(*op, cldnn::data(initialconstPrimID, mem));
+        if (!partial_upload.enabled) {
+            auto& stream = p.get_engine().get_service_stream();
+            cldnn::mem_lock<char> lock{mem, stream};
+            auto* buf = lock.data();
+            auto bufSize = constLayout.bytes_count();
+            auto upload_count = ov::shape_size(const_shape);
+
+            // When the constant type is not supported by GPU plugin, the layout gets a supported type
+            // instead. Convert the data in that case, otherwise just copy it.
+            const auto src_et = op->get_output_element_type(0);
+            const auto dst_et = ov::element::Type(out_dtype);
+            if (src_et == dst_et) {
+                std::memcpy(&buf[0], &data[0], bufSize);
+            } else {
+                convert_and_copy(data, src_et, buf, dst_et, upload_count, constLayout);
+            }
+        }
+        ov::wsh::Extension::hint_evict(*op);
+        auto data_prim = cldnn::data(initialconstPrimID, mem, partial_upload.enabled);
+        p.add_primitive(*op, data_prim);
         p.blobMemCache[cache_key] = initialconstPrimID;
         constPrimID = initialconstPrimID;
     }
@@ -129,37 +214,29 @@ static bool is_btiwise(Node* node) {
 static void CreateConstantOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v0::Constant>& op) {
     ov::Shape constDims = op->get_shape();
     auto constUsers = op->get_output_target_inputs(0);
-    std::unordered_map<std::shared_ptr<ov::op::v0::Constant>, ConstProperties> consts = {
-        {op, {false}}
+    std::unordered_map<std::shared_ptr<ov::op::v0::Constant>, ConstProperties> consts = {{op, {false}}};
+
+    auto is_binary_eltwise = [&](ov::Node* op) -> bool {
+        return ov::op::util::is_binary_elementwise_arithmetic(op) || ov::op::util::is_binary_elementwise_logical(op) ||
+               ov::op::util::is_binary_elementwise_comparison(op) || is_btiwise(op);
     };
 
-    auto is_binary_eltwise = [&] (ov::Node* op) -> bool {
-        if (ov::op::util::is_binary_elementwise_arithmetic(op) ||
-            ov::op::util::is_binary_elementwise_logical(op) ||
-            ov::op::util::is_binary_elementwise_comparison(op) ||
-            is_btiwise(op)) {
-            return true;
-        } else {
-            return false;
-        }
-    };
-
-    auto is_all_inputs_1d = [&] (ov::Node* op) -> bool {
+    auto is_all_inputs_1d = [&](ov::Node* op) -> bool {
         for (size_t i = 0; i < op->get_input_size(); i++) {
-            auto& in_shape = op->get_input_partial_shape(i);
-            if (in_shape.size() > 1)
+            const auto& in_shape = op->get_input_partial_shape(i);
+            if (in_shape.size() > 1) {
                 return false;
+            }
         }
         return true;
     };
 
-    auto is_convert_into_binary_eltwise = [&] (ov::Node* op) -> bool {
+    auto is_convert_into_binary_eltwise = [&](ov::Node* op) -> bool {
         if (ov::is_type<ov::op::v0::Convert>(op)) {
             for (size_t i = 0; i < op->get_output_size(); ++i) {
                 auto convertUsers = op->get_output_target_inputs(i);
                 for (auto user : convertUsers) {
-                    if (is_binary_eltwise(user.get_node()) &&
-                        is_all_inputs_1d(user.get_node())) {
+                    if (is_binary_eltwise(user.get_node()) && is_all_inputs_1d(user.get_node())) {
                         return true;
                     }
                 }
@@ -169,8 +246,9 @@ static void CreateConstantOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v0
     };
 
     auto is_grouped_conv = [](ov::Node* op) -> bool {
-        if (ov::is_type<ov::op::v1::GroupConvolution>(op))
+        if (ov::is_type<ov::op::v1::GroupConvolution>(op)) {
             return true;
+        }
 
         if (ov::is_type<op::Convolution>(op)) {
             return ov::as_type<op::Convolution>(op)->get_groups() > 0;
@@ -182,20 +260,37 @@ static void CreateConstantOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v0
     // For Concat along batch we go with batch interpretation
     // For Gather input we go with batch interpretation
     // Also check if constant users is a backprop convolution - in that case O and I need to be swapped.
-    for (auto& node : constUsers) {
-        auto outOp = node.get_node();
-        if (auto castedOp = ov::as_type<ov::op::v0::Concat>(outOp)) {
+    for (const auto& node : constUsers) {
+        auto* outOp = node.get_node();
+        bool apply_rank2_matmul_wa = false;
+        size_t user_index = node.get_index();
+        auto is_convert_matmul_pattern = [&](ov::Node* convert_node, size_t& matmul_input_index_ref) -> bool {
+            if (ov::is_type<ov::op::v0::Convert>(convert_node) && !p.use_new_shape_infer()) {
+                auto convert_consumers = convert_node->get_output_target_inputs(0);
+                for (const auto& consumer_input : convert_consumers) {
+                    if (ov::is_type<ov::op::v0::MatMul>(consumer_input.get_node()) && consumer_input.get_index() < 2) {
+                        matmul_input_index_ref = consumer_input.get_index();
+                        auto* matmul = consumer_input.get_node();
+                        const size_t opposite_input_idx = (matmul_input_index_ref == 0) ? 1 : 0;
+                        const auto opposite_rank = matmul->get_input_partial_shape(opposite_input_idx).rank();
+                        apply_rank2_matmul_wa = opposite_rank.is_static() && opposite_rank.get_length() > 2;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        if (auto* castedOp = ov::as_type<ov::op::v0::Concat>(outOp)) {
             if (castedOp->get_axis() == 0) {
                 consts[op].needsBatchInterpretation = constDims.size() == 1;
             }
         } else if (((is_binary_eltwise(outOp) || ov::is_type<ov::op::v0::SquaredDifference>(outOp)) && is_all_inputs_1d(outOp)) ||
-                     is_convert_into_binary_eltwise(outOp)) {
+                   is_convert_into_binary_eltwise(outOp)) {
             consts[op].needsBatchInterpretation = constDims.size() == 1;
-        } else if (ov::is_type<ov::op::v1::Gather>(outOp) ||
-                   ov::is_type<ov::op::v7::Gather>(outOp) ||
-                   ov::is_type<ov::op::v8::Gather>(outOp) ||
-                   ov::is_type<ov::op::v1::Split>(outOp) ||
-                   ov::is_type<ov::op::v1::VariadicSplit>(outOp)) {
+        } else if (ov::is_type<ov::op::v1::Gather>(outOp) || ov::is_type<ov::op::v7::Gather>(outOp) || ov::is_type<ov::op::v8::Gather>(outOp) ||
+                   ov::is_type<ov::op::v5::GatherND>(outOp) || ov::is_type<ov::op::v8::GatherND>(outOp) || ov::is_type<ov::op::v1::Split>(outOp) ||
+                   ov::is_type<ov::op::v1::VariadicSplit>(outOp) || ov::is_type<ov::op::util::ScatterBase>(outOp) ||
+                   ov::is_type<ov::op::util::ScatterElementsUpdateBase>(outOp) || ov::is_type<ov::op::util::ScatterNDBase>(outOp)) {
             consts[op].needsBatchInterpretation = constDims.size() == 1;
         } else if (ov::is_type<ov::op::v0::PRelu>(outOp) && node.get_index() == 1) {
             // PReLU slope tensor reshape policy
@@ -210,20 +305,22 @@ static void CreateConstantOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v0
             //       [N, M, 1] --> [1, N, M, 1]
             auto input_shape = outOp->get_input_partial_shape(0);
             if ((constDims.size() != 1 && constDims.size() < input_shape.size()) ||
-                (constDims.size() == 1 && input_shape.is_static() && static_cast<int64_t>(constDims[0]) != input_shape[1].get_length())) {
+                (constDims.size() == 1 && input_shape.is_static() && input_shape.size() > 1 &&
+                 static_cast<int64_t>(constDims[0]) != input_shape[1].get_length())) {
                 // Reshape 'constDims' according to the numpy broadcasting rule.
                 ov::Shape slope_shape(input_shape.size(), 1);
-                for (size_t j = 1; j <= constDims.size(); j++)
+                for (size_t j = 1; j <= constDims.size(); j++) {
                     slope_shape[slope_shape.size() - j] = constDims[constDims.size() - j];
+                }
                 constDims = slope_shape;
             }
         } else if (is_grouped_conv(outOp) && node.get_index() == 1 && !p.use_new_shape_infer()) {
             auto input_shape = outOp->get_input_partial_shape(0);
-            if (constDims.size() == 4 && input_shape.size() == 3) { // In case of weight dim 4 and input dim 3,
-                constDims.push_back(1);                             // The weight cldnn tensor adds 1d to the end as the input cldnn tensor does
+            if (constDims.size() == 4 && input_shape.size() == 3) {  // In case of weight dim 4 and input dim 3,
+                constDims.push_back(1);                              // The weight cldnn tensor adds 1d to the end as the input cldnn tensor does
             }
         } else if (ov::is_type<ov::op::v3::ROIAlign>(outOp) || ov::is_type<ov::op::v9::ROIAlign>(outOp) ||
-                   ov::is_type<ov::op::v15::ROIAlignRotated>(outOp)) { //< Hacks...
+                   ov::is_type<ov::op::v15::ROIAlignRotated>(outOp)) {  //< Hacks...
             consts[op].needsBatchInterpretation = constDims.size() == 1;
         } else if ((ov::is_type<ov::op::v5::Loop>(outOp) || ov::is_type<ov::op::v0::TensorIterator>(outOp))) {
             // when inner network has 1d parameter which is connected to outer loop's constant 1d data,
@@ -238,6 +335,29 @@ static void CreateConstantOp(ProgramBuilder& p, const std::shared_ptr<ov::op::v0
             // And each layout will be like Parameter->Result [N, 1, 1, 1], Constant->Result [1, N, 1, 1], that produces layout mismatch error.
             // For that case, Constant->Result needs to be [N, 1, 1, 1]
             consts[op].needsBatchInterpretation = constDims.size() == 1;
+        } else if (is_convert_matmul_pattern(outOp, user_index)) {
+            const size_t const_static_max_dims = 4;
+            // MatMul constant reshape WA (legacy shape infer path):
+            // Only reshape 1D and 2D constants to fix getConstTensor batch/feature
+            // mis-mapping. For rank >= 3, getConstTensor already produces layouts
+            // compatible with gemm_inst::transform_input_layouts (trailing 1s align
+            // with weight_rank extraction). Reshaping rank >= 3 would prepend 1s,
+            // breaking the first-N-dims extraction in transform_input_layouts.
+            if (constDims.size() == 1) {
+                ov::Shape reshaped_const_dims(const_static_max_dims, 1);
+                const size_t const_idx = (user_index == 0) ? (const_static_max_dims - 1) : (const_static_max_dims - 2);
+                reshaped_const_dims[const_idx] = constDims[0];
+                constDims = std::move(reshaped_const_dims);
+            } else if (constDims.size() == 2 && user_index == 0 && apply_rank2_matmul_wa) {
+                ov::Shape reshaped_const_dims(const_static_max_dims, 1);
+                // For MatMul input0, gemm::transform_input_layouts takes the first input_rank dims.
+                // Keep [M, K] in leading positions and append trailing 1s.
+                const size_t offset = 0;
+                for (size_t i = 0; i < constDims.size(); ++i) {
+                    reshaped_const_dims[offset + i] = constDims[i];
+                }
+                constDims = std::move(reshaped_const_dims);
+            }
         }
     }
 

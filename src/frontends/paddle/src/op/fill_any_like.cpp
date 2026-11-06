@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,10 +6,7 @@
 #include "op_utils.hpp"
 #include "openvino/frontend/paddle/node_context.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 NamedOutputs fill_any_like(const NodeContext& node) {
     auto x = node.get_input("X");
     auto dtype = node.get_attribute<ov::element::Type>("dtype", element::dynamic);
@@ -32,7 +29,4 @@ NamedOutputs fill_any_like(const NodeContext& node) {
                                               {"Out"});
 }
 
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

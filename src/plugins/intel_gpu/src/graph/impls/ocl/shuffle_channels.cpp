@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -30,8 +30,9 @@ struct shuffle_channels_impl : typed_primitive_impl_ocl<shuffle_channels> {
         const int32_t number_of_dims = 4;
         int32_t axis = primitive->axis;
 
-        if (axis < 0)
+        if (axis < 0) {
             axis += number_of_dims;
+        }
 
         params.group = primitive->group;
         params.axis = axis;

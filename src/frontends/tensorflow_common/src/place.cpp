@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,9 +7,7 @@
 #include "openvino/frontend/exception.hpp"
 #include "openvino/frontend/node_context.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
+namespace ov::frontend::tensorflow {
 bool Place::is_input() const {
     const auto& model_ins = m_input_model.get_inputs();
 
@@ -337,6 +335,4 @@ ov::frontend::Place::Ptr OutPortPlace::get_producing_operation() const {
     FRONT_END_THROW("Operation has expired.");
 }
 
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow

@@ -1,20 +1,25 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <memory>
 #include <ostream>
 #include <tuple>
+#include "intel_gpu/runtime/event.hpp"
 #include "intel_gpu/runtime/layout.hpp"
 #include "intel_gpu/runtime/memory.hpp"
 
 #include "intel_gpu/runtime/shape_predictor.hpp"
 #include "intel_gpu/runtime/engine.hpp"
 #include "intel_gpu/runtime/device_info.hpp"
-#include "openvino/core/layout.hpp"
 #include "openvino/core/node.hpp"
 #include "openvino/core/type/element_type.hpp"
+
+namespace cldnn {
+class tensor_conversion;
+}
 
 namespace ov {
 namespace intel_gpu {
@@ -23,6 +28,8 @@ enum class TensorType {
     BT_EMPTY,
     BT_BUF_INTERNAL,
     BT_BUF_SHARED,
+    BT_BUF_SHARED_FROM_HANDLE,
+    BT_CPU_VA,
     BT_USM_SHARED,
     BT_USM_HOST_INTERNAL,
     BT_USM_DEVICE_INTERNAL,
@@ -42,10 +49,9 @@ inline bool can_use_usm_host(cldnn::engine& engine, const uint64_t total_output_
     const uint64_t LARGE_OUTPUT_BYTES_THRESHOLD = 4 * 1048576;
 
     const auto& device_info = engine.get_device_info();
-    if ((device_info.gfx_ver.major == 12 && device_info.gfx_ver.minor == 60) ||
-        (device_info.gfx_ver.major >= 20 && device_info.dev_type == cldnn::device_type::discrete_gpu) ||
+    if ((device_info.gfx_ver.major >= 20 && device_info.dev_type == cldnn::device_type::discrete_gpu) ||
         (device_info.dev_type == cldnn::device_type::discrete_gpu && total_output_bytes > LARGE_OUTPUT_BYTES_THRESHOLD)) {
-        // WA: Disable USM host memory for infer request`s tensors for PVC and subsequent dGPUs, as kernel access
+        // WA: Disable USM host memory for infer request`s tensors for dGPUs, as kernel access
         // to system memory is slower than using an explicit memcpy (Host <-> Device) call with the copy engine
         // Driver tickets with additional details: 6155, 10054
         GPU_DEBUG_TRACE << "Do not use usm_host for performance issue" << std::endl;
@@ -137,6 +143,32 @@ inline void ForceExit() {
     std::_Exit(-1);
 }
 
+struct PendingConversion {
+    PendingConversion() = default;
+    PendingConversion(const PendingConversion&) = delete;
+    PendingConversion& operator=(const PendingConversion&) = delete;
+
+    void wait();
+    // Call only after GPU completion has been confirmed.
+    void clear_after_completion() noexcept;
+
+    cldnn::memory::ptr staging;
+    cldnn::event::ptr done;
+};
+
+// Returns false before submission for unsupported inputs; true means submitted, not completed.
+// Pass an empty pending object; wait or drain and clear before reuse. No destructor waits automatically.
+// Keep destination, conversion, and engine/context alive until pending completes or the stream is drained.
+// Errors propagate; a failed stream drain retains the pending resources.
+bool convert_and_copy_async(
+    const ov::ITensor* src,
+    const cldnn::memory::ptr& dst,
+    cldnn::stream& stream,
+    const cldnn::layout& src_layout,
+    const std::shared_ptr<cldnn::tensor_conversion>& conversion,
+    PendingConversion& pending,
+    bool transpose = false);
+
 void convert_and_copy(
     const ov::ITensor* src,
     cldnn::memory::ptr dst,
@@ -146,6 +178,7 @@ void convert_and_copy(
 void convert_and_copy(const cldnn::memory::ptr src, ov::ITensor* dst, const cldnn::stream& stream);
 void convert_and_copy(const ov::ITensor* src, ov::ITensor* dst, const cldnn::stream& stream);
 void convert_and_copy(const cldnn::memory::ptr src, cldnn::memory::ptr dst, cldnn::stream& stream);
+void convert_and_copy(const void* src_ptr, ov::element::Type src_et, void* dst_ptr, ov::element::Type dst_et, size_t size, const cldnn::layout& layout);
 
 }  // namespace intel_gpu
 

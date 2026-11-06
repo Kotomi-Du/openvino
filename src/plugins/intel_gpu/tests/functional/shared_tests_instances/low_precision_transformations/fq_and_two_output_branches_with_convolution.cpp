@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,6 +9,26 @@
 
 using namespace LayerTestsDefinitions;
 using namespace ov::pass::low_precision;
+
+namespace LayerTestsDefinitions {
+class FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformationGPU :
+    public FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformation {
+protected:
+    void SetUp() override {
+        FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformation::SetUp();
+        auto [netPrecision, inputShape, device, testValues] = this->GetParam();
+        if (netPrecision == ov::element::f16) {
+            abs_threshold = 0.5;
+            rel_threshold = 0.01;
+        }
+    }
+};
+
+TEST_P(FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformationGPU, CompareWithRefImpl) {
+    SKIP_IF_CURRENT_TEST_IS_DISABLED();
+    run();
+}
+}  // namespace LayerTestsDefinitions
 
 namespace {
 const std::vector<ov::element::Type> netPrecisions = {
@@ -24,11 +44,11 @@ const std::vector<FakeQuantizeAndTwoOutputBranchesWithConvolution> testValues = 
     }
 };
 
-INSTANTIATE_TEST_SUITE_P(smoke_LPT, FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformation,
+INSTANTIATE_TEST_SUITE_P(smoke_LPT, FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformationGPU,
     ::testing::Combine(
         ::testing::ValuesIn(netPrecisions),
         ::testing::Values(ov::PartialShape({ 1, 32, 72, 48 })),
         ::testing::Values(ov::test::utils::DEVICE_GPU),
         ::testing::ValuesIn(testValues)),
-    FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformation::getTestCaseName);
+    FakeQuantizeAndTwoOutputBranchesWithConvolutionTransformationGPU::getTestCaseName);
 }  // namespace

@@ -1,12 +1,18 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <level_zero/ze_api.h>
 #include <limits.h>
-#include <ze_api.h>
 #include <ze_graph_ext.h>
+
+#include <cstring>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "intel_npu/utils/logger/logger.hpp"
 #include "intel_npu/utils/zero/zero_api.hpp"
@@ -15,39 +21,40 @@
 
 namespace intel_npu {
 
-struct ArgumentDescriptor {
-    ze_graph_argument_properties_3_t info;
-    uint32_t idx;
-};
-
 namespace zeroUtils {
 
-#define THROW_ON_FAIL_FOR_LEVELZERO_EXT(step, result, graph_ddi_table_ext)              \
-    if (ZE_RESULT_SUCCESS != result) {                                                  \
-        OPENVINO_THROW("L0 ",                                                           \
-                       step,                                                            \
-                       " result: ",                                                     \
-                       ze_result_to_string(result),                                     \
-                       ", code 0x",                                                     \
-                       std::hex,                                                        \
-                       uint64_t(result),                                                \
-                       " - ",                                                           \
-                       ze_result_to_description(result),                                \
-                       " . ",                                                           \
-                       intel_npu::zeroUtils::getLatestBuildError(graph_ddi_table_ext)); \
+#define THROW_ON_FAIL_FOR_LEVELZERO_EXT(step, result, graph_ddi_table_ext)                  \
+    {                                                                                       \
+        ze_result_t ret = (result);                                                         \
+        if (ZE_RESULT_SUCCESS != ret) {                                                     \
+            OPENVINO_THROW("L0 ",                                                           \
+                           step,                                                            \
+                           " result: ",                                                     \
+                           intel_npu::ze_result_to_string(ret),                             \
+                           ", code 0x",                                                     \
+                           std::hex,                                                        \
+                           uint64_t(ret),                                                   \
+                           " - ",                                                           \
+                           intel_npu::ze_result_to_description(ret),                        \
+                           " . ",                                                           \
+                           intel_npu::zeroUtils::getLatestBuildError(graph_ddi_table_ext)); \
+        }                                                                                   \
     }
 
-#define THROW_ON_FAIL_FOR_LEVELZERO(step, result)         \
-    if (ZE_RESULT_SUCCESS != result) {                    \
-        OPENVINO_THROW("L0 ",                             \
-                       step,                              \
-                       " result: ",                       \
-                       ze_result_to_string(result),       \
-                       ", code 0x",                       \
-                       std::hex,                          \
-                       uint64_t(result),                  \
-                       " - ",                             \
-                       ze_result_to_description(result)); \
+#define THROW_ON_FAIL_FOR_LEVELZERO(step, result)                     \
+    {                                                                 \
+        ze_result_t ret = (result);                                   \
+        if (ZE_RESULT_SUCCESS != ret) {                               \
+            OPENVINO_THROW("L0 ",                                     \
+                           step,                                      \
+                           " result: ",                               \
+                           intel_npu::ze_result_to_string(ret),       \
+                           ", code 0x",                               \
+                           std::hex,                                  \
+                           uint64_t(ret),                             \
+                           " - ",                                     \
+                           intel_npu::ze_result_to_description(ret)); \
+        }                                                             \
     }
 
 static inline ze_command_queue_priority_t toZeQueuePriority(const ov::hint::Priority& val) {
@@ -63,6 +70,17 @@ static inline ze_command_queue_priority_t toZeQueuePriority(const ov::hint::Prio
     }
 }
 
+static inline std::optional<ze_command_queue_workload_type_t> toZeQueueWorkloadType(const ov::WorkloadType val) {
+    switch (val) {
+    case ov::WorkloadType::DEFAULT:
+        return std::optional<ze_command_queue_workload_type_t>{ZE_WORKLOAD_TYPE_DEFAULT};
+    case ov::WorkloadType::EFFICIENT:
+        return std::optional<ze_command_queue_workload_type_t>{ZE_WORKLOAD_TYPE_BACKGROUND};
+    default:
+        OPENVINO_THROW("Incorrect workload type.");
+    }
+}
+
 static inline ov::element::Type_t toOVElementType(const ze_graph_argument_precision_t zeElementType) {
     switch (zeElementType) {
     case ZE_GRAPH_ARGUMENT_PRECISION_UNKNOWN:
@@ -73,6 +91,8 @@ static inline ov::element::Type_t toOVElementType(const ze_graph_argument_precis
         return ov::element::Type_t::boolean;
     case ZE_GRAPH_ARGUMENT_PRECISION_NF4:
         return ov::element::Type_t::nf4;
+    case ZE_GRAPH_ARGUMENT_PRECISION_FP4_E2M1:
+        return ov::element::Type_t::f4e2m1;
     case ZE_GRAPH_ARGUMENT_PRECISION_FP8_E4M3:
         return ov::element::Type_t::f8e4m3;
     case ZE_GRAPH_ARGUMENT_PRECISION_FP8_E5M2:
@@ -97,6 +117,8 @@ static inline ov::element::Type_t toOVElementType(const ze_graph_argument_precis
         return ov::element::Type_t::i32;
     case ZE_GRAPH_ARGUMENT_PRECISION_INT64:
         return ov::element::Type_t::i64;
+    case ZE_GRAPH_ARGUMENT_PRECISION_UINT2:
+        return ov::element::Type_t::u2;
     case ZE_GRAPH_ARGUMENT_PRECISION_BIN:
         return ov::element::Type_t::u1;
     case ZE_GRAPH_ARGUMENT_PRECISION_UINT4:
@@ -112,53 +134,6 @@ static inline ov::element::Type_t toOVElementType(const ze_graph_argument_precis
     default:
         return ov::element::Type_t::dynamic;
     }
-}
-
-static inline uint32_t findCommandQueueGroupOrdinal(
-    ze_device_handle_t device_handle,
-    const ze_command_queue_group_property_flags_t& command_queue_group_property) {
-    auto log = Logger::global().clone("findCommandQueueGroupOrdinal");
-
-    std::vector<ze_command_queue_group_properties_t> command_group_properties;
-    uint32_t command_queue_group_count = 0;
-
-    // Discover all command queue groups
-    THROW_ON_FAIL_FOR_LEVELZERO(
-        "zeDeviceGetCommandQueueGroupProperties",
-        zeDeviceGetCommandQueueGroupProperties(device_handle, &command_queue_group_count, nullptr));
-
-    log.debug("zero_utils::findCommandQueueGroupOrdinal - resize command_queue_group_count");
-    command_group_properties.resize(command_queue_group_count);
-
-    for (auto& prop : command_group_properties) {
-        prop.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
-        prop.pNext = nullptr;
-    }
-
-    THROW_ON_FAIL_FOR_LEVELZERO("zeDeviceGetCommandQueueGroupProperties",
-                                zeDeviceGetCommandQueueGroupProperties(device_handle,
-                                                                       &command_queue_group_count,
-                                                                       command_group_properties.data()));
-
-    for (uint32_t index = 0; index < command_group_properties.size(); ++index) {
-        const auto& flags = command_group_properties[index].flags;
-        if (flags == command_queue_group_property) {
-            return index;
-        }
-    }
-
-    // if we don't find a group where only the proper flag is enabled then search for a group where that flag is
-    // enabled
-    for (uint32_t index = 0; index < command_group_properties.size(); ++index) {
-        const auto& flags = command_group_properties[index].flags;
-        if (flags & command_queue_group_property) {
-            return index;
-        }
-    }
-
-    // if still don't find compute flag, return a warning
-    log.warning("Fail to find a command queue group that contains compute flag, it will be set to 0.");
-    return 0;
 }
 
 static inline std::string getLatestBuildError(ze_graph_dditable_ext_curr_t& _graph_ddi_table_ext) {
@@ -201,20 +176,134 @@ static inline std::string getLatestBuildError(ze_graph_dditable_ext_curr_t& _gra
     }
 }
 
-static inline bool memory_was_allocated_in_the_same_l0_context(ze_context_handle_t hContext, const void* ptr) {
+static inline uint64_t get_l0_context_memory_allocation_id(ze_context_handle_t handle, const void* ptr) {
     ze_memory_allocation_properties_t desc = {};
     desc.stype = ZE_STRUCTURE_TYPE_MEMORY_ALLOCATION_PROPERTIES;
-    auto res = intel_npu::zeMemGetAllocProperties(hContext, ptr, &desc, nullptr);
-    if (res == ZE_RESULT_SUCCESS) {
-        if (desc.id) {
-            if ((desc.type & ZE_MEMORY_TYPE_HOST) || (desc.type & ZE_MEMORY_TYPE_DEVICE) ||
-                (desc.type & ZE_MEMORY_TYPE_SHARED)) {
-                return true;
-            }
+    auto res = intel_npu::zeMemGetAllocProperties(handle, ptr, &desc, nullptr);
+    if (res == ZE_RESULT_SUCCESS && desc.id > 0 &&
+        ((desc.type == ZE_MEMORY_TYPE_HOST) || (desc.type == ZE_MEMORY_TYPE_DEVICE) ||
+         (desc.type == ZE_MEMORY_TYPE_SHARED) || (desc.type == ZE_MEMORY_TYPE_HOST_IMPORTED))) {
+        return desc.id;
+    }
+
+    return 0;
+}
+
+template <typename Type>
+std::optional<Type> extract_object(const ov::AnyMap& params, const ov::Property<Type>& p) {
+    auto itrHandle = params.find(p.name());
+    if (itrHandle == params.end()) {
+        return std::nullopt;
+    }
+
+    return ov::Any(itrHandle->second).as<Type>();
+}
+
+static inline size_t get_capacity_size(const ov::Shape& shape, const ov::Strides& strides) {
+    size_t capacity = 0;
+    const size_t rank = shape.size();
+    for (size_t i = 0; i < rank; ++i) {
+        if (i == rank - 1) {
+            // Last dimension: use shape[i] * stride[i]
+            capacity += shape[i] * strides[i];
+        } else {
+            // Other dimensions: use (shape[i] - 1) * stride[i]
+            capacity += (shape[i] - 1) * strides[i];
         }
     }
 
-    return false;
+    return capacity;
+}
+
+static inline uint32_t findCommandQueueGroupOrdinal(
+    ze_device_handle_t device_handle,
+    const ze_command_queue_group_property_flags_t command_queue_group_property) {
+    std::vector<ze_command_queue_group_properties_t> command_group_properties;
+    uint32_t command_queue_group_count = 0;
+
+    // Discover all command queue groups
+    THROW_ON_FAIL_FOR_LEVELZERO(
+        "zeDeviceGetCommandQueueGroupProperties",
+        intel_npu::zeDeviceGetCommandQueueGroupProperties(device_handle, &command_queue_group_count, nullptr));
+
+    command_group_properties.resize(command_queue_group_count);
+
+    for (auto& prop : command_group_properties) {
+        prop.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+        prop.pNext = nullptr;
+    }
+
+    THROW_ON_FAIL_FOR_LEVELZERO("zeDeviceGetCommandQueueGroupProperties",
+                                intel_npu::zeDeviceGetCommandQueueGroupProperties(device_handle,
+                                                                                  &command_queue_group_count,
+                                                                                  command_group_properties.data()));
+
+    for (uint32_t index = 0; index < command_group_properties.size(); ++index) {
+        const auto& flags = command_group_properties[index].flags;
+        if (flags == command_queue_group_property) {
+            return index;
+        }
+    }
+
+    // if we don't find a group where only the proper flag is enabled then search for a group where that flag is
+    // enabled
+    for (uint32_t index = 0; index < command_group_properties.size(); ++index) {
+        const auto& flags = command_group_properties[index].flags;
+        if (flags & command_queue_group_property) {
+            return index;
+        }
+    }
+
+    // if still don't find compute flag, return 0
+    return 0;
+}
+
+static inline bool isExtensionNameMatching(const char* propertyName, const char* extName) {
+    if (strcmp(propertyName, extName) == 0) {
+        return true;
+    }
+
+    // Older drivers use specific names for different graph ext versions, e.g.: ZE_extension_graph_1_1
+    if (strcmp(extName, ZE_GRAPH_EXT_NAME) != 0) {
+        return false;
+    }
+
+    const size_t extNameLen = strlen(extName);
+    return strncmp(propertyName, extName, extNameLen) == 0 && propertyName[extNameLen] == '_' &&
+           propertyName[extNameLen + 1] >= '0' && propertyName[extNameLen + 1] <= '9';
+}
+
+static inline std::tuple<uint32_t, std::string> queryDriverExtensionVersion(
+    const char* extName,
+    uint32_t extCurrentVersion,
+    const std::vector<ze_driver_extension_properties_t>& extProps,
+    uint32_t count) {
+    const char* functionExtName = nullptr;
+    uint32_t targetVersion = 0;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& property = extProps[i];
+
+        if (!isExtensionNameMatching(property.name, extName)) {
+            continue;
+        }
+
+        if (property.version >= extCurrentVersion) {
+            functionExtName = property.name;
+            targetVersion = extCurrentVersion;
+            break;
+        }
+
+        // Use the latest version supported by the driver - We need to go through all the properties for older drivers
+        // that use specific names for different graph ext versions, e.g.: ZE_extension_graph_1_1,
+        // ZE_extension_graph_1_2
+        if (property.version > targetVersion) {
+            functionExtName = property.name;
+            targetVersion = property.version;
+        }
+    }
+
+    return std::make_tuple(targetVersion, functionExtName ? functionExtName : "");
 }
 
 }  // namespace zeroUtils

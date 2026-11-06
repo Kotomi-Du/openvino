@@ -1,12 +1,12 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "onnx_utils.hpp"
 
-#include <openvino/runtime/core.hpp>
 #include <vector>
 
+#include "openvino/runtime/core.hpp"
 #include "utils.hpp"
 
 using namespace std;
@@ -16,10 +16,7 @@ using namespace ov::frontend;
 // For compatibility purposes, need to remove when will be unused
 const std::string ONNX_FE = "onnx";
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace tests {
+namespace ov::frontend::onnx::tests {
 
 const std::string ONNX_FE = ::ONNX_FE;
 
@@ -137,7 +134,4 @@ std::string onnx_backend_manifest(const std::string& manifest) {
     return ov::util::path_join({ov::test::utils::getExecutableDirectory(), manifest}).string();
 }
 
-}  // namespace tests
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::tests

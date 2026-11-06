@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,7 +26,7 @@ struct ctc_greedy_decoder_params : public base_params {
 class CTCGreedyDecoderKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~CTCGreedyDecoderKernelBase() {}
+    ~CTCGreedyDecoderKernelBase() override = default;
     using DispatchData = CommonDispatchData;
 
 protected:

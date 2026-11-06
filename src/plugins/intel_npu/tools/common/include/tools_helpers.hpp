@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,7 +18,9 @@ struct InputInfo {
 };
 using InputsInfo = std::map<std::string, InputInfo>;
 
-std::string parameterNameToTensorName(std::string& name, std::vector<ov::Output<ov::Node>>& inputs_info) {
+// NodeType is either ov::Node (ov::Model::inputs()) or const ov::Node (ov::CompiledModel::inputs()).
+template <typename NodeType>
+std::string parameterNameToTensorName(const std::string& name, const std::vector<ov::Output<NodeType>>& inputs_info) {
     // Looking for a tensor name match
     for (const auto& port : inputs_info) {
         if (port.get_names().count(name) > 0) {
@@ -35,8 +37,9 @@ std::string parameterNameToTensorName(std::string& name, std::vector<ov::Output<
                              "\" is not found neither in tensor names nor in nodes names.");
 }
 
-std::map<std::string, std::vector<std::string>> parseInputParameters(std::string& parameter_string,
-                                                                     std::vector<ov::Output<ov::Node>>& input_info) {
+template <typename NodeType>
+std::map<std::string, std::vector<std::string>> parseInputParameters(const std::string& parameter_string,
+                                                                     const std::vector<ov::Output<NodeType>>& input_info) {
     // Parse parameter string like "input0[value0],input1[value1]" or "[value]" (applied to all
     // inputs)
     std::map<std::string, std::vector<std::string>> return_value;
@@ -52,7 +55,7 @@ std::map<std::string, std::vector<std::string>> parseInputParameters(std::string
         if (!input_name.empty()) {
             return_value[parameterNameToTensorName(input_name, input_info)].push_back(std::move(input_value));
         } else {
-            for (auto& item : input_info) {
+            for (const auto& item : input_info) {
                 return_value[item.get_any_name()].push_back(input_value);
             }
         }
@@ -71,6 +74,22 @@ std::map<std::string, std::vector<std::string>> parseInputParameters(std::string
     if (!search_string.empty())
         throw std::logic_error("Can't parse input parameter string: " + parameter_string);
     return return_value;
+}
+
+bool hasOtherDynamicDims(const ov::PartialShape& shape, const ov::Layout& layout) {
+    auto batch_idx = ov::layout::batch_idx(layout);
+
+    for (size_t dim_idx = 0; dim_idx < shape.size(); dim_idx++) {
+        // Skip the batch dimension
+        if (dim_idx == static_cast<size_t>(batch_idx)) {
+            continue;
+        }
+
+        if (shape[dim_idx].is_dynamic()) {
+            return true;  // Found dynamic dimension other than batch
+        }
+    }
+    return false;
 }
 
 /**
@@ -106,16 +125,16 @@ void boundDynamicShape(std::shared_ptr<ov::Model>& model, bool shapeOrBatchGiven
             item->set_layout(ov::Layout(layout.to_string().insert(1, "N,")));
             layout = item->get_layout();
         }
-        if (shape[ov::layout::batch_idx(layout)].is_dynamic()) {
+        auto otherDimsDynamic = hasOtherDynamicDims(shape, layout);
+        if (shape[ov::layout::batch_idx(layout)].is_dynamic() && otherDimsDynamic) {
             if (shapeOrBatchGiven) {
                 throw std::logic_error("ERROR: Shape \"" + shape.to_string() + "\"" +
                                        " has dynamic batch size which is not supported by NPU\n");
-            }
-            else {
+            } else {
                 std::cout << "WARNING: Shape \"" + shape.to_string() + "\"" +
-                             " has dynamic batch size which is not supported by NPU\n"
-                             "         Setting batch to 1 forcibly" 
-                            << std::endl;
+                                 " has dynamic batch size which is not the only dynamic dimension. This scenario\n"
+                                 " is not yet supported by NPU. Setting batch to 1 forcibly"
+                          << std::endl;
                 ov::set_batch(model, 1);
                 // Get the shape again
                 shape = item->get_partial_shape();
@@ -148,8 +167,12 @@ void boundDynamicShape(std::shared_ptr<ov::Model>& model, bool shapeOrBatchGiven
  *                          the shape string contains multiple shapes for one input, or if the
  *                          model's shape is dynamic and not supported by the device.
  */
-void reshape(ov::OutputVector inputsInfo, InputsInfo& infoMap, std::shared_ptr<ov::Model>& model,
-             std::string& shapeString, int overrideModelBatchSize, std::string_view device) {
+void reshape(ov::OutputVector inputsInfo,
+             InputsInfo& infoMap,
+             std::shared_ptr<ov::Model>& model,
+             std::string& shapeString,
+             int overrideModelBatchSize,
+             std::string_view device) {
     std::vector<InputsInfo> infoMaps;
 
     // shape and override_model_batch_size cannot be specificed together
@@ -212,8 +235,8 @@ void reshape(ov::OutputVector inputsInfo, InputsInfo& infoMap, std::shared_ptr<o
             }
         }
         model->reshape(newShapes);
-    } else { // FLAGS_shape is empty
-        if (device.find("NPU") != std::string::npos ||
+    } else {  // FLAGS_shape is empty
+        if (device.find("NPU") != std::string::npos || device.find("IMD") != std::string::npos ||
             // FIXME: SIT on CPU also requires to bound dynamic shapes
             device.find("CPU") != std::string::npos || device.find("TEMPLATE") != std::string::npos) {
             boundDynamicShape(model, false);

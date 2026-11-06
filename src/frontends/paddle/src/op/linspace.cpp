@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,10 +6,7 @@
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/frontend/paddle/visibility.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 NamedOutputs linspace(const NodeContext& node) {
     auto start = node.get_input("Start");
     auto stop = node.get_input("Stop");
@@ -22,9 +19,9 @@ NamedOutputs linspace(const NodeContext& node) {
     // compute step value, i.e. distance between neighbor values of the result
     Output<Node> step = std::make_shared<default_opset::Subtract>(stop, start);  //[-1]
     auto const_one = std::make_shared<default_opset::Constant>(element::i32, Shape{}, 1);
-    Output<Node> num_minus_one = std::make_shared<default_opset::Subtract>(num, const_one);   //[3]
-    auto num_none_zero = std::make_shared<default_opset::Greater>(num_minus_one, const_one);  //[ture]
-    num_minus_one = std::make_shared<default_opset::Select>(num_none_zero, num_minus_one, const_one);
+    Output<Node> num_minus_one = std::make_shared<default_opset::Subtract>(num, const_one);  //[3]
+    auto num_non_zero = std::make_shared<default_opset::Greater>(num_minus_one, const_one);  //[true]
+    num_minus_one = std::make_shared<default_opset::Select>(num_non_zero, num_minus_one, const_one);
 
     num_minus_one = std::make_shared<default_opset::Convert>(num_minus_one, element::f32);
     step = std::make_shared<default_opset::Divide>(step, num_minus_one);  //[-1/3]
@@ -47,7 +44,4 @@ NamedOutputs linspace(const NodeContext& node) {
         return node.default_single_output_mapping({result}, {"Out"});
     }
 }
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

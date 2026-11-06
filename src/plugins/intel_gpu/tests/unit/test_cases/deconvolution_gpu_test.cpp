@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,6 +11,8 @@
 #include <intel_gpu/primitives/eltwise.hpp>
 #include <intel_gpu/primitives/reorder.hpp>
 #include <intel_gpu/primitives/data.hpp>
+
+#include "deconvolution_inst.h"
 
 using namespace cldnn;
 using namespace ::tests;
@@ -326,6 +328,53 @@ TYPED_TEST(deconvolution_basic, no_bias_basic_wsiz2x2_in2x2x1x1_nopad_exclude_fu
         21.f, 40.5f, 13.5f
     };
 
+    for (unsigned int i = 0; i < expected_output_vec.size(); i++)
+    {
+        ASSERT_FLOAT_EQ(expected_output_vec[i], output_ptr[i]);
+    }
+}
+
+TEST(deconvolution_f32_fw_gpu, dynamic_byxf_wsiz2x2_in2x2x2x1_stride2_nopad) {
+    auto& engine = get_test_engine();
+
+    auto input = engine.allocate_memory({ ov::PartialShape{ 1, 2, 2, 2 }, data_types::f32, format::byxf });
+    auto weights = engine.allocate_memory({ ov::PartialShape{ 1, 2, 2, 2 }, data_types::f32, format::oiyx });
+    auto biases = engine.allocate_memory({ ov::PartialShape{ 1, 1, 1, 1 }, data_types::f32, format::bfyx });
+
+    // byxf physical order: features are innermost
+    set_values(input, { 8.f, 1.f, 0.5f, 2.f, 6.f, 3.f, 9.f, 4.f });
+    set_values(weights, { -2.0f, 0.5f, 3.5f, 1.5f, 1.f, 0.f, 0.f, 1.f });
+    set_values(biases, { 1.0f });
+
+    topology topology(
+        input_layout("input", { ov::PartialShape{ ov::Dimension::dynamic(), 2, 2, 2 }, data_types::f32, format::byxf }),
+        data("weights", weights),
+        data("biases", biases),
+        deconvolution("deconv", input_info("input"), { "weights" }, { "biases" }, { 2, 2 }),
+        reorder("plane_output", input_info("deconv"), format::bfyx, cldnn::data_types::f32)
+    );
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config.set_property(ov::intel_gpu::optimize_data(true));
+    network network(engine, topology, config);
+    network.set_input_data("input", input);
+
+    auto outputs = network.execute();
+
+    auto output_prim = outputs.at("plane_output").get_memory();
+    ASSERT_EQ(output_prim->get_layout().get_partial_shape(), (ov::PartialShape{ 1, 1, 4, 4 }));
+
+    cldnn::mem_lock<float> output_ptr (output_prim, get_test_stream());
+
+    std::vector<float> expected_output_vec = {
+        -14.f, 5.f, 2.f, 1.25f,
+        29.f, 14.f, 2.75f, 3.75f,
+        -8.f, 4.f, -13.f, 5.5f,
+        22.f, 13.f, 32.5f, 18.5f
+    };
+
+    ASSERT_EQ(output_ptr.size(), expected_output_vec.size());
     for (unsigned int i = 0; i < expected_output_vec.size(); i++)
     {
         ASSERT_FLOAT_EQ(expected_output_vec[i], output_ptr[i]);
@@ -1797,7 +1846,7 @@ TYPED_TEST(deconvolution_basic, basic_f16_k9x9_s2x2_pad4x4) {
 
     auto outputs_ref = network_ref.execute();
     auto output_ref_prim = outputs_ref.at("plane_output").get_memory();
-    cldnn::mem_lock<ov::float16> output_ref_ptr(output_ref_prim, get_test_stream());
+    cldnn::mem_lock<ov::float16, mem_lock_type::read> output_ref_ptr(output_ref_prim, get_test_stream());
 
     std::vector<ov::float16> output_vec_ref;
     for (unsigned int i = 0; i < output_ref_prim->get_layout().count(); i++) {
@@ -1821,7 +1870,7 @@ TYPED_TEST(deconvolution_basic, basic_f16_k9x9_s2x2_pad4x4) {
     ASSERT_EQ(outputs_act.size(), size_t(1));
     ASSERT_EQ(outputs_act.begin()->first, "out");
     auto output_act_prim = outputs_act.begin()->second.get_memory();
-    cldnn::mem_lock<ov::float16> output_act_ptr(output_act_prim, get_test_stream());
+    cldnn::mem_lock<ov::float16, mem_lock_type::read> output_act_ptr(output_act_prim, get_test_stream());
 
     std::vector<float> output_vec;
     for (unsigned int i = 0; i < output_act_prim->get_layout().count(); i++) {
@@ -3091,14 +3140,21 @@ TEST(deconvolution_gpu_onednn, spatial_1d) {
         return topology;
     };
 
-    auto topology_test = create_topology();
+    auto topology_test_blocked = create_topology();
+    auto topology_test_planar = create_topology();
     auto topology_ref = create_topology();
 
-    ExecutionConfig config_test = get_test_default_config(engine);
-    ov::intel_gpu::ImplementationDesc deconv_impl_test = { format::b_fs_yx_fsv16, "", impl_types::onednn };
-    config_test.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ { "deconv", deconv_impl_test } }));
-    config_test.set_property(ov::intel_gpu::optimize_data(true));
-    config_test.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    ExecutionConfig config_test_blocked = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc deconv_impl_test_blocked = { format::b_fs_yx_fsv16, "", impl_types::onednn };
+    config_test_blocked.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ { "deconv", deconv_impl_test_blocked } }));
+    config_test_blocked.set_property(ov::intel_gpu::optimize_data(true));
+    config_test_blocked.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+
+    ExecutionConfig config_test_planar = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc deconv_impl_test_planar = { format::bfyx, "", impl_types::onednn };
+    config_test_planar.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ { "deconv", deconv_impl_test_planar } }));
+    config_test_planar.set_property(ov::intel_gpu::optimize_data(true));
+    config_test_planar.set_property(ov::intel_gpu::allow_new_shape_infer(true));
 
     ExecutionConfig config_ref = get_test_default_config(engine);
     ov::intel_gpu::ImplementationDesc deconv_impl_ref = { format::bfyx, "", impl_types::ocl };
@@ -3106,11 +3162,110 @@ TEST(deconvolution_gpu_onednn, spatial_1d) {
     config_ref.set_property(ov::intel_gpu::optimize_data(true));
     config_ref.set_property(ov::intel_gpu::allow_new_shape_infer(true));
 
-    network network_test(engine, topology_test, config_test);
+    network network_test_blocked(engine, topology_test_blocked, config_test_blocked);
+    network network_test_planar(engine, topology_test_planar, config_test_planar);
     network network_ref(engine, topology_ref, config_ref);
 
     auto input_data = rg.generate_random_1d<ov::float16>(input_pshape.size(), -1, 1);
     auto input_mem = engine.allocate_memory({ input_pshape, data_types::f16, format::bfyx });
+    set_values(input_mem, input_data);
+
+    network_test_blocked.set_input_data("input", input_mem);
+    network_test_planar.set_input_data("input", input_mem);
+    network_ref.set_input_data("input", input_mem);
+
+    auto outputs_test_blocked = network_test_blocked.execute();
+    auto outputs_test_planar = network_test_planar.execute();
+    auto outputs_ref = network_ref.execute();
+
+    ASSERT_EQ(outputs_test_blocked.size(), size_t(1));
+    ASSERT_EQ(outputs_test_blocked.begin()->first, "reorder");
+    ASSERT_EQ(outputs_test_planar.size(), size_t(1));
+    ASSERT_EQ(outputs_test_planar.begin()->first, "reorder");
+    ASSERT_EQ(outputs_ref.size(), size_t(1));
+    ASSERT_EQ(outputs_ref.begin()->first, "reorder");
+
+    auto output_memory_test_blocked = outputs_test_blocked.at("reorder").get_memory();
+    auto output_layout_test_blocked = output_memory_test_blocked->get_layout();
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_test_blocked(output_memory_test_blocked, get_test_stream());
+
+    auto output_memory_test_planar = outputs_test_planar.at("reorder").get_memory();
+    auto output_layout_test_planar = output_memory_test_planar->get_layout();
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_test_planar(output_memory_test_planar, get_test_stream());
+
+    auto output_memory_ref = outputs_ref.at("reorder").get_memory();
+    auto output_layout_ref = output_memory_ref->get_layout();
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_ref(output_memory_ref, get_test_stream());
+
+    ov::PartialShape expected_shape = {1, 16, 8};
+    ASSERT_EQ(output_layout_test_blocked.get_partial_shape(), expected_shape);
+    ASSERT_EQ(output_layout_test_planar.get_partial_shape(), expected_shape);
+    ASSERT_EQ(output_layout_ref.get_partial_shape(), expected_shape);
+
+    for (size_t i = 0; i < output_memory_ref->count(); i++) {
+        ASSERT_EQ(output_ptr_ref.data()[i], output_ptr_test_blocked.data()[i]);
+        ASSERT_EQ(output_ptr_ref.data()[i], output_ptr_test_planar.data()[i]);
+    }
+}
+
+TEST(deconvolution_gpu_onednn, spatial_1d_static_not_reference_impl) {
+    auto& engine = get_test_engine();
+    if (!engine.get_device_info().supports_immad)
+        return;
+
+    tests::random_generator rg(GET_SUITE_NAME);
+    ov::PartialShape input_pshape = {1, 32, 20};
+    ov::PartialShape weights_pshape = {16, 32, 4};
+    layout in_layout{ input_pshape, data_types::f16, format::bfyx };
+    layout weights_layout{ weights_pshape, data_types::f16, format::bfyx };
+
+    auto weights_data = rg.generate_random_1d<ov::float16>(weights_layout.count(), -1, 1);
+    auto weights_mem = engine.allocate_memory(weights_layout);
+    set_values(weights_mem, weights_data);
+
+    auto create_topology = [&]() {
+        topology topology;
+        topology.add(input_layout("input", in_layout));
+        topology.add(data("weights", weights_mem));
+        topology.add(deconvolution("deconv",
+                                   input_info("input"),
+                                   { "weights" },
+                                   1,
+                                   ov::Strides{2},
+                                   ov::CoordinateDiff{0},
+                                   ov::Strides{1}));
+        topology.add(reorder("reorder", input_info("deconv"), format::bfyx, data_types::f32));
+        return topology;
+    };
+
+    auto topology_test = create_topology();
+    auto topology_ref = create_topology();
+
+    ExecutionConfig config_test = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc deconv_impl_test = { format::any, "", impl_types::onednn };
+    config_test.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ { "deconv", deconv_impl_test } }));
+    config_test.set_property(ov::intel_gpu::optimize_data(true));
+    config_test.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+
+    ExecutionConfig config_ref = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc deconv_impl_ref = { format::bfyx, "", impl_types::ocl };
+    config_ref.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ { "deconv", deconv_impl_ref } }));
+    config_ref.set_property(ov::intel_gpu::optimize_data(true));
+    config_ref.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+
+    network network_test(engine, topology_test, config_test);
+    network network_ref(engine, topology_ref, config_ref);
+
+    // A static 1D deconvolution keeps plain 3D activations, while its weights layout is left to oneDNN. Pinning the weights
+    // to a plain layout leaves only oneDNN's reference implementation.
+    auto deconv_impl = network_test.get_primitive("deconv")->get_impl();
+    ASSERT_NE(deconv_impl, nullptr);
+    ASSERT_TRUE(deconv_impl->is_onednn());
+    const auto impl_info = network_test.get_implementation_info("deconv");
+    ASSERT_EQ(impl_info.find("ref"), std::string::npos) << impl_info;
+
+    auto input_data = rg.generate_random_1d<ov::float16>(in_layout.count(), -1, 1);
+    auto input_mem = engine.allocate_memory(in_layout);
     set_values(input_mem, input_data);
 
     network_test.set_input_data("input", input_mem);
@@ -3119,25 +3274,85 @@ TEST(deconvolution_gpu_onednn, spatial_1d) {
     auto outputs_test = network_test.execute();
     auto outputs_ref = network_ref.execute();
 
-    ASSERT_EQ(outputs_test.size(), size_t(1));
-    ASSERT_EQ(outputs_test.begin()->first, "reorder");
-    ASSERT_EQ(outputs_ref.size(), size_t(1));
-    ASSERT_EQ(outputs_ref.begin()->first, "reorder");
-
     auto output_memory_test = outputs_test.at("reorder").get_memory();
-    auto output_layout_test = output_memory_test->get_layout();
-    cldnn::mem_lock<float> output_ptr_test(output_memory_test, get_test_stream());
-
     auto output_memory_ref = outputs_ref.at("reorder").get_memory();
-    auto output_layout_ref = output_memory_ref->get_layout();
-    cldnn::mem_lock<float> output_ptr_ref(output_memory_ref, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_test(output_memory_test, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_ref(output_memory_ref, get_test_stream());
 
-    ov::PartialShape expected_shape = {1, 16, 8};
-    ASSERT_EQ(output_layout_test.get_partial_shape(), expected_shape);
-    ASSERT_EQ(output_layout_ref.get_partial_shape(), expected_shape);
+    ov::PartialShape expected_shape = {1, 16, 42};
+    ASSERT_EQ(output_memory_test->get_layout().get_partial_shape(), expected_shape);
+    ASSERT_EQ(output_memory_ref->get_layout().get_partial_shape(), expected_shape);
 
     for (size_t i = 0; i < output_memory_ref->count(); i++) {
-        ASSERT_EQ(output_ptr_ref.data()[i], output_ptr_test.data()[i]);
+        ASSERT_NEAR(output_ptr_ref.data()[i], output_ptr_test.data()[i], 1e-1f) << "i = " << i;
+    }
+}
+
+TEST(deconvolution_gpu_onednn, input_b_fs_zyx_fsv16_output_bfzyx_stride2_nopad) {
+    auto& engine = get_test_engine();
+    if (!engine.get_device_info().supports_immad)
+        return;
+
+    auto input = engine.allocate_memory({ data_types::f32, format::b_fs_zyx_fsv16, { 1, 16, 4, 4, 4 } });
+    auto weights = engine.allocate_memory({ data_types::f32, format::bfzyx, { 8, 16, 3, 3, 3 } });
+    auto biases = engine.allocate_memory({ data_types::f32, format::bfyx, { 1, 8, 1, 1 } });
+
+    tests::random_generator rg(GET_SUITE_NAME);
+    auto input_data = rg.generate_random_1d<float>(input->count(), -1.0f, 1.0f);
+    auto weights_data = rg.generate_random_1d<float>(weights->count(), -0.5f, 0.5f);
+    auto bias_data = rg.generate_random_1d<float>(biases->count(), -0.1f, 0.1f, 256);
+
+    set_values(input, input_data);
+    set_values(weights, weights_data);
+    set_values(biases, bias_data);
+
+    auto create_topology =[&]() {
+        topology topology;
+        topology.add(input_layout("input", input->get_layout()));
+        topology.add(data("weights", weights));
+        topology.add(data("biases", biases));
+        topology.add(deconvolution("deconv", input_info("input"), { "weights" }, { "biases" }, { 2, 2, 2 }, { 0, 0, 0 }));
+        topology.add(activation("activation", input_info("deconv"), activation_func::relu_negative_slope, { 0.1f, 0.0f }));
+        topology.add(reorder("output", input_info("activation"), format::bfzyx, data_types::f32));
+        return topology;
+    };
+
+    auto topology_test = create_topology();
+    auto topology_ref = create_topology();
+
+    ov::intel_gpu::ImplementationDesc impl_test = { format::bzyxf, std::string(""), impl_types::onednn };
+    ov::intel_gpu::ImplementationDesc impl_ref = { format::bfzyx, std::string(""), impl_types::ocl };
+
+    ExecutionConfig cfg_test = get_test_default_config(engine);
+    cfg_test.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"deconv", impl_test} }));
+    cfg_test.set_property(ov::intel_gpu::optimize_data(true));
+
+    ExecutionConfig cfg_ref = get_test_default_config(engine);
+    cfg_ref.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"deconv", impl_ref} }));
+    cfg_ref.set_property(ov::intel_gpu::optimize_data(true));
+
+    network network_test(engine, topology_test, cfg_test);
+    network network_ref(engine, topology_ref, cfg_ref);
+
+    network_test.set_input_data("input", input);
+    network_ref.set_input_data("input", input);
+
+    auto outputs_test = network_test.execute();
+    auto outputs_ref = network_ref.execute();
+
+    ASSERT_EQ(outputs_test.size(), size_t(1));
+    ASSERT_EQ(outputs_test.begin()->first, "output");
+    ASSERT_EQ(outputs_ref.size(), size_t(1));
+    ASSERT_EQ(outputs_ref.begin()->first, "output");
+
+    auto output_memory_test = outputs_test.begin()->second.get_memory();
+    auto output_memory_ref = outputs_ref.begin()->second.get_memory();
+
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_test(output_memory_test, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr_ref(output_memory_ref, get_test_stream());
+
+    for (size_t i = 0; i < output_memory_ref->count(); i++) {
+        ASSERT_FLOAT_EQ(output_ptr_test[i], output_ptr_ref[i]);
     }
 }
 #endif

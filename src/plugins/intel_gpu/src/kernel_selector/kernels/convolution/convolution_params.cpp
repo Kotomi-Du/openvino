@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -53,10 +53,12 @@ ParamsKey convolution_params::GetParamsKey() const {
 
     if (deformable_mode) {
         k.EnableDeformableMode();
-        if (bilinear_interpolation_pad)
+        if (bilinear_interpolation_pad) {
             k.EnableBilinearInterpolationPad();
-        if (deformable_mask_enabled)
+        }
+        if (deformable_mask_enabled) {
             k.EnableDeformableMask();
+        }
     }
 
     k.EnableQuantization(quantization);

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -98,7 +98,7 @@ KERNEL(activation)(
 // GWS.feature and GWS.batch is aligned to 16. Otherwise, there are some idling WIs.
 #if (defined(OUTPUT_LAYOUT_B_FS_YX_FSV16) || defined(OUTPUT_LAYOUT_B_FS_YX_FSV32)) \
     && (OUTPUT_FEATURE_NUM_CONST % 16 != 0 || IS_DYNAMIC)
-    if (feature >= OUTPUT_FEATURE_NUM)
+    if (batch >= OUTPUT_BATCH_NUM || feature >= OUTPUT_FEATURE_NUM)
         return;
 #elif (defined(OUTPUT_LAYOUT_BS_FS_YX_BSV32_FSV16) || defined(OUTPUT_LAYOUT_BS_FS_YX_BSV32_FSV32)) \
     && (OUTPUT_FEATURE_NUM_CONST % 16 != 0 || OUTPUT_BATCH_NUM_CONST % 16 != 0 || IS_DYNAMIC)
@@ -113,11 +113,11 @@ KERNEL(activation)(
     #if PARAMS_NUM > 2
         #error Too many params
     #elif PARAMS_NUM == 2
-        #define NL_M_PARAMETERIZED (float)params[2*feature + 0]
-        #define NL_N_PARAMETERIZED (float)params[2*feature + 1]
+        #define NL_M_PARAMETERIZED (float)DECODE_ADDITIONAL_PARAMS_COMPUTE_TYPE(params[2*feature + 0])
+        #define NL_N_PARAMETERIZED (float)DECODE_ADDITIONAL_PARAMS_COMPUTE_TYPE(params[2*feature + 1])
     #elif PARAMS_NUM == 1
         const unsigned param_index = GET_INDEX(ADDITIONAL_PARAMS,,ORDER);
-        #define NL_M_PARAMETERIZED (float)params[param_index]
+        #define NL_M_PARAMETERIZED (float)DECODE_ADDITIONAL_PARAMS_COMPUTE_TYPE(params[param_index])
         #define NL_N_PARAMETERIZED (float)NL_N
     #else
         #define NL_M_PARAMETERIZED (float)NL_M
@@ -125,20 +125,22 @@ KERNEL(activation)(
     #endif
     #define PARAMETERIZED_ACTIVATION_PARAMS NL_M_PARAMETERIZED, NL_N_PARAMETERIZED
 
-    INPUT0_TYPE dst = ACTIVATION_KERNEL(input[src_index], PARAMETERIZED_ACTIVATION_PARAMS);
+    INPUT0_COMPUTE_TYPE dst_compute = ACTIVATION_KERNEL(DECODE_INPUT0_COMPUTE_TYPE(input[src_index]), PARAMETERIZED_ACTIVATION_PARAMS);
     #if HAS_FUSED_OPS
+		INPUT0_TYPE dst = TO_INPUT0_TYPE(dst_compute);
         FUSED_OPS;
         output[dst_index] = FUSED_OPS_RESULT;
     #else
-        output[dst_index] = dst;
+        output[dst_index] = TO_OUTPUT_TYPE(dst_compute);
     #endif
 #else
-    INPUT0_TYPE dst = ACTIVATION_KERNEL(input[src_index], ACTIVATION_PARAMS);
+    INPUT0_COMPUTE_TYPE dst_compute = ACTIVATION_KERNEL(DECODE_INPUT0_COMPUTE_TYPE(input[src_index]), ACTIVATION_PARAMS);
     #if HAS_FUSED_OPS
+		INPUT0_TYPE dst = TO_INPUT0_TYPE(dst_compute);
         FUSED_OPS;
         output[dst_index] = FUSED_OPS_RESULT;
     #else
-        output[dst_index] = dst;
+        output[dst_index] = TO_OUTPUT_TYPE(dst_compute);
     #endif
 #endif
 }

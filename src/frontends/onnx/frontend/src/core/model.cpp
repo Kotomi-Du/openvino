@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,9 +12,7 @@
 
 using namespace ::ONNX_NAMESPACE;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 std::string get_node_domain(const NodeProto& node_proto) {
     return node_proto.has_domain() ? node_proto.domain() : "";
 }
@@ -78,6 +76,4 @@ void Model::enable_opset_domain(const std::string& domain, const OperatorsBridge
     }
 }
 
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

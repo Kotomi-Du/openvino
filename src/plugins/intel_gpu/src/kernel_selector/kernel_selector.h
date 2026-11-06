@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,7 +20,7 @@ using ForceList = std::map<std::string, bool>;
 class kernel_selector_base {
 public:
     kernel_selector_base();
-    virtual ~kernel_selector_base() {}
+    virtual ~kernel_selector_base() = default;
 
     KernelData get_best_kernel(const Params& params) const;
     std::shared_ptr<KernelBase> GetImplementation(std::string& kernel_name) const;

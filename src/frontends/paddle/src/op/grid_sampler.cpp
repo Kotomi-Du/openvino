@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,10 +6,7 @@
 #include "openvino/frontend/paddle/node_context.hpp"
 #include "openvino/op/grid_sample.hpp"
 
-namespace ov {
-namespace frontend {
-namespace paddle {
-namespace op {
+namespace ov::frontend::paddle::op {
 
 using namespace ov::op;
 
@@ -27,7 +24,4 @@ NamedOutputs grid_sampler(const NodeContext& node) {
     return node.default_single_output_mapping({std::make_shared<default_opset::GridSample>(data, grid, attributes)},
                                               {"Output"});
 }
-}  // namespace op
-}  // namespace paddle
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::paddle::op

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -40,7 +40,7 @@ public:
     [[nodiscard]] ov::Any merge(const ov::NodeVector& nodes) const override {
         std::set<std::string> unique_mem_format;
 
-        for (auto& node : nodes) {
+        for (const auto& node : nodes) {
             auto it_info = node->get_rt_info().find(MemoryFormat::get_type_info_static());
             if (it_info != node->get_rt_info().end()) {
                 std::string mem_format = it_info->second.template as<MemoryFormat>().to_string();
@@ -50,10 +50,9 @@ public:
             }
         }
 
-        if (unique_mem_format.size() > 1) {
-            OPENVINO_THROW(std::string(MemoryFormat::get_type_info_static().name) +
-                           " no rule defined for multiple values.");
-        }
+        OPENVINO_ASSERT(
+            unique_mem_format.size() <= 1,
+            std::string(MemoryFormat::get_type_info_static().name) + " no rule defined for multiple values.");
 
         std::string final_mem_format;
         if (unique_mem_format.size() == 1) {

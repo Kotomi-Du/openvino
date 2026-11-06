@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,6 +20,7 @@
 #include "openvino/op/avg_pool.hpp"
 #include "openvino/op/batch_norm.hpp"
 #include "openvino/op/batch_to_space.hpp"
+#include "openvino/op/bgr_to_nv12.hpp"
 #include "openvino/op/binary_convolution.hpp"
 #include "openvino/op/bitwise_and.hpp"
 #include "openvino/op/bitwise_left_shift.hpp"
@@ -59,6 +60,7 @@
 #include "openvino/op/embeddingbag_packedsum.hpp"
 #include "openvino/op/equal.hpp"
 #include "openvino/op/erf.hpp"
+#include "openvino/op/erfinv.hpp"
 #include "openvino/op/exp.hpp"
 #include "openvino/op/experimental_detectron_detection_output.hpp"
 #include "openvino/op/experimental_detectron_generate_proposals.hpp"
@@ -83,9 +85,11 @@
 #include "openvino/op/grn.hpp"
 #include "openvino/op/group_conv.hpp"
 #include "openvino/op/group_normalization.hpp"
+#include "openvino/op/grouped_matmul.hpp"
 #include "openvino/op/gru_cell.hpp"
 #include "openvino/op/gru_sequence.hpp"
 #include "openvino/op/hard_sigmoid.hpp"
+#include "openvino/op/histc.hpp"
 #include "openvino/op/hsigmoid.hpp"
 #include "openvino/op/hswish.hpp"
 #include "openvino/op/i420_to_bgr.hpp"
@@ -140,6 +144,7 @@
 #include "openvino/op/prior_box_clustered.hpp"
 #include "openvino/op/proposal.hpp"
 #include "openvino/op/psroi_pooling.hpp"
+#include "openvino/op/qsa_prepare.hpp"
 #include "openvino/op/random_uniform.hpp"
 #include "openvino/op/range.hpp"
 #include "openvino/op/rdft.hpp"
@@ -160,6 +165,7 @@
 #include "openvino/op/result.hpp"
 #include "openvino/op/reverse.hpp"
 #include "openvino/op/reverse_sequence.hpp"
+#include "openvino/op/rgb_to_nv12.hpp"
 #include "openvino/op/rnn_cell.hpp"
 #include "openvino/op/rnn_sequence.hpp"
 #include "openvino/op/roi_align.hpp"
@@ -188,6 +194,8 @@
 #include "openvino/op/softsign.hpp"
 #include "openvino/op/space_to_batch.hpp"
 #include "openvino/op/space_to_depth.hpp"
+#include "openvino/op/sparse_attention.hpp"
+#include "openvino/op/sparse_attention_indexer.hpp"
 #include "openvino/op/sparse_fill_empty_rows.hpp"
 #include "openvino/op/split.hpp"
 #include "openvino/op/sqrt.hpp"

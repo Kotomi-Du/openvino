@@ -1,10 +1,10 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "gather_uni_kernel.hpp"
 
-#include <cpu/x64/xbyak/xbyak.h>
+#include <xbyak/xbyak.h>
 
 #include <common/c_types_map.hpp>
 #include <cpu/x64/cpu_isa_traits.hpp>
@@ -16,6 +16,7 @@
 #include "emitters/plugin/x64/jit_conversion_emitters.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/type/element_type.hpp"
+#include "utils/cpu_utils.hpp"
 
 using namespace dnnl::impl::cpu;
 
@@ -65,8 +66,8 @@ const unsigned jitGatherKernelBase::incVec[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 
 
 template <x64::cpu_isa_t isa>
 jitUniGatherKernel<isa>::jitUniGatherKernel(const jGatherConfParams& jcp)
-    : jitGatherKernelBase(jcp, x64::cpu_isa_traits<isa>::vlen, indicesTypeSize),
-      x64::jit_generator(jit_name()) {
+    : jitGatherKernelBase(jcp, x64::cpu_isa_traits_t<isa>::vlen, indicesTypeSize),
+      x64::jit_generator_t(jit_name()) {
     if (jcp.dataTypeSize == 2) {
         dataTypeShift = 1;
     } else if (jcp.dataTypeSize == 4) {
@@ -80,8 +81,14 @@ jitUniGatherKernel<isa>::jitUniGatherKernel(const jGatherConfParams& jcp)
         permMask8bitUni = permMask8bitA5;
         permMask16bitUni = permMask16bitA5;
     }
-    dstStep = is_real16_to_f32 ? 2 * vlen : vlen;
     if (is_real16_to_f32) {
+        dstStep = 2 * vlen;
+    } else if (is_f32_to_bf16) {
+        dstStep = vlen / 2;
+    } else {
+        dstStep = vlen;
+    }
+    if (is_real16_to_f32 || is_f32_to_bf16) {
         convert_emitter =
             std::make_unique<jit_convert_saturation_emitter>(this, isa, jcp.in_prec, jcp.out_prec, ov::element::f32);
     }
@@ -89,11 +96,11 @@ jitUniGatherKernel<isa>::jitUniGatherKernel(const jGatherConfParams& jcp)
 
 template <x64::cpu_isa_t isa>
 void jitUniGatherKernel<isa>::create_ker() {
-    auto code = x64::jit_generator::create_kernel();
-    if (code != dnnl::impl::status::success) {
-        OPENVINO_THROW("Could not create Gather kernel. Error code: ", std::to_string(code));
-    }
-    ker_ = (decltype(ker_))jit_ker();
+    auto code = x64::jit_generator_t::create_kernel();
+    OPENVINO_ASSERT(code == dnnl::impl::status::success,
+                    "Could not create Gather kernel. Error code: ",
+                    std::to_string(code));
+    ker_ = jit_kernel_cast<decltype(ker_)>(jit_ker());
 }
 
 template <x64::cpu_isa_t isa>
@@ -682,7 +689,7 @@ void jitUniGatherKernel<isa>::calcSrcShiftShortBlock(Vmm* vAuxPool, bool shiftFi
                 } else {
                     Xbyak::Label lBeforeAxStep;
                     Xbyak::Label lBeforeAxStepEnd;
-                    add(rSpecIdxAndAfterAxIterB, idxElPerVec * jcp.dataTypeSize);
+                    add(rSpecIdxAndAfterAxIterB, idxElPerVec * static_cast<uint32_t>(jcp.dataTypeSize));
                     cmp(rSpecIdxAndAfterAxIterB, rSpecIdxAndAfterAxSizeB);
                     jl(lBeforeAxStep, T_NEAR);
                     sub(rSpecIdxAndAfterAxIterB, rSpecIdxAndAfterAxSizeB);
@@ -723,7 +730,7 @@ void jitUniGatherKernel<isa>::calcSrcShiftShortBlock(Vmm* vAuxPool, bool shiftFi
                 vpshufd(vmmSrcBeforeAxisSumB, vmmSrcBeforeAxisSumB, 0xFF);
 
                 Xbyak::Label lBeforeAxStepEnd1;
-                add(rSpecIdxAndAfterAxIterB, idxElPerVec * jcp.dataTypeSize);
+                add(rSpecIdxAndAfterAxIterB, idxElPerVec * static_cast<uint32_t>(jcp.dataTypeSize));
                 cmp(rSpecIdxAndAfterAxIterB, rSpecIdxAndAfterAxSizeB);
                 jl(lBeforeAxStepEnd1, T_NEAR);
                 sub(rSpecIdxAndAfterAxIterB, rSpecIdxAndAfterAxSizeB);
@@ -786,7 +793,7 @@ template <x64::cpu_isa_t isa>
 void jitUniGatherKernel<isa>::store(const Xbyak::Reg64& reg_dst, Vmm& vmmSrc) {
     if (is_real16_to_f32) {
         // keep reg_dst, incremented outside
-        constexpr bool is_zmm = std::is_same<Vmm, Xbyak::Zmm>::value;
+        constexpr bool is_zmm = std::is_same_v<Vmm, Xbyak::Zmm>;
         Xbyak::Ymm ymmSrc(vmmSrc.getIdx());
         Xbyak::Xmm xmmSrc(vmmSrc.getIdx());
         if (is_zmm) {
@@ -811,6 +818,19 @@ void jitUniGatherKernel<isa>::store(const Xbyak::Reg64& reg_dst, Vmm& vmmSrc) {
             convert_emitter->emit_code({static_cast<size_t>(xmmTemp.getIdx())},
                                        {static_cast<size_t>(ymmTemp.getIdx())});
             uni_vmovups(ptr[reg_dst + vlen], ymmTemp);
+            uni_vpxor(vmmZeros, vmmZeros, vmmZeros);
+        }
+    } else if (is_f32_to_bf16) {
+        if (isa == x64::avx512_core) {
+            Xbyak::Zmm zmmTmp(31);
+            Xbyak::Ymm ymmTmp(31);
+            convert_emitter->emit_code({static_cast<size_t>(vmmSrc.getIdx())}, {static_cast<size_t>(zmmTmp.getIdx())});
+            vmovdqu16(ptr[reg_dst], ymmTmp);
+        } else {
+            Xbyak::Ymm ymmTmp(vmmZeros.getIdx());
+            Xbyak::Xmm xmmTmp(vmmZeros.getIdx());
+            convert_emitter->emit_code({static_cast<size_t>(vmmSrc.getIdx())}, {static_cast<size_t>(ymmTmp.getIdx())});
+            uni_vmovdqu(ptr[reg_dst], xmmTmp);
             uni_vpxor(vmmZeros, vmmZeros, vmmZeros);
         }
     } else {
@@ -1032,7 +1052,7 @@ void jitUniGatherKernel<isa>::tail(bool isShortIdx, bool shiftFirst, bool blocke
     auto& kAuxMask1 = masksContainer[vAux1.getIdx()];
     Xbyak::Label lEnd;
 
-    const int secondStepCycles = 4 / jcp.dataTypeSize;
+    const auto secondStepCycles = static_cast<int>(4 / jcp.dataTypeSize);
     for (int p = 0; p < secondStepCycles; p++) {
         cmp(regWorkAmount, 0);
         jle(lEnd, T_NEAR);
@@ -1065,7 +1085,7 @@ void jitUniGatherKernel<isa>::tail(bool isShortIdx, bool shiftFirst, bool blocke
 
         uni_vmovups(vAux0, vmmZeros);
         uniVpGatherDd(vAux0, ptr[regSrc + vSrcShift], kGatherMask);
-        if (jcp.dataTypeSize == 4) {
+        if (jcp.dataTypeSize == 4 && !is_f32_to_bf16) {
             uni_vmovups_tail(ptr[regDst], kAuxMask1, vAux0);
             sub(regWorkAmount, dataElPerVec);
         } else {
@@ -1088,7 +1108,7 @@ void jitUniGatherKernel<x64::avx512_core>::fillRestWorkMask(Vmask& kDstMask,
     jge(lKmov);
     Xbyak::Reg8 rShift(Xbyak::Operand::CL);
     mov(rShift, idxElPerVec);
-    sub(rShift, rWorkRest);
+    sub(Xbyak::Reg64(rShift.getIdx()), rWorkRest);
     shr(rOnes, rShift);
     L(lKmov);
     kmovw(kDstMask, rOnes);
@@ -1131,41 +1151,58 @@ void jitUniGatherKernel<isa>::storeVectorPart(const Xbyak::Reg64& rDst,
     Xbyak::Label lEnd;
     Xbyak::Xmm xAux(vAux.getIdx());
     for (size_t j = 0; j < vlen / vlenXmm; j++) {
+        if (is_f32_to_bf16) {
+            Vmm vAuxFull(vAux.getIdx());
+            uni_vpxor(vAuxFull, vAuxFull, vAuxFull);
+        }
         if (isa == x64::avx2) {
             vextracti128(xAux, vmmSrc, j);
         } else if (isa == x64::avx512_core) {
             vextracti64x2(xAux, vmmSrc, j);
         }
 
-        for (int k = 0; k < 4; k++) {
-            cmp(rToStoreCounter, 0);
-            jle(lEnd, T_NEAR);
+        if (is_f32_to_bf16) {
+            convert_emitter->emit_code({static_cast<size_t>(xAux.getIdx())}, {static_cast<size_t>(xmmTemp.getIdx())});
+            for (int k = 0; k < 4; k++) {
+                cmp(rToStoreCounter, 0);
+                jle(lEnd, T_NEAR);
 
-            if (jcp.dataTypeSize == 4) {
-                uni_vpextrd(ptr[rDst], xAux, k);
-            } else if (jcp.dataTypeSize == 2) {
-                if (jcp.in_prec == jcp.out_prec) {
-                    uni_vpextrw(ptr[rDst], xAux, k * 2);
-                } else if (jcp.out_prec == element::f32) {
-                    // xAux should not changed
-                    convert_emitter->emit_code({static_cast<size_t>(xAux.getIdx())},
-                                               {static_cast<size_t>(ymmTemp.getIdx())});
-                    if (k < 2) {
-                        uni_vpextrd(ptr[rDst], xmmTemp, k * 2);
-                    } else {
-                        vperm2f128(ymmTemp, ymmTemp, ymmTemp, 0x1);
-                        uni_vpextrd(ptr[rDst], xmmTemp, k * 2 - 4);
-                    }
-                }
-            } else if (jcp.dataTypeSize == 1) {
-                uni_vpextrb(ptr[rDst], xAux, k * 4);
+                uni_vpextrw(ptr[rDst], xmmTemp, k);
+
+                add(rDst, jcp.out_prec.size());
+                sub(rToStoreCounter, 1);
             }
+        } else {
+            for (int k = 0; k < 4; k++) {
+                cmp(rToStoreCounter, 0);
+                jle(lEnd, T_NEAR);
 
-            add(rDst, jcp.out_prec.size());
-            sub(rToStoreCounter, 1);
+                if (jcp.dataTypeSize == 4) {
+                    uni_vpextrd(ptr[rDst], xAux, k);
+                } else if (jcp.dataTypeSize == 2) {
+                    if (jcp.in_prec == jcp.out_prec) {
+                        uni_vpextrw(ptr[rDst], xAux, k * 2);
+                    } else if (jcp.out_prec == element::f32) {
+                        // xAux should not changed
+                        convert_emitter->emit_code({static_cast<size_t>(xAux.getIdx())},
+                                                   {static_cast<size_t>(ymmTemp.getIdx())});
+                        if (k < 2) {
+                            uni_vpextrd(ptr[rDst], xmmTemp, k * 2);
+                        } else {
+                            vperm2f128(ymmTemp, ymmTemp, ymmTemp, 0x1);
+                            uni_vpextrd(ptr[rDst], xmmTemp, k * 2 - 4);
+                        }
+                    }
+                } else if (jcp.dataTypeSize == 1) {
+                    uni_vpextrb(ptr[rDst], xAux, k * 4);
+                }
+
+                add(rDst, jcp.out_prec.size());
+                sub(rToStoreCounter, 1);
+            }
         }
     }
-    if (is_real16_to_f32) {
+    if (is_real16_to_f32 || is_f32_to_bf16) {
         uni_vpxor(vmmZeros, vmmZeros, vmmZeros);
     }
 
@@ -1187,17 +1224,13 @@ void jitUniGatherKernel<x64::avx2>::fillVlenVector() {
 template <x64::cpu_isa_t isa>
 bool jitUniGatherKernel<isa>::isSupportedConfiguration(uint64_t afterAxisSize) {
     if (!jcp.dynamicShapes && afterAxisSize <= idxElPerVec) {
-        if (afterAxisSize > 1 && isa == x64::avx2 && (jcp.dataTypeSize == 1 || jcp.dataTypeSize == 2)) {
-            // There are no enough registers for these cases.
-            return false;
-        }
-
-        return true;
+        // There are no enough registers for these cases.
+        const bool isSmallDataType = (jcp.dataTypeSize == 1 || jcp.dataTypeSize == 2);
+        const bool isAvx2WithBlockedAfterAxis = (afterAxisSize > 1 && isa == x64::avx2);
+        const bool incompatible_config = isAvx2WithBlockedAfterAxis && isSmallDataType;
+        return !incompatible_config;
     }
-    if (jcp.dynamicShapes && afterAxisSize == 1) {
-        return true;
-    }
-    return false;
+    return static_cast<bool>(jcp.dynamicShapes && afterAxisSize == 1);
 }
 
 template struct jitUniGatherKernel<x64::avx2>;

@@ -1,27 +1,55 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "jit_eltwise_emitters.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <set>
+#include <vector>
+
 #include "common/utils.hpp"
+#include "emitters/plugin/riscv64/jit_context_helpers.hpp"
+#include "emitters/plugin/riscv64/jit_conversion_helpers.hpp"
+#include "emitters/plugin/riscv64/jit_emitter.hpp"
+#include "emitters/utils.hpp"
+#include "nodes/kernels/riscv64/cpu_isa_traits.hpp"
+#include "nodes/kernels/riscv64/jit_generator.hpp"
+#include "openvino/core/node.hpp"
+#include "openvino/core/type.hpp"
+#include "openvino/core/type/element_type.hpp"
+#include "openvino/op/clamp.hpp"
+#include "openvino/op/convert.hpp"
+#include "openvino/op/elu.hpp"
+#include "openvino/op/is_inf.hpp"
+#include "openvino/op/relu.hpp"
+#include "snippets/op/powerstatic.hpp"
 #include "transformations/cpu_opset/common/op/leaky_relu.hpp"
+#include "transformations/cpu_opset/common/op/swish_cpu.hpp"
+#include "utils/general_utils.h"
+#include "xbyak_riscv/xbyak_riscv.hpp"
+#include "xbyak_riscv/xbyak_riscv_csr.hpp"
 
 namespace ov::intel_cpu::riscv64 {
 
 using namespace Xbyak_riscv;
 
-#define CONST_1_F 0x3f800000  // 1.f
+#define CONST_1_F 0x3f800000  // 1.F
 
 /// ABS ///
-jit_abs_emitter::jit_abs_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_abs_emitter::jit_abs_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                  const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_abs_emitter::jit_abs_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_abs_emitter::jit_abs_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                 const ov::element::Type exec_prc)
+                                 ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_abs_emitter::get_inputs_num() const {
@@ -32,31 +60,34 @@ void jit_abs_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const st
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_abs_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     h->vfsgnjx_vv(dst, src, src);
 }
 
-std::set<std::vector<element::Type>> jit_abs_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
+std::set<std::vector<element::Type>> jit_abs_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
 /// ADD ///
-jit_add_emitter::jit_add_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_add_emitter::jit_add_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                  const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_add_emitter::jit_add_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_add_emitter::jit_add_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                 const ov::element::Type exec_prc)
+                                 ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_add_emitter::get_inputs_num() const {
@@ -67,52 +98,203 @@ void jit_add_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const st
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_add_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     switch (exec_prc_) {
     case ov::element::f32:
+    case ov::element::f16:
         h->vfadd_vv(dst, src0, src1);
         break;
     case ov::element::i32:
         h->vadd_vv(dst, src0, src1);
         break;
     default:
-        OV_CPU_JIT_EMITTER_THROW("Unsupported precision");
+        OV_CPU_JIT_EMITTER_THROW("Unsupported precision: ", exec_prc_);
     }
 }
 
-std::set<std::vector<element::Type>> jit_add_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
-    return {{element::f32, element::f32}, {element::i32, element::i32}};
+std::set<std::vector<element::Type>> jit_add_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}, {element::f16, element::f16}, {element::i32, element::i32}};
+}
+
+/// ConvertSaturation ///
+jit_convert_saturation_emitter::jit_convert_saturation_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                               const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa) {
+    const auto convert = ov::as_type_ptr<ov::op::v0::Convert>(node);
+    OV_CPU_JIT_EMITTER_ASSERT(convert != nullptr, "Can't cast node to ov::op::v0::Convert");
+
+    input_type = convert->get_input_element_type(0);
+    output_type = convert->get_output_element_type(0);
+
+    jit_conversion::validate_convert_precision(input_type, output_type);
+}
+
+size_t jit_convert_saturation_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_convert_saturation_emitter::aux_gprs_count() const {
+    return 1;
+}
+
+void jit_convert_saturation_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                               const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit convert saturation kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_convert_saturation_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                              const std::vector<size_t>& out_vec_idxs) const {
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(!aux_gpr_idxs.empty(), "Convert saturation emitter expects one auxiliary GPR register");
+    const auto avl = Reg(aux_gpr_idxs.front());
+    jit_conversion::emit_convert_process(h, src, dst, input_type, output_type, arithmetic_mode::saturation, avl);
+}
+
+/// ConvertTruncation ///
+jit_convert_truncation_emitter::jit_convert_truncation_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                               const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa) {
+    const auto convert = ov::as_type_ptr<ov::op::v0::Convert>(node);
+    OV_CPU_JIT_EMITTER_ASSERT(convert != nullptr, "Can't cast node to ov::op::v0::Convert");
+
+    input_type = convert->get_input_element_type(0);
+    output_type = convert->get_output_element_type(0);
+
+    jit_conversion::validate_convert_precision(input_type, output_type);
+}
+
+size_t jit_convert_truncation_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_convert_truncation_emitter::aux_gprs_count() const {
+    return 1;
+}
+
+void jit_convert_truncation_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                               const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit convert truncation kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_convert_truncation_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                              const std::vector<size_t>& out_vec_idxs) const {
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(!aux_gpr_idxs.empty(), "Convert truncation emitter expects one auxiliary GPR register");
+    const auto avl = Reg(aux_gpr_idxs.front());
+    jit_conversion::emit_convert_process(h, src, dst, input_type, output_type, arithmetic_mode::truncation, avl);
+}
+
+/// CEIL ///
+jit_ceil_emitter::jit_ceil_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_ceil_emitter::jit_ceil_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                   ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                   const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+size_t jit_ceil_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_ceil_emitter::aux_vecs_count() const {
+    return 1;
+}
+
+size_t jit_ceil_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_ceil_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                 const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for CEIL");
+    }
+}
+
+void jit_ceil_emitter::register_table_entries() {
+    push_arg_entry_of("one", 0x3f800000);
+    // RVV has no FP round-to-integer instruction, so this limit bounds the int32 round-trip.
+    push_arg_entry_of("int32_limit", 0x4f000000);
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_ceil_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto original = VReg(aux_vec_idxs[0]);
+    auto fp1 = FReg(aux_fp_gpr_idxs[0]);
+
+    h->vmv_v_v(original, src);
+    h->vfsgnjx_vv(dst, original, original);
+    load_table_val("int32_limit", fp1);
+    h->vmflt_vf(mask_vreg(), dst, fp1);
+    h->vmv_v_v(dst, original);
+    h->vfcvt_x_f_v(dst, original, VM::masked);
+    h->vfcvt_f_x_v(dst, dst, VM::masked);
+
+    h->vmflt_vv(mask_vreg(), dst, original);
+    load_table_val("one", fp1);
+    h->vfadd_vf(dst, dst, fp1, VM::masked);
+}
+
+std::set<std::vector<element::Type>> jit_ceil_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
 }
 
 /// Clamp ///
-jit_clamp_emitter::jit_clamp_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_clamp_emitter::jit_clamp_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                      ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                      const std::shared_ptr<ov::Node>& node,
-                                     const ov::element::Type exec_prc)
+                                     ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     if (const auto clamp = ov::as_type_ptr<ov::op::v0::Clamp>(node)) {
         min = static_cast<float>(clamp->get_min());
         max = static_cast<float>(clamp->get_max());
     } else {
-        OPENVINO_THROW("Incompatible node!");
+        OV_CPU_JIT_EMITTER_THROW("Incompatible node!");
     }
     prepare_table();
 }
 
-jit_clamp_emitter::jit_clamp_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_clamp_emitter::jit_clamp_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                      ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                      float min,
                                      float max,
-                                     const ov::element::Type exec_prc)
+                                     ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc),
       min(min),
       max(max) {
@@ -132,16 +314,18 @@ void jit_clamp_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_clamp_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                  const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    FReg bound = FReg(aux_fp_gpr_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto bound = FReg(aux_fp_gpr_idxs[0]);
 
     load_table_val("min", bound);
     h->vfmax_vf(dst, src, bound);
@@ -156,19 +340,19 @@ void jit_clamp_emitter::register_table_entries() {
 }
 
 std::set<std::vector<element::Type>> jit_clamp_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
 /// DIV ///
-jit_divide_emitter::jit_divide_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_divide_emitter::jit_divide_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                        ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                        const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_divide_emitter::jit_divide_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_divide_emitter::jit_divide_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                        ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                       const ov::element::Type exec_prc)
+                                       ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_divide_emitter::get_inputs_num() const {
@@ -180,16 +364,16 @@ void jit_divide_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_divide_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                   const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     switch (exec_prc_) {
     case ov::element::f32:
@@ -199,27 +383,313 @@ void jit_divide_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
         h->vdiv_vv(dst, src0, src1);
         break;
     default:
-        OV_CPU_JIT_EMITTER_THROW("Unsupported precision");
+        OV_CPU_JIT_EMITTER_THROW("Unsupported precision: ", exec_prc_);
     }
 }
 
 std::set<std::vector<element::Type>> jit_divide_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}, {element::i32, element::i32}};
 }
 
-/// Exp ///
-jit_exp_emitter::jit_exp_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+/// Elu ///
+jit_elu_emitter::jit_elu_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                 float alpha,
+                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc),
+      alpha(alpha) {
+    prepare_table();
+    exp_emitter = std::make_unique<jit_exp_emitter>(h, host_isa, exec_prc);
+}
+
+jit_elu_emitter::jit_elu_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                  const std::shared_ptr<ov::Node>& node,
-                                 const ov::element::Type exec_prc)
+                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    const auto elu = ov::as_type_ptr<ov::op::v0::Elu>(node);
+    if (elu == nullptr) {
+        OV_CPU_JIT_EMITTER_THROW("Can't cast to ov::op::v0::Elu");
+    }
+    alpha = static_cast<float>(elu->get_alpha());
+    prepare_table();
+    exp_emitter = std::make_unique<jit_exp_emitter>(h, host_isa, exec_prc);
+}
+
+size_t jit_elu_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_elu_emitter::aux_gprs_count() const {
+    return exp_emitter->aux_gprs_count() + 1;
+}
+
+size_t jit_elu_emitter::aux_vecs_count() const {
+    return std::max<size_t>(exp_emitter->aux_vecs_count() + 1, 2);
+}
+
+size_t jit_elu_emitter::aux_fp_gprs_count() const {
+    return std::max<size_t>(exp_emitter->aux_fp_gprs_count(), 1);
+}
+
+void jit_elu_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_elu_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto aux1 = VReg(aux_vec_idxs[1]);
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+
+    h->vmv_v_v(aux1, src);
+
+    // compute exponent
+    auto exp_aux_vec_idxs = aux_vec_idxs;
+    exp_aux_vec_idxs.erase(
+        std::find(exp_aux_vec_idxs.begin(), exp_aux_vec_idxs.end(), static_cast<size_t>(aux1.getIdx())));
+    exp_emitter->emit_code({static_cast<size_t>(src.getIdx())},
+                           {static_cast<size_t>(dst.getIdx())},
+                           exp_aux_vec_idxs,
+                           aux_gpr_idxs,
+                           aux_fp_gpr_idxs);
+
+    load_table_val("one", fp0);
+    h->vfsub_vf(dst, dst, fp0);  // dst = exp(x)-1
+    load_table_val("alpha", fp0);
+    h->vfmul_vf(dst, dst, fp0);  // dst = alpha * (exp(x) - 1)
+
+    h->vmv_v_x(aux0, zero);
+    h->vmfgt_vv(mask_vreg(), aux1, aux0);
+    h->vmerge_vvm(dst, dst, aux1);
+}
+
+std::set<std::vector<element::Type>> jit_elu_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_elu_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+    push_arg_entry_of("alpha", dnnl::impl::float2int(alpha));
+}
+
+void jit_elu_emitter::emit_data() const {
+    jit_emitter::emit_data();
+    exp_emitter->emit_data();
+}
+
+/// EQUAL ///
+jit_equal_emitter::jit_equal_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                     const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+jit_equal_emitter::jit_equal_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                     ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
 
-jit_exp_emitter::jit_exp_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+size_t jit_equal_emitter::get_inputs_num() const {
+    return 2;
+}
+size_t jit_equal_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_equal_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
+std::set<std::vector<element::Type>> jit_equal_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
+void jit_equal_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_equal_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                 const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+    load_table_val("one", one);
+
+    h->vmfeq_vv(mask_vreg(), src0, src1);    // compare, result in mask
+    h->vmv_v_x(dst, zero);                   // set dst to 0
+    h->vfadd_vf(dst, dst, one, VM::masked);  // set 1.0 where mask is true
+}
+
+/// Erf ///
+jit_erf_emitter::jit_erf_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                 const ov::element::Type exec_prc)
+                                 [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+    exp_emitter = std::make_unique<jit_exp_emitter>(h, host_isa, exec_prc);
+}
+
+jit_erf_emitter::jit_erf_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+    exp_emitter = std::make_unique<jit_exp_emitter>(h, host_isa, exec_prc);
+}
+
+size_t jit_erf_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_erf_emitter::aux_gprs_count() const {
+    return std::max<size_t>(exp_emitter->aux_gprs_count(), 1) + 1;
+}
+
+size_t jit_erf_emitter::aux_vecs_count() const {
+    return std::max<size_t>(exp_emitter->aux_vecs_count() + 1, 4);
+}
+
+size_t jit_erf_emitter::aux_fp_gprs_count() const {
+    return std::max<size_t>(exp_emitter->aux_fp_gprs_count(), 1);
+}
+
+void jit_erf_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_erf_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto aux1 = VReg(aux_vec_idxs[1]);
+    auto aux2 = VReg(aux_vec_idxs[2]);
+    auto aux3 = VReg(aux_vec_idxs[3]);
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+    auto tmp = Reg(aux_gpr_idxs[0]);
+
+    // store x in aux3
+    h->vmv_v_v(aux3, src);
+
+    // -exp(-x*x)
+    h->vfmul_vv(dst, src, src);
+    h->vfneg_v(dst, dst);
+
+    // remove the already used aux3
+    auto exp_aux_vec_idxs = aux_vec_idxs;
+    exp_aux_vec_idxs.erase(
+        std::find(exp_aux_vec_idxs.begin(), exp_aux_vec_idxs.end(), static_cast<size_t>(aux3.getIdx())));
+    exp_emitter->emit_code({static_cast<size_t>(dst.getIdx())},
+                           {static_cast<size_t>(dst.getIdx())},
+                           exp_aux_vec_idxs,
+                           aux_gpr_idxs,
+                           aux_fp_gpr_idxs);
+    h->vfneg_v(dst, dst);
+
+    // save sign in aux0
+    h->vmv_v_v(aux0, aux3);
+
+    // aux1 = abs(x)
+    h->vfabs_v(aux1, aux3);
+
+    // t = 1 / (p*|x| + 1)
+    load_table_val("erf_approx_const", fp0);
+    h->vfmul_vf(aux2, aux1, fp0);  // aux2 = p * |x|
+    load_table_val("one", fp0);
+    h->vfadd_vf(aux2, aux2, fp0);  // aux2 = p * |x| + 1
+    h->vfmv_v_f(aux1, fp0);
+    h->vfdiv_vv(aux1, aux1, aux2);  // aux1 = 1 / (p * |x| + 1)
+
+    // dst = - t * exp(-x*x)
+    h->vfmul_vv(dst, dst, aux1);
+
+    // compute polynomial r
+    load_table_val("erf_pol4", aux3, tmp);  // aux3 = p4
+    load_table_val("erf_pol5", fp0);
+    h->vfmacc_vf(aux3, fp0, aux1);  // aux3 = p5 * t + p4
+
+    load_table_val("erf_pol3", aux2, tmp);  // aux2 = p3
+    h->vfmacc_vv(aux2, aux3, aux1);         // aux2 = p5 * t^2 + p4 * t + p3
+
+    load_table_val("erf_pol2", aux3, tmp);  // aux3 = p2
+    h->vfmacc_vv(aux3, aux2, aux1);         // aux3 = p5 * t^3 + p4 * t^2 + p3 * t + p2
+
+    load_table_val("erf_pol1", aux2, tmp);  // aux2 = p1
+    h->vfmacc_vv(aux2, aux3, aux1);         // aux2 = p5 * t^4 + p4 * t^3 + p3 * t^2 + p2 * t + p1
+
+    // erf = sign * (1 - r * t * exp(-x * x))
+    load_table_val("one", aux3, tmp);  // aux3 = 1
+    h->vfmacc_vv(aux3, aux2, dst);     // aux3 = 1 - r * t * exp(-x * x)
+    // add signs back
+    h->vfsgnj_vv(dst, aux3, aux0);
+}
+
+std::set<std::vector<element::Type>> jit_erf_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_erf_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+    push_arg_entry_of("erf_approx_const", 0x3ea7ba05);  // 0.3275911
+
+    push_arg_entry_of("erf_pol1", 0x3e827906);  // p1 = 0.254829592f
+    push_arg_entry_of("erf_pol2", 0xbe91a98e);  // p2 = -0.284496736f
+    push_arg_entry_of("erf_pol3", 0x3fb5f0e3);  // p3 = 1.421413741f
+    push_arg_entry_of("erf_pol4", 0xbfba00e3);  // p4 = -1.453152027f
+    push_arg_entry_of("erf_pol5", 0x3f87dc22);  // p5 = 1.061405429f
+}
+
+void jit_erf_emitter::emit_data() const {
+    jit_emitter::emit_data();
+    exp_emitter->emit_data();
+}
+
+/// Exp ///
+jit_exp_emitter::jit_exp_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                 [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_exp_emitter::jit_exp_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                 ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
@@ -244,21 +714,23 @@ void jit_exp_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const st
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_exp_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    VReg aux0 = VReg(aux_vec_idxs[0]);
-    VReg aux1 = VReg(aux_vec_idxs[1]);
-    VReg zero_mask = VReg(aux_vec_idxs[2]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto aux1 = VReg(aux_vec_idxs[1]);
+    auto zero_mask = VReg(aux_vec_idxs[2]);
     VReg aux2 = zero_mask;
-    FReg fp0 = FReg(aux_fp_gpr_idxs[0]);
-    FReg fp1 = FReg(aux_fp_gpr_idxs[1]);
-    Reg tmp = Reg(aux_gpr_idxs[0]);
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+    auto fp1 = FReg(aux_fp_gpr_idxs[1]);
+    auto tmp = Reg(aux_gpr_idxs[0]);
 
     FReg ln_flt_min_f = fp0;
     load_table_val("ln_flt_min_f", ln_flt_min_f);
@@ -336,7 +808,8 @@ void jit_exp_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std
     h->vfmul_vv(dst, dst, aux1);
 }
 
-std::set<std::vector<element::Type>> jit_exp_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
+std::set<std::vector<element::Type>> jit_exp_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
@@ -357,93 +830,76 @@ void jit_exp_emitter::register_table_entries() {
 }
 
 /// MOD ///
-jit_mod_emitter::jit_mod_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_mod_emitter::jit_mod_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                  const std::shared_ptr<ov::Node>& node)
-    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
-    prepare_table();
-}
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_mod_emitter::jit_mod_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_mod_emitter::jit_mod_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                 const ov::element::Type exec_prc)
-    : jit_emitter(host, host_isa, exec_prc) {
-    prepare_table();
-}
+                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_mod_emitter::get_inputs_num() const {
     return 2;
 }
 size_t jit_mod_emitter::aux_vecs_count() const {
     if (exec_prc_ == ov::element::f32) {
-        return 2;
-    } else if (exec_prc_ == ov::element::i32) {
-        return 0;
-    } else {
-        OPENVINO_THROW("Unsupported precision");
+        return 1;
     }
+    if (exec_prc_ == ov::element::i32) {
+        return 0;
+    }
+    OV_CPU_JIT_EMITTER_THROW("Unsupported precision: ", exec_prc_);
 }
 size_t jit_mod_emitter::aux_fp_gprs_count() const {
-    if (exec_prc_ == ov::element::f32) {
-        return 1;
-    } else if (exec_prc_ == ov::element::i32) {
+    if (exec_prc_ == ov::element::f32 || exec_prc_ == ov::element::i32) {
         return 0;
-    } else {
-        OPENVINO_THROW("Unsupported precision");
     }
+    OV_CPU_JIT_EMITTER_THROW("Unsupported precision: ", exec_prc_);
 }
 void jit_mod_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_mod_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     switch (exec_prc_) {
     case ov::element::i32:
-        h->vremu_vv(dst, src0, src1);
+        h->vrem_vv(dst, src0, src1);
         break;
     case ov::element::f32: {
-        VReg tmp0 = VReg(aux_vec_idxs[0]);
-        VReg tmp1 = VReg(aux_vec_idxs[1]);
-        FReg fp0 = FReg(aux_fp_gpr_idxs[0]);
-        h->vfdiv_vv(tmp0, src0, src1);
-        h->vfcvt_x_f_v(tmp1, tmp0);
-        h->vfcvt_f_x_v(tmp1, tmp1);
-        h->vmfgt_vv(mask_vreg(), tmp1, tmp0);
-        load_table_val("one", fp0);
-        h->vfsub_vf(tmp1, tmp1, fp0, VM::masked);
-        h->vfmul_vv(tmp0, tmp1, src1);
-        h->vfsub_vv(dst, src0, tmp0);
+        auto tmp = VReg(aux_vec_idxs[0]);
+        h->vfdiv_vv(tmp, src0, src1);
+        h->vfcvt_rtz_x_f_v(tmp, tmp);
+        h->vfcvt_f_x_v(tmp, tmp);
+        h->vfmul_vv(tmp, tmp, src1);
+        h->vfsub_vv(dst, src0, tmp);
         break;
     }
     default:
-        OV_CPU_JIT_EMITTER_THROW("Unsupported precision");
+        OV_CPU_JIT_EMITTER_THROW("Unsupported precision:", exec_prc_);
     }
 }
-std::set<std::vector<element::Type>> jit_mod_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
+std::set<std::vector<element::Type>> jit_mod_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::i32, element::i32}, {element::f32, element::f32}};
 }
-void jit_mod_emitter::register_table_entries() {
-    if (exec_prc_ == ov::element::f32) {
-        push_arg_entry_of("one", CONST_1_F);
-    }
-}
-
 /// FLOOR ///
-jit_floor_emitter::jit_floor_emitter(jit_generator* host, cpu_isa_t host_isa, const element::Type exec_prc)
+jit_floor_emitter::jit_floor_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
 
-jit_floor_emitter::jit_floor_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_floor_emitter::jit_floor_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                      ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                      const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
@@ -467,42 +923,654 @@ void jit_floor_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel for FLOOR");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for FLOOR");
     }
 }
 void jit_floor_emitter::register_table_entries() {
     push_arg_entry_of("neg_one", 0xbf800000);
+    // RVV has no FP round-to-integer instruction, so this limit bounds the int32 round-trip.
+    push_arg_entry_of("int32_limit", 0x4f000000);
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_floor_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                  const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    VReg aux1 = VReg(aux_vec_idxs[0]);
-    FReg fp1 = FReg(aux_fp_gpr_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
 
-    h->vmv_v_v(aux1, src);
-    h->vfcvt_x_f_v(dst, src);
-    h->vfcvt_f_x_v(dst, dst);
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto original = VReg(aux_vec_idxs[0]);
+    auto fp1 = FReg(aux_fp_gpr_idxs[0]);
 
-    h->vmfgt_vv(mask_vreg(), dst, aux1);
+    h->vmv_v_v(original, src);
+    h->vfsgnjx_vv(dst, original, original);
+    load_table_val("int32_limit", fp1);
+    h->vmflt_vf(mask_vreg(), dst, fp1);
+    h->vmv_v_v(dst, original);
+    h->vfcvt_x_f_v(dst, original, VM::masked);
+    h->vfcvt_f_x_v(dst, dst, VM::masked);
+
+    h->vmfgt_vv(mask_vreg(), dst, original);
     load_table_val("neg_one", fp1);
     h->vfadd_vf(dst, dst, fp1, VM::masked);
 }
+
 std::set<std::vector<element::Type>> jit_floor_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
+/// FLOOR MOD ///
+jit_floor_mod_emitter::jit_floor_mod_emitter(jit_generator_t* host, cpu_isa_t host_isa, element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_floor_mod_emitter::jit_floor_mod_emitter(jit_generator_t* host,
+                                             cpu_isa_t host_isa,
+                                             const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+size_t jit_floor_mod_emitter::get_inputs_num() const {
+    return 2;
+}
+
+size_t jit_floor_mod_emitter::aux_vecs_count() const {
+    return 2;
+}
+
+size_t jit_floor_mod_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_floor_mod_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                      const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for FLOOR_MOD");
+    }
+}
+template <cpu_isa_t isa>
+void jit_floor_mod_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                     const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == element::f32, "JIT Floor Mod emitter supports only f32 precision");
+
+    const VReg src0 = VReg(in_vec_idxs[0]);
+    const VReg src1 = VReg(in_vec_idxs[1]);
+    const VReg dst = VReg(out_vec_idxs[0]);
+    const VReg tmp1 = VReg(aux_vec_idxs[0]);
+    const VReg tmp2 = VReg(aux_vec_idxs[1]);
+    auto fone = FReg(aux_fp_gpr_idxs[0]);
+
+    load_table_val("one", fone);
+
+    h->vfdiv_vv(tmp1, src0, src1);
+
+    h->vfcvt_x_f_v(tmp2, tmp1);
+    h->vfcvt_f_x_v(tmp2, tmp2);
+    h->vmflt_vv(mask_vreg(), tmp1, tmp2);
+    h->vfsub_vf(tmp2, tmp2, fone, VM::masked);
+    h->vfmul_vv(tmp1, tmp2, src1);
+    h->vfsub_vv(dst, src0, tmp1);
+}
+void jit_floor_mod_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+std::set<std::vector<element::Type>> jit_floor_mod_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
+/// SoftSign ///
+jit_softsign_emitter::jit_softsign_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                           ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                           ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_softsign_emitter::jit_softsign_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                           ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                           [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                           ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+size_t jit_softsign_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_softsign_emitter::aux_vecs_count() const {
+    return 1;
+}
+
+size_t jit_softsign_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_softsign_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                     const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_softsign_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                    const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto aux0 = VReg(aux_vec_idxs[0]);  // Single aux register for intermediate results for |x| & 1 + |x|
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+
+    // Compute |x| (absolute value)
+    h->vfabs_v(aux0, src);
+
+    // Compute 1 + |x|
+    load_table_val("one", fp0);
+    h->vfadd_vf(aux0, aux0, fp0);  // aux0 = 1 + |x|
+
+    // Compute x / (1 + |x|)
+    h->vfdiv_vv(dst, src, aux0);
+}
+
+std::set<std::vector<element::Type>> jit_softsign_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_softsign_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
+/// ErfInv ///
+jit_erfinv_emitter::jit_erfinv_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_erfinv_emitter::jit_erfinv_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+size_t jit_erfinv_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_erfinv_emitter::aux_vecs_count() const {
+    return 6;
+}
+
+size_t jit_erfinv_emitter::aux_gprs_count() const {
+    // 1 GPR for integer vector ops (vsub_vx, vand_vx, vor_vx) + 1 for p_table
+    return 2;
+}
+
+size_t jit_erfinv_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+std::set<std::vector<element::Type>> jit_erfinv_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_erfinv_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                   const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for erfinv");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_erfinv_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    // Register assignments:
+    //  aux0 = saved x
+    //  aux1 = v bits → exponent int → e+1 float → log(v) → w
+    //  aux2 = v bits (for mantissa) → h_log → r1 → r2
+    //  aux3 = log/branch1 poly acc → poly1
+    //  aux4 = branch2 poly acc → poly2
+    //  aux5 = coeff broadcast temp (for Horner coefficient loading)
+    //  gpr  = integer GPR for vsub_vx, vand_vx, vor_vx, li
+    //  fp0  = float scalar for vfrsub_vf, vfadd_vf, vfsub_vf, vfmacc_vf
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto aux1 = VReg(aux_vec_idxs[1]);
+    auto aux2 = VReg(aux_vec_idxs[2]);
+    auto aux3 = VReg(aux_vec_idxs[3]);
+    auto aux4 = VReg(aux_vec_idxs[4]);
+    auto aux5 = VReg(aux_vec_idxs[5]);
+    auto gpr = Reg(aux_gpr_idxs[0]);
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+
+    // Save x
+    h->vmv_v_v(aux0, src);
+
+    // v = 1 - x²
+    h->vfmul_vv(aux1, src, src);  // aux1 = x²
+    load_table_val("one", fp0);
+    h->vfrsub_vf(aux1, aux1, fp0);  // aux1 = 1.0 - x² = v
+    // Copy v to aux2 for mantissa extraction (keep v in aux1 for exponent extraction)
+    h->vmv_v_v(aux2, aux1);
+
+    // Extract biased exponent k = v_bits >> 23 (integer)
+    h->vsrl_vi(aux1, aux1, 23);  // k (int32) in aux1
+    // Subtract 126: k - 126 = e+1
+    h->li(gpr, 126);
+    h->vsub_vx(aux1, aux1, gpr);  // e+1 (int32)
+    h->vfcvt_f_x_v(aux1, aux1);   // (e+1) as float
+
+    // Extract mantissa from aux2 (v bits) and compute h = f/2 - 1
+    h->li(gpr, 0x007fffff);
+    h->vand_vx(aux2, aux2, gpr);  // mantissa bits
+    h->li(gpr, 0x3f800000);
+    h->vor_vx(aux2, aux2, gpr);  // f = 1.mantissa ∈ [1, 2)
+    load_table_val("half", fp0);
+    h->vfmul_vf(aux2, aux2, fp0);  // f/2 ∈ [0.5, 1)
+    load_table_val("one", fp0);
+    h->vfsub_vf(aux2, aux2, fp0);  // h = f/2 - 1 ∈ [-0.5, 0)
+
+    // Log polynomial Horner: log(1+h) using vfmadd_vv(acc, h, coeff)
+    // vfmadd_vv(vd, vs1, vs2): vd = vs1 * vd + vs2 → acc = h * acc + coeff ✓
+    load_table_val("log_pol6", aux3, gpr);
+    load_table_val("log_pol5", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);  // aux3 = h * p6 + p5
+    load_table_val("log_pol4", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("log_pol3", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("log_pol2", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("log_pol1", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("log_pol0", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("one", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);  // include constant 1.0 factor
+    h->vfmul_vv(aux3, aux2, aux3);   // log(1+h) = h * poly; aux2(h) freed
+
+    // Combine: log(v) = (e+1)*ln2 + log(y)
+    load_table_val("ln2", fp0);
+    h->vfmacc_vf(aux3, fp0, aux1);  // aux3 += ln2 * (e+1) = log(v)
+    h->vfneg_v(aux1, aux3);         // aux1 = w = -log(v); aux3 freed
+
+    // Branch 1: poly1 = Giles poly(r1 = w - 2.5)
+    load_table_val("two_point_five", fp0);
+    h->vfsub_vf(aux2, aux1, fp0);  // r1 = w - 2.5
+    load_table_val("e1_c8", aux3, gpr);
+    load_table_val("e1_c7", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c6", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c5", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c4", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c3", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c2", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c1", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);
+    load_table_val("e1_c0", aux5, gpr);
+    h->vfmadd_vv(aux3, aux2, aux5);  // aux3 = poly1; aux2(r1) freed
+
+    // Branch 2: poly2 = Giles poly(r2 = sqrt(w) - 3.0)
+    h->vfsqrt_v(aux2, aux1);  // sqrt(w)
+    load_table_val("three", fp0);
+    h->vfsub_vf(aux2, aux2, fp0);  // r2 = sqrt(w) - 3.0
+    load_table_val("e2_c8", aux4, gpr);
+    load_table_val("e2_c7", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c6", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c5", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c4", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c3", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c2", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c1", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);
+    load_table_val("e2_c0", aux5, gpr);
+    h->vfmadd_vv(aux4, aux2, aux5);  // aux4 = poly2; aux2(r2), aux5 freed
+
+    // Blend: select poly1 (aux3) where w<5, poly2 (aux4) otherwise; multiply by x
+    load_table_val("five", fp0);
+    h->vmflt_vf(mask_vreg(), aux1, fp0);  // mask = (w < 5.0)
+    h->vmerge_vvm(dst, aux4, aux3);       // dst = mask ? poly1 : poly2
+    h->vfmul_vv(dst, dst, aux0);          // dst *= saved_x
+
+    // Special-case handling: |x| >= 1 → ±inf; |x| > 1 → NaN
+    // Reuse aux1..aux5 (all free); aux0 holds saved x; gpr and fp0 available.
+    // abs_x = |x| = x & 0x7fffffff
+    h->li(gpr, 0x7fffffff);
+    h->vand_vx(aux1, aux0, gpr);  // aux1 = abs_x
+
+    // inf_signed = copysign(+inf, x) = (x & sign_mask) | 0x7f800000
+    h->li(gpr, static_cast<int32_t>(0x80000000));
+    h->vand_vx(aux2, aux0, gpr);  // sign bit
+    h->li(gpr, 0x7f800000);
+    h->vor_vx(aux2, aux2, gpr);  // aux2 = ±inf
+
+    // ge1_mask: (abs_x >= 1.0) → vmfge_vf
+    load_table_val("one", fp0);
+    h->vmfge_vf(mask_vreg(), aux1, fp0);  // mask = (abs_x >= 1.0)
+    h->vmerge_vvm(dst, dst, aux2);        // dst[ge1] = ±inf
+
+    // gt1_mask: (abs_x > 1.0) → vmfgt_vf
+    h->vmfgt_vf(mask_vreg(), aux1, fp0);  // mask = (abs_x > 1.0)
+    load_table_val("qnan", aux3, gpr);
+    h->vmerge_vvm(dst, dst, aux3);  // dst[gt1] = NaN
+}
+
+void jit_erfinv_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+    push_arg_entry_of("half", 0x3f000000);
+    push_arg_entry_of("qnan", 0x7fc00000);
+    push_arg_entry_of("ln2", 0x3f317218);
+    push_arg_entry_of("two_point_five", 0x40200000);
+    push_arg_entry_of("three", 0x40400000);
+    push_arg_entry_of("five", 0x40a00000);
+    push_arg_entry_of("log_pol0", 0xbf000000);
+    push_arg_entry_of("log_pol1", 0x3eaaaa9f);
+    push_arg_entry_of("log_pol2", 0xbe800000);
+    push_arg_entry_of("log_pol3", 0x3e4ccccd);
+    push_arg_entry_of("log_pol4", 0xbe2aaac1);
+    push_arg_entry_of("log_pol5", 0x3e12491b);
+    push_arg_entry_of("log_pol6", 0xbe000000);
+    push_arg_entry_of("e1_c8", 0x32f16588);
+    push_arg_entry_of("e1_c7", 0x34b84b36);
+    push_arg_entry_of("e1_c6", 0xb66c7357);
+    push_arg_entry_of("e1_c5", 0xb6935ac1);
+    push_arg_entry_of("e1_c4", 0x396532db);
+    push_arg_entry_of("e1_c3", 0xbaa45408);
+    push_arg_entry_of("e1_c2", 0xbb88e4ef);
+    push_arg_entry_of("e1_c1", 0x3e7c8f63);
+    push_arg_entry_of("e1_c0", 0x3fc02e2f);
+    push_arg_entry_of("e2_c8", 0xb951f09b);
+    push_arg_entry_of("e2_c7", 0x38d3b56b);
+    push_arg_entry_of("e2_c6", 0x3ab0dc72);
+    push_arg_entry_of("e2_c5", 0xbb70bde7);
+    push_arg_entry_of("e2_c4", 0x3bbc127b);
+    push_arg_entry_of("e2_c3", 0xbbf9c5d7);
+    push_arg_entry_of("e2_c2", 0xbc1aa57e);
+    push_arg_entry_of("e2_c1", 0x3f8036db);
+    push_arg_entry_of("e2_c0", 0x40354f7e);
+}
+
+///  Greater ///
+jit_greater_emitter::jit_greater_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_greater_emitter::jit_greater_emitter(jit_generator_t* host,
+                                         cpu_isa_t host_isa,
+                                         const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+size_t jit_greater_emitter::get_inputs_num() const {
+    return 2;
+}
+
+void jit_greater_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                    const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for GREATER");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_greater_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                   const std::vector<size_t>& out_vec_idxs) const {
+    auto lhs = VReg(in_vec_idxs[0]);
+    auto rhs = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+
+    load_table_val("one", one);
+
+    h->vmfgt_vv(mask_vreg(), lhs, rhs);
+    h->vmv_v_x(dst, zero);
+    h->vfadd_vf(dst, dst, one, VM::masked);
+}
+
+void jit_greater_emitter::register_table_entries() {
+    push_arg_entry_of("one", 0x3f800000);
+}
+
+size_t jit_greater_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+std::set<std::vector<element::Type>> jit_greater_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
+/// GELU ERF ///
+jit_gelu_erf_emitter::jit_gelu_erf_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                           ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                           [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                           ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+    erf_emitter = std::make_unique<jit_erf_emitter>(h, host_isa, exec_prc);
+}
+
+jit_gelu_erf_emitter::jit_gelu_erf_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                           ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                           ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+    erf_emitter = std::make_unique<jit_erf_emitter>(h, host_isa, exec_prc);
+}
+
+size_t jit_gelu_erf_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_gelu_erf_emitter::aux_vecs_count() const {
+    return erf_emitter->aux_vecs_count() + 1;
+}
+
+size_t jit_gelu_erf_emitter::aux_gprs_count() const {
+    return erf_emitter->aux_gprs_count() + 1;
+}
+
+size_t jit_gelu_erf_emitter::aux_fp_gprs_count() const {
+    return std::max(erf_emitter->aux_fp_gprs_count(), 1LU);
+}
+
+void jit_gelu_erf_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                     const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for GELU ERF");
+    }
+}
+
+void jit_gelu_erf_emitter::register_table_entries() {
+    push_arg_entry_of("one", 0x3f800000);
+    push_arg_entry_of("half", 0x3f000000);
+    push_arg_entry_of("one_over_sqrt_two", 0x3f3504f3);
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_gelu_erf_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                    const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[erf_emitter->aux_vecs_count()]);
+
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+
+    // x = src / sqrt(2)
+    load_table_val("one_over_sqrt_two", fp0);
+    h->vfmul_vf(aux0, src, fp0);
+
+    // erf(x)
+    erf_emitter->emit_code({static_cast<size_t>(aux0.getIdx())},
+                           {static_cast<size_t>(aux0.getIdx())},
+                           {aux_vec_idxs.begin(), aux_vec_idxs.begin() + erf_emitter->aux_vecs_count()},
+                           aux_gpr_idxs,
+                           aux_fp_gpr_idxs);
+
+    // 1 + erf(x)
+    load_table_val("one", fp0);
+    h->vfadd_vf(aux0, aux0, fp0);
+
+    // 0.5 * (1 + erf(x))
+    load_table_val("half", fp0);
+    h->vfmul_vf(aux0, aux0, fp0);
+
+    // x * 0.5 * (1 + erf(x))
+    h->vfmul_vv(dst, aux0, src);
+}
+
+std::set<std::vector<element::Type>> jit_gelu_erf_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_gelu_erf_emitter::emit_data() const {
+    erf_emitter->emit_data();
+    jit_emitter::emit_data();
+}
+
+/// GELU TANH ///
+jit_gelu_tanh_emitter::jit_gelu_tanh_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+    tanh_emitter = std::make_unique<jit_tanh_emitter>(host, host_isa, exec_prc_);
+}
+
+jit_gelu_tanh_emitter::jit_gelu_tanh_emitter(jit_generator_t* host,
+                                             cpu_isa_t host_isa,
+                                             const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+    tanh_emitter = std::make_unique<jit_tanh_emitter>(host, host_isa, exec_prc_);
+}
+
+size_t jit_gelu_tanh_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_gelu_tanh_emitter::aux_gprs_count() const {
+    return std::max<size_t>(tanh_emitter->aux_gprs_count(), 1LU) + 1LU;
+}
+
+size_t jit_gelu_tanh_emitter::aux_fp_gprs_count() const {
+    return std::max<size_t>(tanh_emitter->aux_fp_gprs_count(), 1LU);
+}
+
+size_t jit_gelu_tanh_emitter::aux_vecs_count() const {
+    return std::max<size_t>(tanh_emitter->aux_vecs_count(), 1LU) + 1LU;
+}
+
+void jit_gelu_tanh_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                      const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for GELU_TANH");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_gelu_tanh_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                     const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[std::max<size_t>(tanh_emitter->aux_vecs_count(), 1LU)]);
+    auto aux1 = VReg(aux_vec_idxs[0]);
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+    auto tmp = Reg(aux_gpr_idxs[0]);
+
+    // compute G(x) = sqrt_root_two_over_pi * x * (1 + fitting_const * x * x)
+    h->vfmul_vv(aux0, src, src);
+    load_table_val("gelu_tanh_fitting_const", fp0);
+    load_table_val("one", aux1, tmp);
+    h->vfmacc_vf(aux1, fp0, aux0);
+    h->vfmul_vv(aux1, src, aux1);
+    load_table_val("gelu_tanh_sqrt_two_over_pi", fp0);
+    h->vfmul_vf(aux0, aux1, fp0);
+
+    tanh_emitter->emit_code({static_cast<size_t>(aux0.getIdx())},
+                            {static_cast<size_t>(aux0.getIdx())},
+                            {aux_vec_idxs.begin(), aux_vec_idxs.begin() + tanh_emitter->aux_vecs_count()},
+                            aux_gpr_idxs,
+                            aux_fp_gpr_idxs);
+
+    // compute 0.5 * x * (1 + tanh(G(x)))
+    load_table_val("one", fp0);
+    h->vfadd_vf(aux0, aux0, fp0);
+    load_table_val("half", fp0);
+    h->vfmul_vf(aux0, aux0, fp0);
+    h->vfmul_vv(dst, src, aux0);
+}
+
+void jit_gelu_tanh_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+    push_arg_entry_of("half", 0x3f000000);
+    push_arg_entry_of("gelu_tanh_fitting_const", 0x3d372713);
+    push_arg_entry_of("gelu_tanh_sqrt_two_over_pi", 0x3f4c422a);
+}
+
+std::set<std::vector<element::Type>> jit_gelu_tanh_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_gelu_tanh_emitter::emit_data() const {
+    jit_emitter::emit_data();
+    tanh_emitter->emit_data();
+}
+
 /// GREATER EQUAL ///
-jit_greater_equal_emitter::jit_greater_equal_emitter(jit_generator* host,
+jit_greater_equal_emitter::jit_greater_equal_emitter(jit_generator_t* host,
                                                      cpu_isa_t host_isa,
                                                      const element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
 
-jit_greater_equal_emitter::jit_greater_equal_emitter(jit_generator* host,
+jit_greater_equal_emitter::jit_greater_equal_emitter(jit_generator_t* host,
                                                      cpu_isa_t host_isa,
                                                      const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
@@ -522,22 +1590,24 @@ void jit_greater_equal_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel for GREATER_EQUAL");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for GREATER_EQUAL");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_greater_equal_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                          const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
 
-    FReg one = FReg(aux_fp_gpr_idxs[0]);
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto one = FReg(aux_fp_gpr_idxs[0]);
     load_table_val("one", one);
 
-    h->vmv_v_x(dst, zero);
     h->vmfge_vv(mask_vreg(), src0, src1);
+    h->vmv_v_x(dst, zero);
     h->vfadd_vf(dst, dst, one, VM::masked);
 }
 
@@ -546,18 +1616,630 @@ void jit_greater_equal_emitter::register_table_entries() {
 }
 
 std::set<std::vector<element::Type>> jit_greater_equal_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
+
+/// HSIGMOID ///
+jit_hsigmoid_emitter::jit_hsigmoid_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                           ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                           ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_hsigmoid_emitter::jit_hsigmoid_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                           ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                           [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                           ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+size_t jit_hsigmoid_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_hsigmoid_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_hsigmoid_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                     const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_hsigmoid_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                    const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto fp0 = FReg(aux_fp_gpr_idxs[0]);
+
+    // result = (min(max(x + 3, 0), 6)) / 6
+    load_table_val("three", fp0);
+    h->vfadd_vf(dst, src, fp0);
+
+    h->fmv_w_x(fp0, zero);
+    h->vfmax_vf(dst, dst, fp0);
+
+    load_table_val("six", fp0);
+    h->vfmin_vf(dst, dst, fp0);
+    load_table_val("one_sixth", fp0);
+    h->vfmul_vf(dst, dst, fp0);
+}
+
+std::set<std::vector<element::Type>> jit_hsigmoid_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_hsigmoid_emitter::register_table_entries() {
+    push_arg_entry_of("three", 0x40400000);
+    push_arg_entry_of("six", 0x40c00000);
+    push_arg_entry_of("one_sixth", dnnl::impl::float2int(1.F / 6.F));
+}
+
+/// HSWISH ///
+jit_hswish_emitter::jit_hswish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    hsigmoid_emitter = std::make_unique<jit_hsigmoid_emitter>(host, host_isa, exec_prc);
+}
+
+jit_hswish_emitter::jit_hswish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    hsigmoid_emitter = std::make_unique<jit_hsigmoid_emitter>(host, host_isa, exec_prc);
+}
+
+size_t jit_hswish_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_hswish_emitter::aux_gprs_count() const {
+    return hsigmoid_emitter->aux_gprs_count();
+}
+
+size_t jit_hswish_emitter::aux_vecs_count() const {
+    return hsigmoid_emitter->aux_vecs_count() + 1;
+}
+
+size_t jit_hswish_emitter::aux_fp_gprs_count() const {
+    return hsigmoid_emitter->aux_fp_gprs_count();
+}
+
+void jit_hswish_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                   const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_hswish_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs.back());
+
+    // save src
+    h->vmv_v_v(aux0, src);
+
+    hsigmoid_emitter->emit_code({static_cast<size_t>(src.getIdx())},
+                                {static_cast<size_t>(dst.getIdx())},
+                                {aux_vec_idxs.begin(), aux_vec_idxs.begin() + hsigmoid_emitter->aux_vecs_count()},
+                                aux_gpr_idxs,
+                                aux_fp_gpr_idxs);
+    h->vfmul_vv(dst, dst, aux0);
+}
+
+std::set<std::vector<element::Type>> jit_hswish_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_hswish_emitter::emit_data() const {
+    hsigmoid_emitter->emit_data();
+    jit_emitter::emit_data();
+}
+
+// SWISH
+jit_swish_emitter::jit_swish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                     float alpha,
+                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                     ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc),
+      alpha_(alpha) {
+    prepare_table();
+    sigmoid_emitter = std::make_unique<jit_sigmoid_emitter>(host, host_isa, exec_prc);
+    push_arg_entry_of("swish_alpha", dnnl::impl::float2int(alpha_));
+}
+
+jit_swish_emitter::jit_swish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                     const std::shared_ptr<ov::Node>& node,
+                                     ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    const auto swish = ov::as_type_ptr<SwishNode>(node);
+    if (swish == nullptr) {
+        OV_CPU_JIT_EMITTER_THROW("Can't cast to SwishNode");
+    }
+    alpha_ = swish->get_alpha();
+    prepare_table();
+    sigmoid_emitter = std::make_unique<jit_sigmoid_emitter>(host, host_isa, exec_prc);
+}
+
+jit_swish_emitter::jit_swish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                     ov::element::Type exec_prc)
+    : jit_swish_emitter(host, 1.0F, host_isa, exec_prc) {}
+
+size_t jit_swish_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_swish_emitter::aux_gprs_count() const {
+    return sigmoid_emitter->aux_gprs_count();
+}
+
+size_t jit_swish_emitter::aux_vecs_count() const {
+    return sigmoid_emitter->aux_vecs_count() + 1;
+}
+
+size_t jit_swish_emitter::aux_fp_gprs_count() const {
+    return sigmoid_emitter->aux_fp_gprs_count();
+}
+void jit_swish_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_swish_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                 const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    // we take the last auxiliary vector to save x
+    auto aux_save = VReg(aux_vec_idxs.back());
+    // saving the original value of x
+    h->vmv_v_v(aux_save, src);  // aux_save = src
+    // load alpha and multiply src = alpha * x
+    auto alpha_reg = FReg(aux_fp_gpr_idxs[0]);
+    load_table_val("swish_alpha", alpha_reg);
+    h->vfmul_vf(src, src, alpha_reg);
+    // we call the sigmoid emitter, which puts the result in dst
+    // we pass all auxiliary registers to it, except the last one
+    std::vector<size_t> sigmoid_aux_vec_idxs(aux_vec_idxs.begin(),
+                                             aux_vec_idxs.begin() + sigmoid_emitter->aux_vecs_count());
+    // call sigmoid
+    sigmoid_emitter->emit_code({static_cast<size_t>(src.getIdx())},
+                               {static_cast<size_t>(dst.getIdx())},
+                               {sigmoid_aux_vec_idxs},
+                               aux_gpr_idxs,
+                               aux_fp_gpr_idxs);
+
+    h->vfmul_vv(dst, dst, aux_save);  // dst = x * sigmoid(x)
+}
+std::set<std::vector<element::Type>> jit_swish_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_swish_emitter::register_table_entries() {
+    push_arg_entry_of("swish_alpha", dnnl::impl::float2int(alpha_));
+}
+
+void jit_swish_emitter::emit_data() const {
+    sigmoid_emitter->emit_data();
+    jit_emitter::emit_data();
+}
+
+// LESS ///
+jit_less_emitter::jit_less_emitter(jit_generator_t* host, cpu_isa_t host_isa, element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+jit_less_emitter::jit_less_emitter(jit_generator_t* host, cpu_isa_t host_isa, const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+size_t jit_less_emitter::get_inputs_num() const {
+    return 2;
+}
+size_t jit_less_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+void jit_less_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                 const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for LESS");
+    }
+}
+template <cpu_isa_t isa>
+void jit_less_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == element::f32, "JIT Less emitter supports only f32 precision");
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+    load_table_val("one", one);
+
+    h->vmflt_vv(mask_vreg(), src0, src1);
+    h->vmv_v_x(dst, x0);
+    h->vfadd_vf(dst, dst, one, VM::masked);
+}
+void jit_less_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+std::set<std::vector<element::Type>> jit_less_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+/// LOGICAL OR ///
+jit_logical_or_emitter::jit_logical_or_emitter(jit_generator_t* host, cpu_isa_t host_isa, element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+jit_logical_or_emitter::jit_logical_or_emitter(jit_generator_t* host,
+                                               cpu_isa_t host_isa,
+                                               const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+size_t jit_logical_or_emitter::get_inputs_num() const {
+    return 2;
+}
+size_t jit_logical_or_emitter::aux_gprs_count() const {
+    return 1;
+}
+size_t jit_logical_or_emitter::aux_fp_gprs_count() const {
+    return 2;
+}
+void jit_logical_or_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                       const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+template <cpu_isa_t isa>
+void jit_logical_or_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                      const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == element::f32, "JIT Logical OR emitter supports only f32 precision");
+    const VReg src0 = VReg(in_vec_idxs[0]);
+    const VReg src1 = VReg(in_vec_idxs[1]);
+    const VReg dst = VReg(out_vec_idxs[0]);
+    const FReg fzero = FReg(aux_fp_gpr_idxs[0]);
+    const FReg fone = FReg(aux_fp_gpr_idxs[1]);
+
+    h->fmv_w_x(fzero, zero);
+    load_table_val("one", fone);
+
+    h->vmv_v_x(dst, zero);
+
+    h->vmfne_vf(mask_vreg(), src0, fzero);
+    h->vfmerge_vfm(dst, dst, fone);
+
+    h->vmfne_vf(mask_vreg(), src1, fzero);
+    h->vfmerge_vfm(dst, dst, fone);
+}
+std::set<std::vector<element::Type>> jit_logical_or_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+void jit_logical_or_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
 /// MAXIMUM ///
-jit_maximum_emitter::jit_maximum_emitter(jit_generator* host, cpu_isa_t host_isa, const element::Type exec_prc)
+jit_maximum_emitter::jit_maximum_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
-jit_maximum_emitter::jit_maximum_emitter(jit_generator* host, cpu_isa_t host_isa, const std::shared_ptr<ov::Node>& node)
+jit_maximum_emitter::jit_maximum_emitter(jit_generator_t* host,
+                                         cpu_isa_t host_isa,
+                                         const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
 size_t jit_maximum_emitter::get_inputs_num() const {
     return 2;
+}
+
+/// IS_FINITE ///
+jit_is_finite_emitter::jit_is_finite_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                             ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                             ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_is_finite_emitter::jit_is_finite_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                             ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                             [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                             ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+size_t jit_is_finite_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_is_finite_emitter::aux_gprs_count() const {
+    return 2;
+}
+
+size_t jit_is_finite_emitter::aux_vecs_count() const {
+    return 1;
+}
+
+size_t jit_is_finite_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_is_finite_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                      const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_is_finite_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                     const std::vector<size_t>& out_vec_idxs) const {
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+    auto tmp = Reg(aux_gpr_idxs[0]);
+
+    h->vfclass_v(aux0, src);                                // classify into aux0
+    h->li(tmp, (1 << 0) | (1 << 7) | (1 << 8) | (1 << 9));  // -inf, +inf, signaling NaN, quiet NaN
+    h->vand_vx(aux0, aux0, tmp);
+    h->vmseq_vx(mask_vreg(), aux0, zero);  // set mask where none of the classification bits are set
+    h->vmv_v_x(dst, zero);                 // dst = 0
+    load_table_val("one", one);
+    h->vfadd_vf(dst, dst, one, VM::masked);  // set 1.0 where mask is true
+}
+
+std::set<std::vector<element::Type>> jit_is_finite_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_is_finite_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
+/// IS_INF ///
+jit_is_inf_emitter::jit_is_inf_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       bool detect_negative,
+                                       bool detect_positive,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc),
+      detect_negative(detect_negative),
+      detect_positive(detect_positive) {
+    prepare_table();
+}
+
+jit_is_inf_emitter::jit_is_inf_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       const std::shared_ptr<ov::Node>& node,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    auto isInf = ov::as_type_ptr<ov::op::v10::IsInf>(node);
+    if (isInf == nullptr) {
+        OV_CPU_JIT_EMITTER_THROW("Can't cast to ov::op::v10::IsInf");
+    }
+    const auto& attributes = isInf->get_attributes();
+    detect_negative = attributes.detect_negative;
+    detect_positive = attributes.detect_positive;
+    prepare_table();
+}
+
+size_t jit_is_inf_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_is_inf_emitter::aux_gprs_count() const {
+    return 2;
+}
+
+size_t jit_is_inf_emitter::aux_vecs_count() const {
+    return 1;
+}
+
+size_t jit_is_inf_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_is_inf_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                   const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_is_inf_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+    auto tmp = Reg(aux_gpr_idxs[0]);
+
+    if (!detect_negative && !detect_positive) {
+        h->vmv_v_x(dst, zero);  // dst = 0
+        return;
+    }
+
+    h->vfclass_v(aux0, src);  // classify into aux0
+    uint32_t bitsToCheck = 0;
+    if (detect_negative) {
+        bitsToCheck |= (1 << 0);
+    }
+    if (detect_positive) {
+        bitsToCheck |= (1 << 7);
+    }
+    h->li(tmp, bitsToCheck);
+    h->vand_vx(aux0, aux0, tmp);
+    h->vmsne_vx(mask_vreg(), aux0, zero);  // set mask where some of the classification bits are set
+    load_table_val("one", one);
+    h->vmv_v_x(dst, zero);                   // dst = 0
+    h->vfadd_vf(dst, dst, one, VM::masked);  // set 1.0 where mask is true
+}
+
+std::set<std::vector<element::Type>> jit_is_inf_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_is_inf_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
+/// IS_NAN ///
+jit_is_nan_emitter::jit_is_nan_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_is_nan_emitter::jit_is_nan_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+size_t jit_is_nan_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_is_nan_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_is_nan_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                   const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_is_nan_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+
+    h->vmfne_vv(mask_vreg(), src, src);  // set mask where src is nan (i.e. not equal to itself)
+    h->vmv_v_x(dst, zero);               // set dst to 0
+    load_table_val("one", one);
+    h->vfadd_vf(dst, dst, one, VM::masked);  // set 1.0 where mask is true
+}
+
+std::set<std::vector<element::Type>> jit_is_nan_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_is_nan_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
+/// LESS EQUAL ///
+jit_less_equal_emitter::jit_less_equal_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                               ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_less_equal_emitter::jit_less_equal_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                               const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+size_t jit_less_equal_emitter::get_inputs_num() const {
+    return 2;
+}
+
+size_t jit_less_equal_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_less_equal_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                      const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+    load_table_val("one", one);
+
+    h->vmfle_vv(mask_vreg(), src0, src1);    // compare "less than or equal", result in mask
+    h->vmv_v_x(dst, zero);                   // set dst to 0
+    h->vfadd_vf(dst, dst, one, VM::masked);  // set 1.0 where mask is true
+}
+
+void jit_less_equal_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                       const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+std::set<std::vector<element::Type>> jit_less_equal_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
+void jit_less_equal_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
 }
 
 void jit_maximum_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
@@ -565,29 +2247,33 @@ void jit_maximum_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel for MAXIMUM");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for MAXIMUM");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_maximum_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                    const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     h->vfmax_vv(dst, src0, src1);
 }
 
 std::set<std::vector<element::Type>> jit_maximum_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 /// MINIMUM ///
-jit_minimum_emitter::jit_minimum_emitter(jit_generator* host, cpu_isa_t host_isa, const element::Type exec_prc)
+jit_minimum_emitter::jit_minimum_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
-jit_minimum_emitter::jit_minimum_emitter(jit_generator* host, cpu_isa_t host_isa, const std::shared_ptr<ov::Node>& node)
+jit_minimum_emitter::jit_minimum_emitter(jit_generator_t* host,
+                                         cpu_isa_t host_isa,
+                                         const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
 size_t jit_minimum_emitter::get_inputs_num() const {
@@ -599,36 +2285,38 @@ void jit_minimum_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel for MINIMUM");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for MINIMUM");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_minimum_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                    const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     h->vfmin_vv(dst, src0, src1);
 }
 
 std::set<std::vector<element::Type>> jit_minimum_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 
 /// LOGICAL AND ///
-jit_logical_and_emitter::jit_logical_and_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_logical_and_emitter::jit_logical_and_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                                  const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
     prepare_table();
 }
 
-jit_logical_and_emitter::jit_logical_and_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_logical_and_emitter::jit_logical_and_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                                 const ov::element::Type exec_prc)
+                                                 ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
@@ -637,12 +2325,8 @@ size_t jit_logical_and_emitter::get_inputs_num() const {
     return 2;
 }
 
-size_t jit_logical_and_emitter::aux_gprs_count() const {
+size_t jit_logical_and_emitter::aux_fp_gprs_count() const {
     return 2;
-}
-
-size_t jit_logical_and_emitter::aux_vecs_count() const {
-    return 1;
 }
 
 void jit_logical_and_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
@@ -650,49 +2334,108 @@ void jit_logical_and_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_logical_and_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                        const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    VReg mask0 = VReg(aux_vec_idxs[0]);
-    Reg mask1 = Reg(aux_gpr_idxs[0]);
-    load_table_val("one", mask1);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
 
-    switch (exec_prc_) {
-    case ov::element::f32:
-        h->vand_vv(mask0, src0, src1);
-        h->vand_vx(dst, mask0, mask1);
-        break;
-    default:
-        OV_CPU_JIT_EMITTER_THROW("Unsupported precision");
-    }
+    const auto src0 = VReg(in_vec_idxs[0]);
+    const auto src1 = VReg(in_vec_idxs[1]);
+    const auto dst = VReg(out_vec_idxs[0]);
+
+    auto fzero = FReg(aux_fp_gpr_idxs[0]);
+    h->fmv_w_x(fzero, zero);
+
+    auto fone = FReg(aux_fp_gpr_idxs[1]);
+    load_table_val("one", fone);
+
+    h->vmv_v_x(dst, zero);
+
+    h->vmfne_vf(mask_vreg(), src0, fzero);
+    h->vmfne_vf(mask_vreg(), src1, fzero, VM::masked);
+    h->vfmerge_vfm(dst, dst, fone);
 }
 
 std::set<std::vector<element::Type>> jit_logical_and_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 void jit_logical_and_emitter::register_table_entries() {
     push_arg_entry_of("one", CONST_1_F);
 }
 
-/// LOGICAL XOR ///
-jit_logical_xor_emitter::jit_logical_xor_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+/// LOGICAL NOT ///
+jit_logical_not_emitter::jit_logical_not_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                                  const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
     prepare_table();
 }
 
-jit_logical_xor_emitter::jit_logical_xor_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_logical_not_emitter::jit_logical_not_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                                  ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                                 const ov::element::Type exec_prc)
+                                                 ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+size_t jit_logical_not_emitter::get_inputs_num() const {
+    return 1;
+}
+size_t jit_logical_not_emitter::aux_fp_gprs_count() const {
+    return 2;
+}
+
+void jit_logical_not_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                        const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_logical_not_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                       const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto fzero = FReg(aux_fp_gpr_idxs[0]);
+    auto fone = FReg(aux_fp_gpr_idxs[1]);
+
+    load_table_val("one", fone);
+    h->fmv_w_x(fzero, zero);
+    h->vmfne_vf(mask_vreg(), src, fzero);
+    h->vfmv_v_f(dst, fone);
+    h->vfsub_vf(dst, dst, fone, VM::masked);
+}
+
+std::set<std::vector<element::Type>> jit_logical_not_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_logical_not_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+}
+
+/// LOGICAL XOR ///
+jit_logical_xor_emitter::jit_logical_xor_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                 const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+jit_logical_xor_emitter::jit_logical_xor_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                 ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
@@ -704,7 +2447,7 @@ size_t jit_logical_xor_emitter::aux_fp_gprs_count() const {
     return 2;
 }
 size_t jit_logical_xor_emitter::aux_vecs_count() const {
-    return 2;
+    return 1;
 }
 
 void jit_logical_xor_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
@@ -712,39 +2455,38 @@ void jit_logical_xor_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_logical_xor_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                        const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg aux0 = VReg(aux_vec_idxs[0]);
-    VReg aux1 = VReg(aux_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    FReg fzero = FReg(aux_fp_gpr_idxs[0]);
-    FReg fone = FReg(aux_fp_gpr_idxs[1]);
-    load_table_val("one", fone);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto ones = VReg(aux_vec_idxs[0]);
+
+    auto fzero = FReg(aux_fp_gpr_idxs[0]);
     h->fmv_w_x(fzero, zero);
-    h->vmv_v_x(aux0, zero);
-    h->vmv_v_x(aux1, zero);
-    switch (exec_prc_) {
-    case ov::element::f32:
-        h->vmfne_vf(mask_vreg(), src0, fzero);
-        h->vfadd_vf(aux0, aux0, fone, VM::masked);
-        h->vmfne_vf(mask_vreg(), src1, fzero);
-        h->vfadd_vf(aux1, aux1, fone, VM::masked);
-        h->vxor_vv(dst, aux0, aux1);
-        break;
-    default:
-        OV_CPU_JIT_EMITTER_THROW("Unsupported precision");
-    }
+
+    auto fone = FReg(aux_fp_gpr_idxs[1]);
+    load_table_val("one", fone);
+    h->vfmv_v_f(ones, fone);
+
+    h->vmv_v_x(dst, zero);
+
+    h->vmfne_vf(mask_vreg(), src0, fzero);
+    h->vmerge_vvm(dst, dst, ones);
+
+    h->vmfne_vf(mask_vreg(), src1, fzero);
+    h->vxor_vv(dst, dst, ones, VM::masked);
 }
 
 std::set<std::vector<element::Type>> jit_logical_xor_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 
@@ -752,15 +2494,122 @@ void jit_logical_xor_emitter::register_table_entries() {
     push_arg_entry_of("one", CONST_1_F);
 }
 
+/// MISH ///
+jit_mish_emitter::jit_mish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                   ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                   ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    exp_emitter = std::make_unique<jit_exp_emitter>(host, host_isa, exec_prc);
+    prepare_table();
+}
+
+jit_mish_emitter::jit_mish_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                   ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                   [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                   ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    exp_emitter = std::make_unique<jit_exp_emitter>(host, host_isa, exec_prc);
+    prepare_table();
+}
+
+size_t jit_mish_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_mish_emitter::aux_gprs_count() const {
+    return std::max<size_t>(exp_emitter->aux_gprs_count(), 1) + 1;
+}
+
+size_t jit_mish_emitter::aux_vecs_count() const {
+    return std::max<size_t>(exp_emitter->aux_vecs_count() + 1, 2);
+}
+
+size_t jit_mish_emitter::aux_fp_gprs_count() const {
+    return std::max<size_t>(exp_emitter->aux_fp_gprs_count(), 1);
+}
+
+void jit_mish_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                 const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_mish_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    // An equation other than mish(x) = x*tanh(srelu(x)) was used
+    // to calculate mish, but it should be remembered that it is equivalent
+    // equation, it uses the following rule:
+    // tanh(x) = (e^x - e^-x) / (e^x + e^-x),
+    // hence the equation for mish can take the form:
+    // mish(x) = x * ((e^x + 1)^2 - 1)/((e^x + 1)^2 + 1).
+    // This option was chosen because computing tanh requires more registers
+    // than exp, and also requires more constants to be stored in memory,
+    // making the algorithm slower.
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto aux0 = VReg(aux_vec_idxs[0]);
+    auto aux1 = VReg(aux_vec_idxs[1]);
+
+    auto one = FReg(aux_fp_gpr_idxs[0]);
+    auto tmpReg = Reg(aux_gpr_idxs[0]);
+
+    load_table_val("fwd_mish_max_x_for_equation_f", aux1, tmpReg);
+    h->vfmin_vv(aux1, src, aux1);
+
+    auto exp_aux_vec_idxs = aux_vec_idxs;
+    exp_aux_vec_idxs.erase(
+        std::find(exp_aux_vec_idxs.begin(), exp_aux_vec_idxs.end(), static_cast<size_t>(aux1.getIdx())));
+    exp_emitter->emit_code({static_cast<size_t>(aux1.getIdx())},
+                           {static_cast<size_t>(aux1.getIdx())},
+                           exp_aux_vec_idxs,
+                           aux_gpr_idxs,
+                           aux_fp_gpr_idxs);
+
+    // save src as it may be the same as dst
+    h->vmv_v_v(aux0, src);
+
+    // (e^x+1)^2
+    load_table_val("one", one);
+    h->vfadd_vf(aux1, aux1, one);
+    h->vfmul_vv(dst, aux1, aux1);
+
+    h->vfsub_vf(aux1, dst, one);  // aux1 = (e^x+1)^2 - 1
+    h->vfadd_vf(dst, dst, one);   // dst = (e^x+1)^2 + 1
+    h->vfdiv_vv(dst, aux1, dst);
+    h->vfmul_vv(dst, dst, aux0);
+}
+
+std::set<std::vector<element::Type>> jit_mish_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_mish_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+    push_arg_entry_of("fwd_mish_max_x_for_equation_f", 0x42317217);
+}
+
+void jit_mish_emitter::emit_data() const {
+    jit_emitter::emit_data();
+    exp_emitter->emit_data();
+}
+
 /// MUL_ADD ///
-jit_mul_add_emitter::jit_mul_add_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_mul_add_emitter::jit_mul_add_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                          ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                          const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_mul_add_emitter::jit_mul_add_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_mul_add_emitter::jit_mul_add_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                          ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                         const ov::element::Type exec_prc)
+                                         ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_mul_add_emitter::get_inputs_num() const {
@@ -772,17 +2621,19 @@ void jit_mul_add_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_mul_add_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                    const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg src2 = VReg(in_vec_idxs[2]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto src2 = VReg(in_vec_idxs[2]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     if (src1.getIdx() == dst.getIdx()) {
         h->vfmadd_vv(dst, src0, src2);
@@ -801,19 +2652,19 @@ void jit_mul_add_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
 }
 
 std::set<std::vector<element::Type>> jit_mul_add_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32, element::f32}};
 }
 
 /// MUL ///
-jit_multiply_emitter::jit_multiply_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_multiply_emitter::jit_multiply_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                            ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                            const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_multiply_emitter::jit_multiply_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_multiply_emitter::jit_multiply_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                            ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                           const ov::element::Type exec_prc)
+                                           ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_multiply_emitter::get_inputs_num() const {
@@ -825,29 +2676,32 @@ void jit_multiply_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_multiply_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                     const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+
     h->vfmul_vv(dst, src0, src1);
 }
 
 std::set<std::vector<element::Type>> jit_multiply_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 
 /// NEGATIVE ///
-jit_negative_emitter::jit_negative_emitter(jit_generator* host, cpu_isa_t host_isa, const element::Type exec_prc)
+jit_negative_emitter::jit_negative_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
-jit_negative_emitter::jit_negative_emitter(jit_generator* host,
+jit_negative_emitter::jit_negative_emitter(jit_generator_t* host,
                                            cpu_isa_t host_isa,
                                            const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
@@ -860,36 +2714,38 @@ void jit_negative_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel for NEGATIVE");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for NEGATIVE");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_negative_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                     const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     h->vfneg_vv(dst, src);
 }
 
 std::set<std::vector<element::Type>> jit_negative_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
 /// NOT EQUAL ///
-jit_not_equal_emitter::jit_not_equal_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_not_equal_emitter::jit_not_equal_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                              ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                             const std::shared_ptr<ov::Node>& node,
-                                             const ov::element::Type exec_prc)
+                                             [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                             ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
 
-jit_not_equal_emitter::jit_not_equal_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_not_equal_emitter::jit_not_equal_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                              ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                             const ov::element::Type exec_prc)
+                                             ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     prepare_table();
 }
@@ -907,18 +2763,20 @@ void jit_not_equal_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_not_equal_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                      const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
 
-    FReg one = FReg(aux_fp_gpr_idxs[0]);
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto one = FReg(aux_fp_gpr_idxs[0]);
     load_table_val("one", one);
 
     h->vmfne_vv(mask_vreg(), src0, src1);
@@ -927,7 +2785,7 @@ void jit_not_equal_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
 }
 
 std::set<std::vector<element::Type>> jit_not_equal_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 
@@ -936,15 +2794,15 @@ void jit_not_equal_emitter::register_table_entries() {
 }
 
 /// PReLU ///
-jit_prelu_emitter::jit_prelu_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_prelu_emitter::jit_prelu_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                      ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                     const std::shared_ptr<ov::Node>& node,
-                                     const ov::element::Type exec_prc)
+                                     [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                     ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
-jit_prelu_emitter::jit_prelu_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_prelu_emitter::jit_prelu_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                      ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                     const ov::element::Type exec_prc)
+                                     ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_prelu_emitter::get_inputs_num() const {
@@ -960,17 +2818,19 @@ void jit_prelu_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_prelu_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                  const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    FReg fzero = FReg(aux_fp_gpr_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto fzero = FReg(aux_fp_gpr_idxs[0]);
 
     if (src0.getIdx() != dst.getIdx()) {
         h->vmv_v_v(dst, src0);
@@ -983,30 +2843,30 @@ void jit_prelu_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
 }
 
 std::set<std::vector<element::Type>> jit_prelu_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}};
 }
 
 /// ReLU ///
-jit_relu_emitter::jit_relu_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_relu_emitter::jit_relu_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                    const std::shared_ptr<ov::Node>& node,
-                                   const ov::element::Type exec_prc)
+                                   ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {
     if (const auto leaky_relu = ov::as_type_ptr<LeakyReluNode>(node)) {
         alpha = leaky_relu->get_slope();
     } else if (ov::is_type<ov::op::v0::Relu>(node)) {
-        alpha = 0.f;
+        alpha = 0.F;
     } else {
-        OPENVINO_THROW("Incompatible node!");
+        OV_CPU_JIT_EMITTER_THROW("Incompatible node!");
     }
     prepare_table();
 }
 
-jit_relu_emitter::jit_relu_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_relu_emitter::jit_relu_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                    float alpha,
-                                   const ov::element::Type exec_prc)
+                                   ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc),
       alpha(alpha) {
     prepare_table();
@@ -1025,15 +2885,17 @@ void jit_relu_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_relu_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    FReg fzero = FReg(aux_fp_gpr_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto fzero = FReg(aux_fp_gpr_idxs[0]);
     h->fmv_w_x(fzero, zero);
 
     if (alpha == 0) {
@@ -1052,7 +2914,8 @@ void jit_relu_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const st
     h->vfmul_vf(dst, dst, alpha_reg, VM::masked);
 }
 
-std::set<std::vector<element::Type>> jit_relu_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
+std::set<std::vector<element::Type>> jit_relu_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
@@ -1062,8 +2925,185 @@ void jit_relu_emitter::register_table_entries() {
     }
 }
 
+/// RoundHalfAwayFromZero ///
+jit_round_half_away_from_zero_emitter::jit_round_half_away_from_zero_emitter(
+    ov::intel_cpu::riscv64::jit_generator_t* host,
+    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+    ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+jit_round_half_away_from_zero_emitter::jit_round_half_away_from_zero_emitter(
+    ov::intel_cpu::riscv64::jit_generator_t* host,
+    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+    ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+size_t jit_round_half_away_from_zero_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_round_half_away_from_zero_emitter::aux_gprs_count() const {
+    return 1;
+}
+
+size_t jit_round_half_away_from_zero_emitter::aux_vecs_count() const {
+    return 0;
+}
+
+void jit_round_half_away_from_zero_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                                      const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_round_half_away_from_zero_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                                     const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    h->vfsgnjx_vv(dst, src, src);
+
+    auto tmp = Reg(aux_gpr_idxs[0]);
+    h->csrrwi(tmp, CSR::frm, static_cast<uint32_t>(RM::rmm));
+
+    h->vfcvt_x_f_v(dst, dst);  // fp32 -> int32
+    h->vfcvt_f_x_v(dst, dst);  // int32 -> fp32
+
+    h->csrw(CSR::frm, tmp);
+
+    h->vfsgnj_vv(dst, dst, src);
+}
+
+std::set<std::vector<element::Type>> jit_round_half_away_from_zero_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+/// RoundHalfToEvenEmitter ///
+jit_round_half_to_even_emitter::jit_round_half_to_even_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                               [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                                               ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+jit_round_half_to_even_emitter::jit_round_half_to_even_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                               ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+size_t jit_round_half_to_even_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_round_half_to_even_emitter::aux_gprs_count() const {
+    return 1;
+}
+
+void jit_round_half_to_even_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                               const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_round_half_to_even_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                              const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto tmp = Reg(aux_gpr_idxs[0]);
+
+    h->csrrwi(tmp, CSR::frm, static_cast<uint32_t>(RM::rne));
+
+    h->vfcvt_x_f_v(dst, src);  // fp32 -> int32
+    h->vfcvt_f_x_v(dst, dst);  // int32 -> fp32
+
+    h->csrw(CSR::frm, tmp);
+}
+
+std::set<std::vector<element::Type>> jit_round_half_to_even_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+/// SELECT ///
+jit_select_emitter::jit_select_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
+
+jit_select_emitter::jit_select_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                       ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                       ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+size_t jit_select_emitter::get_inputs_num() const {
+    return 3;
+}
+
+size_t jit_select_emitter::aux_fp_gprs_count() const {
+    return 1;
+}
+
+void jit_select_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                   const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_select_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                  const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    const auto condition = VReg(in_vec_idxs[0]);
+    const auto then_value = VReg(in_vec_idxs[1]);
+    const auto else_value = VReg(in_vec_idxs[2]);
+    const auto dst = VReg(out_vec_idxs[0]);
+    const auto fzero = FReg(aux_fp_gpr_idxs[0]);
+
+    h->fmv_w_x(fzero, zero);
+    h->vmfgt_vf(mask_vreg(), condition, fzero);
+    h->vmerge_vvm(dst, else_value, then_value);
+}
+
+std::set<std::vector<element::Type>> jit_select_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32, element::f32}};
+}
+
 /// Power Static ///
-jit_power_static_emitter::jit_power_static_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_power_static_emitter::jit_power_static_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                   ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                   const std::shared_ptr<ov::Node>& node,
+                                                   ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    const auto power_static = ov::as_type_ptr<ov::snippets::op::PowerStatic>(node);
+    OV_CPU_JIT_EMITTER_ASSERT(power_static, "Can't cast to snippets::op::PowerStatic");
+
+    power = power_static->get_power();
+    scale = 1.F;
+    shift = 0.F;
+
+    prepare_table();
+}
+
+jit_power_static_emitter::jit_power_static_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                                    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                                    float power,
                                                    float scale,
@@ -1081,14 +3121,17 @@ size_t jit_power_static_emitter::get_inputs_num() const {
 }
 
 size_t jit_power_static_emitter::aux_gprs_count() const {
-    if ((power == 0) || is_scale_shift() || (!is_sqrt() && !is_int_pow())) {
+    if (power == 0 || is_scale_shift()) {
         return 2;
+    }
+    if (!is_sqrt() && !is_int_pow()) {
+        return 3;
     }
     return 1;
 }
 
 bool jit_power_static_emitter::is_lmul_supported() const {
-    return jit_emitter::is_lmul_supported() && (is_int_pow() || is_sqrt());
+    return jit_emitter::is_lmul_supported();
 }
 
 size_t jit_power_static_emitter::aux_vecs_count() const {
@@ -1110,26 +3153,28 @@ void jit_power_static_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_power_static_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                         const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     if (power == 0) {
-        Reg tmp = Reg(aux_gpr_idxs[0]);
+        auto tmp = Reg(aux_gpr_idxs[0]);
         load_table_val("one", dst, tmp);
         return;
     }
 
     if (is_scale_shift()) {
-        VReg aux0 = VReg(aux_vec_idxs[0]);
-        VReg aux1 = VReg(aux_vec_idxs[1]);
-        Reg tmp = Reg(aux_gpr_idxs[0]);
+        auto aux0 = VReg(aux_vec_idxs[0]);
+        auto aux1 = VReg(aux_vec_idxs[1]);
+        auto tmp = Reg(aux_gpr_idxs[0]);
         load_table_val("shift", aux0, tmp);
         load_table_val("scale", aux1, tmp);
         h->vfmacc_vv(aux0, aux1, src);
@@ -1145,14 +3190,14 @@ void jit_power_static_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
         h->vfsqrt_v(dst, dst);
 
         if (power < 0) {
-            FReg one = FReg(aux_fp_gpr_idxs[0]);
+            auto one = FReg(aux_fp_gpr_idxs[0]);
             load_table_val("one", one);
             h->vfrdiv_vf(dst, dst, one);
         }
     } else if (is_int_pow()) {
         int64_t ipower = std::abs(static_cast<int64_t>(power)) - 1;
 
-        VReg aux0 = VReg(aux_vec_idxs[0]);
+        auto aux0 = VReg(aux_vec_idxs[0]);
         h->vmv_v_v(aux0, dst);
 
         while (ipower > 0) {
@@ -1166,7 +3211,7 @@ void jit_power_static_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
         }
 
         if (power < 0) {
-            FReg one = FReg(aux_fp_gpr_idxs[0]);
+            auto one = FReg(aux_fp_gpr_idxs[0]);
             load_table_val("one", one);
             h->vfrdiv_vf(dst, dst, one);
         }
@@ -1176,47 +3221,108 @@ void jit_power_static_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
         Reg func_reg(aux_gpr_idxs[0]);
         h->uni_li(func_reg, pow_f32_addr);
 
-        // Before binary call we have to save caller-saver registers:
-        // - all caller-saver general-purpose regs + func_reg (if it's caller-saver)
-        // - all caller-saver fp general-purpose regs except aux registers
-        // - all vector registers except aux, src and dst registers
-        auto exclude_vec_regs = aux_vec_idxs;
-        aux_vec_idxs.push_back(src.getIdx());
-        aux_vec_idxs.push_back(dst.getIdx());
-        call_preamble({}, aux_fp_gpr_idxs, aux_vec_idxs);
-
-        const auto sp_size = rnd_up(get_vec_length(), 16);
-        h->addi(sp, sp, -sp_size);
-        h->vse32_v(dst, sp);
-
-        // TODO: Support any LMUL here (via vl from csr + labels)
-        for (size_t i = 0; i < get_vec_length(); i += sizeof(float)) {
-            h->flw(fa0, sp, i);
-            load_table_val("power", fa1);
-
-            h->jalr(ra, func_reg);
-
-            h->fsw(fa0, sp, i);
+        std::vector<size_t> exclude_vec_regs;
+        exclude_vec_regs.reserve(get_max_vecs_count());
+        for (size_t idx = 0; idx < get_max_vecs_count(); ++idx) {
+            exclude_vec_regs.push_back(idx);
         }
+        // The active LMUL cannot be used to save individual physical registers safely.
+        call_preamble({}, aux_fp_gpr_idxs, exclude_vec_regs);
 
-        h->vle32_v(dst, sp);
-        h->addi(sp, sp, sp_size);
+        const auto vector_state_bytes = 2 * get_gpr_length();
+        const auto vector_regs_offset = vector_state_bytes + 2 * get_gpr_length();
+        const auto vector_regs_count = get_max_vecs_count();
+        const auto scalar_buffer_offset = vector_regs_offset + vector_regs_count * get_vec_length();
+        const auto scalar_buffer_size = 8 * get_vec_length();
+        const auto loop_counter_offset = scalar_buffer_offset + scalar_buffer_size;
+        const auto loop_pointer_offset = loop_counter_offset + get_gpr_length();
+        const auto frame_size = rnd_up(loop_pointer_offset + get_gpr_length(), sp_alignment);
 
-        call_postamble({}, aux_fp_gpr_idxs, aux_vec_idxs);
+        utils::sub_sp(*h, frame_size);
+        utils::save_vector_state(*h, t0, t1, 0, get_gpr_length());
+        h->sd(func_reg, sp, static_cast<int32_t>(vector_state_bytes));
+        h->sd(p_table, sp, static_cast<int32_t>(vector_state_bytes + get_gpr_length()));
+
+        std::vector<size_t> vector_regs;
+        vector_regs.reserve(vector_regs_count);
+        for (size_t idx = 0; idx < vector_regs_count; ++idx) {
+            vector_regs.push_back(idx);
+        }
+        utils::save_vregs(*h, t0, t1, vector_regs_offset, vector_regs);
+        utils::restore_vector_state(*h, t0, t1, 0, get_gpr_length());
+
+        Reg vl_reg(aux_gpr_idxs[1]);
+        h->uni_li(t0, scalar_buffer_offset);
+        h->add(t0, sp, t0);
+        h->vse32_v(dst, t0);
+
+        h->uni_li(t0, loop_counter_offset);
+        h->add(t0, sp, t0);
+        h->ld(vl_reg, sp, 0);
+        h->sd(vl_reg, t0, 0);
+
+        h->uni_li(t0, loop_pointer_offset);
+        h->add(t0, sp, t0);
+        h->uni_li(t1, scalar_buffer_offset);
+        h->add(t1, sp, t1);
+        h->sd(t1, t0, 0);
+
+        Xbyak_riscv::Label pow_loop;
+        Xbyak_riscv::Label pow_done;
+        h->L(pow_loop);
+
+        h->uni_li(t0, loop_counter_offset);
+        h->add(t0, sp, t0);
+        h->ld(vl_reg, t0, 0);
+        h->blez(vl_reg, pow_done);
+
+        h->uni_li(t0, loop_pointer_offset);
+        h->add(t0, sp, t0);
+        h->ld(t1, t0, 0);
+        h->flw(fa0, t1, 0);
+        h->ld(func_reg, sp, static_cast<int32_t>(vector_state_bytes));
+        h->ld(p_table, sp, static_cast<int32_t>(vector_state_bytes + get_gpr_length()));
+        load_table_val("power", fa1);
+
+        h->jalr(ra, func_reg);
+
+        h->uni_li(t0, loop_pointer_offset);
+        h->add(t0, sp, t0);
+        h->ld(t1, t0, 0);
+        h->fsw(fa0, t1, 0);
+        h->addi(t1, t1, sizeof(float));
+        h->sd(t1, t0, 0);
+
+        h->uni_li(t0, loop_counter_offset);
+        h->add(t0, sp, t0);
+        h->ld(vl_reg, t0, 0);
+        h->addi(vl_reg, vl_reg, -1);
+        h->sd(vl_reg, t0, 0);
+        h->jal(Xbyak_riscv::zero, pow_loop);
+        h->L(pow_done);
+
+        utils::restore_vregs(*h, t0, t1, vector_regs_offset, vector_regs);
+        utils::restore_vector_state(*h, t0, t1, 0, get_gpr_length());
+        h->uni_li(t0, scalar_buffer_offset);
+        h->add(t0, sp, t0);
+        h->vle32_v(dst, t0);
+        utils::add_sp(*h, frame_size);
+
+        call_postamble({}, aux_fp_gpr_idxs, exclude_vec_regs);
     }
 }
 
 std::set<std::vector<element::Type>> jit_power_static_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
 void jit_power_static_emitter::register_table_entries() {
-    if (scale != 1.f || shift != 0.f) {
+    if (scale != 1.F || shift != 0.F) {
         push_arg_entry_of("scale", dnnl::impl::float2int(scale));
         push_arg_entry_of("shift", dnnl::impl::float2int(shift));
     }
-    if (power != 1.f) {
+    if (power != 1.F) {
         push_arg_entry_of("power", dnnl::impl::float2int(power));
     }
     if (power < 0) {
@@ -1224,21 +3330,98 @@ void jit_power_static_emitter::register_table_entries() {
     }
 }
 
+/// Power Dynamic ///
+jit_power_dynamic_emitter::jit_power_dynamic_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                     const std::shared_ptr<ov::Node>& node,
+                                                     [[maybe_unused]] ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
+
+jit_power_dynamic_emitter::jit_power_dynamic_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                     ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                     ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+size_t jit_power_dynamic_emitter::get_inputs_num() const {
+    return 2;
+}
+
+size_t jit_power_dynamic_emitter::aux_gprs_count() const {
+    return 1;
+}
+
+bool jit_power_dynamic_emitter::is_lmul_supported() const {
+    return false;
+}
+
+void jit_power_dynamic_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                          const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_power_dynamic_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                         const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto func_reg = Reg(aux_gpr_idxs[0]);
+
+    std::vector<size_t> exclude_vec_regs = {static_cast<size_t>(src0.getIdx()),
+                                            static_cast<size_t>(src1.getIdx()),
+                                            static_cast<size_t>(dst.getIdx())};
+    call_preamble({}, {}, exclude_vec_regs);
+
+    const auto sp_size = static_cast<int>(rnd_up(get_vec_length(), sp_alignment));
+    h->addi(sp, sp, -2 * sp_size);
+    h->vse32_v(src0, sp);
+    h->addi(func_reg, sp, sp_size);
+    h->vse32_v(src1, func_reg);
+
+    auto pow_f32_addr = reinterpret_cast<uintptr_t>(::powf);
+    for (size_t i = 0; i < get_vec_length(); i += sizeof(float)) {
+        h->flw(fa0, sp, i);
+        h->addi(func_reg, sp, sp_size);
+        h->flw(fa1, func_reg, i);
+        h->uni_li(func_reg, pow_f32_addr);
+
+        h->jalr(ra, func_reg);
+
+        h->fsw(fa0, sp, i);
+    }
+
+    h->vle32_v(dst, sp);
+    h->addi(sp, sp, 2 * sp_size);
+
+    call_postamble({}, {}, exclude_vec_regs);
+}
+
+std::set<std::vector<element::Type>> jit_power_dynamic_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
 /// Sigmoid ///
-jit_sigmoid_emitter::jit_sigmoid_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_sigmoid_emitter::jit_sigmoid_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                          ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                         const std::shared_ptr<ov::Node>& node,
-                                         const ov::element::Type exec_prc)
-    : jit_emitter(host, host_isa, exec_prc) {
-    jit_exp_emitter_.reset(new jit_exp_emitter(host, host_isa, exec_prc));
+                                         [[maybe_unused]] const std::shared_ptr<ov::Node>& node,
+                                         ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc),
+      jit_exp_emitter_(std::make_unique<jit_exp_emitter>(host, host_isa, exec_prc)) {
     prepare_table();
 }
 
-jit_sigmoid_emitter::jit_sigmoid_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_sigmoid_emitter::jit_sigmoid_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                          ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                         const ov::element::Type exec_prc)
-    : jit_emitter(host, host_isa, exec_prc) {
-    jit_exp_emitter_.reset(new jit_exp_emitter(host, host_isa, exec_prc));
+                                         ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc),
+      jit_exp_emitter_(std::make_unique<jit_exp_emitter>(host, host_isa, exec_prc)) {
     prepare_table();
 }
 
@@ -1247,18 +3430,18 @@ size_t jit_sigmoid_emitter::get_inputs_num() const {
 }
 
 size_t jit_sigmoid_emitter::aux_gprs_count() const {
-    OPENVINO_ASSERT(jit_exp_emitter_, "JIT Exp emitter is missed!");
-    return jit_exp_emitter_->aux_gprs_count();
+    OV_CPU_JIT_EMITTER_ASSERT(jit_exp_emitter_, "JIT Exp emitter is missed!");
+    return jit_exp_emitter_->aux_gprs_count() + 1;
 }
 
 size_t jit_sigmoid_emitter::aux_vecs_count() const {
-    OPENVINO_ASSERT(jit_exp_emitter_, "JIT Exp emitter is missed!");
+    OV_CPU_JIT_EMITTER_ASSERT(jit_exp_emitter_, "JIT Exp emitter is missed!");
     return jit_exp_emitter_->aux_vecs_count() + 1;
 }
 
 size_t jit_sigmoid_emitter::aux_fp_gprs_count() const {
-    OPENVINO_ASSERT(jit_exp_emitter_, "JIT Exp emitter is missed!");
-    return std::max(jit_exp_emitter_->aux_fp_gprs_count(), 1lu);
+    OV_CPU_JIT_EMITTER_ASSERT(jit_exp_emitter_, "JIT Exp emitter is missed!");
+    return std::max(jit_exp_emitter_->aux_fp_gprs_count(), 1LU);
 }
 
 void jit_sigmoid_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
@@ -1266,24 +3449,26 @@ void jit_sigmoid_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_sigmoid_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                    const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
-    VReg sign_mask = VReg(aux_vec_idxs[aux_vecs_count() - 1]);
-    VReg aux = VReg(aux_vec_idxs[aux_vecs_count() - 2]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+    auto sign_mask = VReg(aux_vec_idxs[aux_vecs_count() - 1]);
+    auto aux = VReg(aux_vec_idxs[aux_vecs_count() - 2]);
 
     // To avoid exp(x) overflow happened at x > logf(FLT_MAX), negate positive,
     // compute exp(x), where x <= 0 to get 0 <= exp(x) <= 1 and restore value
     // sign at the end. This is possible due to logistic is symmetric function.
 
     // we store the original sign and make x negative
-    FReg fzero = FReg(aux_fp_gpr_idxs[0]);
+    auto fzero = FReg(aux_fp_gpr_idxs[0]);
     h->vmfgt_vf(mask_vreg(), src, fzero);
     h->vfneg_vv(src, src, VM::masked);
     h->vmv1r_v(sign_mask, mask_vreg());  // save mask since exp uses mask too
@@ -1294,7 +3479,7 @@ void jit_sigmoid_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
         std::vector<size_t>{aux_vec_idxs.cbegin(), aux_vec_idxs.cbegin() + jit_exp_emitter_->aux_vecs_count()};
     jit_exp_emitter_->emit_code(exp_src_idxs, exp_dst_idxs, exp_aux_vec_idxs, aux_gpr_idxs, aux_fp_gpr_idxs);
 
-    FReg one = FReg(aux_fp_gpr_idxs[0]);
+    auto one = FReg(aux_fp_gpr_idxs[0]);
     load_table_val("one", one);
     // aux = copy exp(x)
     h->vmv_v_v(aux, dst);
@@ -1320,19 +3505,19 @@ void jit_sigmoid_emitter::emit_data() const {
 }
 
 std::set<std::vector<element::Type>> jit_sigmoid_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
 /// SQRT ///
-jit_sqrt_emitter::jit_sqrt_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_sqrt_emitter::jit_sqrt_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                    const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_sqrt_emitter::jit_sqrt_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_sqrt_emitter::jit_sqrt_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                    ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                   const ov::element::Type exec_prc)
+                                   ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_sqrt_emitter::get_inputs_num() const {
@@ -1344,31 +3529,77 @@ void jit_sqrt_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_sqrt_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
-    VReg src = VReg(in_vec_idxs[0]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     h->vfsqrt_v(dst, src);
 }
 
-std::set<std::vector<element::Type>> jit_sqrt_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
+std::set<std::vector<element::Type>> jit_sqrt_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32}};
 }
 
+/// SQUARED_DIFFERENCE ///
+jit_squared_difference_emitter::jit_squared_difference_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                               const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
+
+jit_squared_difference_emitter::jit_squared_difference_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
+                                                               ov::intel_cpu::riscv64::cpu_isa_t host_isa,
+                                                               ov::element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {}
+
+size_t jit_squared_difference_emitter::get_inputs_num() const {
+    return 2;
+}
+
+void jit_squared_difference_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                               const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_squared_difference_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
+                                              const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    // dst = (src0 - src1) * (src0 - src1)
+    h->vfsub_vv(dst, src0, src1);
+    h->vfmul_vv(dst, dst, dst);
+}
+
+std::set<std::vector<element::Type>> jit_squared_difference_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
 /// SUB ///
-jit_subtract_emitter::jit_subtract_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_subtract_emitter::jit_subtract_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                            ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                                            const std::shared_ptr<ov::Node>& node)
     : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {}
 
-jit_subtract_emitter::jit_subtract_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+jit_subtract_emitter::jit_subtract_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                                            ov::intel_cpu::riscv64::cpu_isa_t host_isa,
-                                           const ov::element::Type exec_prc)
+                                           ov::element::Type exec_prc)
     : jit_emitter(host, host_isa, exec_prc) {}
 
 size_t jit_subtract_emitter::get_inputs_num() const {
@@ -1380,16 +3611,16 @@ void jit_subtract_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
     if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
         emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
     } else {
-        OPENVINO_THROW("Can't create jit eltwise kernel");
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel");
     }
 }
 
 template <ov::intel_cpu::riscv64::cpu_isa_t isa>
 void jit_subtract_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
                                     const std::vector<size_t>& out_vec_idxs) const {
-    VReg src0 = VReg(in_vec_idxs[0]);
-    VReg src1 = VReg(in_vec_idxs[1]);
-    VReg dst = VReg(out_vec_idxs[0]);
+    auto src0 = VReg(in_vec_idxs[0]);
+    auto src1 = VReg(in_vec_idxs[1]);
+    auto dst = VReg(out_vec_idxs[0]);
 
     switch (exec_prc_) {
     case ov::element::f32:
@@ -1399,13 +3630,90 @@ void jit_subtract_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs,
         h->vsub_vv(dst, src0, src1);
         break;
     default:
-        OV_CPU_JIT_EMITTER_THROW("Unsupported precision");
+        OV_CPU_JIT_EMITTER_THROW("Unsupported precision: ", exec_prc_);
     }
 }
 
 std::set<std::vector<element::Type>> jit_subtract_emitter::get_supported_precisions(
-    const std::shared_ptr<ov::Node>& node) {
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
     return {{element::f32, element::f32}, {element::i32, element::i32}};
+}
+
+/// TANH ///
+jit_tanh_emitter::jit_tanh_emitter(jit_generator_t* host, cpu_isa_t host_isa, const element::Type exec_prc)
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+    sigmoid_emitter = std::make_unique<jit_sigmoid_emitter>(host, host_isa, exec_prc_);
+}
+
+jit_tanh_emitter::jit_tanh_emitter(jit_generator_t* host, cpu_isa_t host_isa, const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+    sigmoid_emitter = std::make_unique<jit_sigmoid_emitter>(host, host_isa, exec_prc_);
+}
+
+size_t jit_tanh_emitter::get_inputs_num() const {
+    return 1;
+}
+
+size_t jit_tanh_emitter::aux_gprs_count() const {
+    return sigmoid_emitter->aux_gprs_count() + 1LU;
+}
+
+size_t jit_tanh_emitter::aux_fp_gprs_count() const {
+    return sigmoid_emitter->aux_fp_gprs_count() + 1LU;
+}
+
+size_t jit_tanh_emitter::aux_vecs_count() const {
+    return sigmoid_emitter->aux_vecs_count();
+}
+
+void jit_tanh_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs,
+                                 const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OV_CPU_JIT_EMITTER_THROW("Can't create jit eltwise kernel for TANH");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_tanh_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    OV_CPU_JIT_EMITTER_ASSERT(exec_prc_ == ov::element::f32, "Unsupported precision: ", exec_prc_);
+
+    auto src = VReg(in_vec_idxs[0]);
+    auto dst = VReg(out_vec_idxs[0]);
+
+    auto fp = FReg(aux_fp_gpr_idxs[sigmoid_emitter->aux_fp_gprs_count()]);
+
+    load_table_val("two", fp);
+    h->vfmul_vf(dst, src, fp);
+
+    sigmoid_emitter->emit_code(
+        {static_cast<size_t>(dst.getIdx())},
+        {static_cast<size_t>(dst.getIdx())},
+        aux_vec_idxs,
+        aux_gpr_idxs,
+        {aux_fp_gpr_idxs.begin(), aux_fp_gpr_idxs.begin() + sigmoid_emitter->aux_fp_gprs_count()});
+
+    h->vfmul_vf(dst, dst, fp);
+    load_table_val("one", fp);
+    h->vfsub_vf(dst, dst, fp);
+}
+
+void jit_tanh_emitter::register_table_entries() {
+    push_arg_entry_of("one", CONST_1_F);
+    push_arg_entry_of("two", 0x40000000);
+}
+
+std::set<std::vector<element::Type>> jit_tanh_emitter::get_supported_precisions(
+    [[maybe_unused]] const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32}};
+}
+
+void jit_tanh_emitter::emit_data() const {
+    jit_emitter::emit_data();
+    sigmoid_emitter->emit_data();
 }
 
 #undef CONST_1_F

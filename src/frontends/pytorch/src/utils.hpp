@@ -1,24 +1,23 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include "openvino/frontend/complex_type_mark.hpp"
 #include "openvino/frontend/pytorch/node_context.hpp"
+#include "openvino/frontend/sequence_mark.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/convert_like.hpp"
 
 namespace ov {
 
-namespace op {
-namespace util {
+namespace op::util {
 class FrameworkNode;
-}  // namespace util
-}  // namespace op
+}  // namespace op::util
 
-namespace frontend {
-namespace pytorch {
+namespace frontend::pytorch {
 
 const std::string pytorch_prefix = "[PyTorch Frontend] ";
 
@@ -28,7 +27,7 @@ const std::string& get_pytorch_prefix();
 /// \param COND Condition to check
 /// \param ... Additional error message info to be added to the error message via the `<<`
 ///            stream-insertion operator. Note that the expressions here will be evaluated lazily,
-///            i.e., only if the `cond` evalutes to `false`.
+///            i.e., only if the `cond` evaluates to `false`.
 /// \throws ::ov::frontend::OpConversionFailure if `cond` is false.
 #ifndef PYTORCH_OP_CONVERSION_CHECK
 #    define PYTORCH_OP_CONVERSION_CHECK(COND, ...) \
@@ -53,6 +52,22 @@ std::tuple<Output<Node>, Output<Node>> get_shape_rank(const NodeContext& context
 
 Output<Node> reshape_kernel_for_group(const NodeContext& context, const Output<Node>& kernel, int64_t groups);
 
+/// \brief Ensures the trailing two axes of `x` form an n x n matrix.
+///
+/// Static trailing dims that are not n x n are rejected at conversion (`op_label` names the op).
+/// When they are dynamic (the common TorchScript case) a runtime guard pins each trailing axis to
+/// n with its own Reshape -- the per-axis check catches e.g. [1, 9] that a single [n, n] reshape
+/// would accept as 3x3. A genuine n x n is an identity; any other size fails loudly at runtime.
+/// \param context Node context for marking nodes.
+/// \param x Batched matrix whose trailing two axes are validated/guarded.
+/// \param n Expected square matrix size.
+/// \param op_label Op name used in the error message.
+/// \return `x` unchanged when statically validated, otherwise the runtime reshape-guarded matrix.
+Output<Node> ensure_trailing_square(const NodeContext& context,
+                                    const Output<Node>& x,
+                                    int64_t n,
+                                    const std::string& op_label);
+
 std::shared_ptr<Node> get_axes_range(const NodeContext& context, int input_id);
 
 std::shared_ptr<Node> get_node_axes_range(const NodeContext& context, const Output<Node>& x);
@@ -67,6 +82,10 @@ element::Type convert_dtype(int64_t dtype_value);
 bool is_complex_dtype(int64_t pt_type);
 
 Output<Node> apply_dtype(const NodeContext& context, size_t dtype_port, const Output<Node>& input_tensor);
+
+/// \brief Applies an optional `dtype` argument, which export may pass positionally or as an attribute.
+/// \return The converted tensor, or \p input_tensor unchanged when no dtype was given.
+Output<Node> apply_optional_dtype(const NodeContext& context, size_t dtype_port, const Output<Node>& input_tensor);
 
 op::PadType convert_pad(const std::string& pt_pad);
 
@@ -83,8 +102,12 @@ OutputVector make_framework_node(const NodeContext& context, const std::string& 
 std::shared_ptr<op::util::FrameworkNode> cast_fw_node(std::shared_ptr<Node> node, const std::string& type);
 std::shared_ptr<op::util::FrameworkNode> cast_fw_node(std::shared_ptr<Node> node,
                                                       std::initializer_list<std::string> types);
+std::function<bool(const ov::Output<ov::Node>&)> fw_node_predicate(const std::initializer_list<std::string>& types);
 
-std::shared_ptr<Node> make_list_construct(const ov::OutputVector& inputs);
+/// \brief Creates a SequenceMark representing a list/tuple construct.
+/// \param inputs Collection of inputs for the sequence.
+/// \return SequenceMark node representing the sequence.
+std::shared_ptr<SequenceMark> make_list_construct(const ov::OutputVector& inputs);
 
 bool is_none_node(const Output<Node>& node);
 
@@ -94,6 +117,25 @@ Any simplified_type_interpret(Any type);
 void add_exception_to_fw_node(std::shared_ptr<Node> node, const std::string& msg);
 
 bool is_python_scalar_input(const NodeContext& context, size_t index);
+
+/// \brief Converts an operation name to its canonical TorchScript spelling.
+///
+/// FX names carry an overload suffix, e.g. `aten.add.Tensor`, while TorchScript uses `aten::add`. Translators and
+/// transformations match the TorchScript spelling, so both decoders are normalized to it. Names which are not in the
+/// `aten.name.overload` form are returned unchanged.
+std::string normalize_op_type(const std::string& op_type);
+
+/// \brief Reads an optional operator argument which export may pass either positionally or by keyword.
+///
+/// Export omits arguments equal to their default and passes keyword-only arguments as attributes, so an optional
+/// argument may arrive as input \p index, as attribute \p name, or not at all.
+template <typename T>
+T get_const_input_or_attribute(const NodeContext& context, size_t index, const std::string& name, T default_value) {
+    if (!context.input_is_none(index)) {
+        return context.const_input<T>(index);
+    }
+    return context.get_attribute<T>(name, default_value);
+}
 
 void align_eltwise_input_types(const NodeContext& context,
                                Output<Node>& lhs,
@@ -112,6 +154,12 @@ Output<Node> try_constfold(const Output<Node>& x);
 
 Output<Node> get_input_with_floating_type(const NodeContext& context, size_t idx);
 
+/// \brief Returns the input element type, falling back to the visible context and the decoder type when it is dynamic.
+element::Type get_input_element_type(const NodeContext& context, size_t idx);
+
+/// \brief Rounds toward zero, keeping infinities and NaN. Integer inputs are returned unchanged.
+Output<Node> trunc_toward_zero(const NodeContext& context, const Output<Node>& x);
+
 Output<Node> get_input_as_i32(const NodeContext& context, size_t idx);
 
 Output<Node> get_input_concat_if_list(const NodeContext& context, size_t idx);
@@ -126,9 +174,66 @@ Output<Node> masked_fill(ov::pass::NodeRegistry& rg,
                          const Output<Node>& mask,
                          const Output<Node>& value);
 
+// Build the static-kernel max pool (v14::MaxPool) for an already-resolved kernel/strides/pads/
+// dilations. Shared by the translator (constant kernel) and the deferred resolver (kernel that
+// became constant after shape propagation). Nodes go into `rg`; returns the pool result (2 outputs
+// when `return_indices`).
+OutputVector build_static_max_pool(ov::pass::NodeRegistry& rg,
+                                   Output<Node> input,
+                                   int dims,
+                                   bool return_indices,
+                                   const ov::Shape& kernel,
+                                   const ov::Strides& strides,
+                                   const ov::Shape& pads,
+                                   const ov::Strides& dilations,
+                                   ov::op::RoundingType rounding_type);
+
 Output<Node> masked_select(const NodeContext& context, const Output<Node>& data, const Output<Node>& mask);
 
+/// \brief Builds a multi-head attention subgraph with packed query/key/value projection weights.
+///
+/// Shared by `aten::_native_multi_head_attention` and `aten::_transformer_encoder_layer_fwd`.
+/// When the attention weights are not requested, the attention itself is expressed with a single
+/// `v13::ScaledDotProductAttention`, otherwise it is decomposed so that the weights can be returned.
+///
+/// \param context Node context used to mark the created nodes.
+/// \param query Query tensor of shape [batch, sequence, embed_dim].
+/// \param key Key tensor of shape [batch, sequence, embed_dim].
+/// \param value Value tensor of shape [batch, sequence, embed_dim].
+/// \param embed_dim Scalar embedding dimension.
+/// \param num_heads Scalar number of attention heads.
+/// \param qkv_weight Packed query/key/value projection weight of shape [3 * embed_dim, embed_dim].
+/// \param qkv_bias Packed query/key/value projection bias of shape [3 * embed_dim].
+/// \param proj_weight Output projection weight.
+/// \param proj_bias Output projection bias.
+/// \param attn_mask Optional attention mask. A boolean mask excludes the positions marked with
+///        `true`, any other mask is additive. Pass an empty output to skip masking.
+/// \param mask_type PyTorch mask type: 0 - source mask of shape [sequence, sequence], 1 - key
+///        padding mask of shape [batch, sequence], 2 - mask already broadcast to the attention
+///        weights shape. Ignored when `attn_mask` is empty.
+/// \param need_weights When true, the attention weights are computed and returned as the second
+///        element of the result, otherwise the second element is empty.
+/// \param average_weights When true, the returned attention weights are averaged over the heads.
+/// \return Pair of the attention output and the attention weights.
+std::pair<Output<Node>, Output<Node>> build_multi_head_attention(const NodeContext& context,
+                                                                 const Output<Node>& query,
+                                                                 const Output<Node>& key,
+                                                                 const Output<Node>& value,
+                                                                 const Output<Node>& embed_dim,
+                                                                 const Output<Node>& num_heads,
+                                                                 const Output<Node>& qkv_weight,
+                                                                 const Output<Node>& qkv_bias,
+                                                                 const Output<Node>& proj_weight,
+                                                                 const Output<Node>& proj_bias,
+                                                                 const Output<Node>& attn_mask,
+                                                                 int64_t mask_type,
+                                                                 bool need_weights,
+                                                                 bool average_weights);
+
 Output<Node> flatten(ov::pass::NodeRegistry& rg, const Output<Node>& value, size_t axis);
+
+// Decomposition of aten::meshgrid, indexing must be "ij" or "xy".
+OutputVector build_meshgrid(ov::pass::NodeRegistry& rg, OutputVector inputs, const std::string& indexing);
 
 bool index_tensor_on_list(ov::pass::NodeRegistry& rg,
                           const Output<Node>& data,
@@ -138,6 +243,31 @@ bool index_tensor_on_list(ov::pass::NodeRegistry& rg,
                           bool& use_input_as_output);
 
 Output<Node> get_complex_shape(const NodeContext& context, const Output<Node>& complex_input);
+
+/// \brief Unwraps ComplexTypeMark node if present.
+/// \param input Input node to check.
+/// \return Pair of {underlying_data, complex_node_or_nullptr}.
+/// If input is ComplexTypeMark, returns its underlying data and the ComplexTypeMark node.
+/// Otherwise returns input as-is and nullptr.
+std::pair<Output<Node>, std::shared_ptr<ComplexTypeMark>> unwrap_complex(const Output<Node>& input);
+
+/// \brief Wraps result in ComplexTypeMark if complex is not nullptr.
+/// \param context Node context for marking nodes.
+/// \param result Result to wrap.
+/// \param complex ComplexTypeMark node to get type from, or nullptr to skip wrapping.
+/// \return Wrapped result if complex is not nullptr, otherwise result as-is.
+Output<Node> wrap_complex(const NodeContext& context,
+                          const Output<Node>& result,
+                          const std::shared_ptr<ComplexTypeMark>& complex);
+
+/// \brief Wraps multiple results in ComplexTypeMark if complex is not nullptr.
+/// \param context Node context for marking nodes.
+/// \param results Results to wrap.
+/// \param complex ComplexTypeMark node to get type from, or nullptr to skip wrapping.
+/// \return Wrapped results if complex is not nullptr, otherwise results as-is.
+OutputVector wrap_complex(const NodeContext& context,
+                          const OutputVector& results,
+                          const std::shared_ptr<ComplexTypeMark>& complex);
 
 namespace op {
 template <OutputVector (*T)(const NodeContext&), size_t idx = 0>
@@ -337,6 +467,5 @@ private:
     const std::string m_schema = "NONE";
 };
 
-}  // namespace pytorch
-}  // namespace frontend
+}  // namespace frontend::pytorch
 }  // namespace ov

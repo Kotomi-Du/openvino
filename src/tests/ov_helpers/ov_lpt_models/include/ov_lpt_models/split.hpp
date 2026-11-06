@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -38,7 +38,6 @@ public:
         const ov::PartialShape& inputShape,
         const ov::element::Type inputPrecision,
         const ov::builder::subgraph::DequantizationOperations& dequantizationBefore,
-        const ov::element::Type precisionAfterOperation,
         const std::vector<ov::builder::subgraph::DequantizationOperations>& dequantizationAfter,
         const int64_t splitedAxis,
         const size_t numSplits);

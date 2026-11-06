@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,7 +23,7 @@ class MemoryAccessor : public ov::ITensorAccessor {
 public:
     MemoryAccessor(const container_type& ptrs, const std::vector<int64_t>& ranks) : m_ptrs{ptrs}, m_ranks(ranks) {}
 
-    ~MemoryAccessor() = default;
+    virtual ~MemoryAccessor() = default;
 
     ov::Tensor operator()(size_t port) const override {
         const auto t_iter = m_ptrs.find(port);

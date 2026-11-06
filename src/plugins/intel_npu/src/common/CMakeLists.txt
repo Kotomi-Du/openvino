@@ -1,15 +1,30 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
-set(TARGET_NAME openvino_npu_common)
+set(TARGET_NAME "openvino_npu_common")
 
-file(GLOB_RECURSE SOURCES *.cpp *.hpp *.h)
+set(SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/compiler_adapter_factory.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/option_support_cache.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/device_helpers.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/icompiled_model.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/icompiler_adapter.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/igraph.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/iprofiling_decoder.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/iparser.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/itt.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/network_metadata.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/npu.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/intel_npu/common/parser_factory.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/device_helpers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/igraph.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/network_metadata.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/npu.cpp
+)
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SOURCES})
 
 add_library(${TARGET_NAME} STATIC ${SOURCES})
-add_library(openvino::npu_common ALIAS ${TARGET_NAME})
-set_target_properties(${TARGET_NAME} PROPERTIES EXPORT_NAME npu_common)
 
 target_include_directories(${TARGET_NAME}
     PUBLIC
@@ -25,12 +40,7 @@ target_link_libraries(${TARGET_NAME}
 
 set_target_properties(${TARGET_NAME} PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ${ENABLE_LTO})
 ov_add_clang_format_target(${TARGET_NAME}_clang FOR_TARGETS ${TARGET_NAME})
-
 #
 # targets install
 #
-ov_install_static_lib(${TARGET_NAME} ${NPU_PLUGIN_COMPONENT})
-
-ov_developer_package_export_targets(TARGET openvino::npu_common
-                                    INSTALL_INCLUDE_DIRECTORIES
-                                        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ov_install_static_lib(${TARGET_NAME} ${NPU_INTERNAL_COMPONENT})

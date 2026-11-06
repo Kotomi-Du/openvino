@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -34,9 +34,8 @@ namespace {
 size_t GetOfmPerWorkitem(size_t filterOfmNum, size_t batchSize, size_t local_work_size) {
     if (((filterOfmNum * batchSize) / 16) % local_work_size) {
         return 8;
-    } else {
-        return 16;
     }
+    return 16;
 }
 }  // namespace
 
@@ -64,27 +63,35 @@ KernelsPriority ConvolutionKernel_yxfb_yxio_b8::GetKernelsPriority(const Params&
 
 bool ConvolutionKernel_yxfb_yxio_b8::Validate(const Params& p) const {
     if (!ConvolutionKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const convolution_params& params = static_cast<const convolution_params&>(p);
     const auto filterOfmNum = params.weights.OFM().v;
     const auto batchSize = params.outputs[0].Batch().v;
 
+    // Kernel uses TRANSPOSE_BLOCK_8 and subgroup block reads/writes designed for SIMD8.
+    // With wider SIMD (e.g. SIMD16), lanes beyond 7 produce OOB filter accesses via
+    // filter_idx2 = filter_idx + 8 (ofm_offset + sub_group_id + 8 exceeds FILTER_OFM_NUM).
+    if (!IsSIMDSizeSupported(params.engineInfo, 8)) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
+
     const bool bInputValidated = (filterOfmNum > 0) && (batchSize > 0) && (params.outputs[0].Feature().v == filterOfmNum);
 
     if (!bInputValidated) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const uint32_t lws0 = batchSize == 8 ? 8 : 16;
 
     if ((filterOfmNum * batchSize) % lws0 != 0 || batchSize > 16 || batchSize == 1) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
-    if (params.outputs[0].PitchesDifferFromLogicalDims())
-        return false;
+    if (params.outputs[0].PitchesDifferFromLogicalDims()) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,9 +18,7 @@
 
 using namespace ov::frontend::onnx;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 
 namespace {
 template <typename Container = std::map<int64_t, Operator>>
@@ -44,6 +42,9 @@ const char* OPENVINO_ONNX_DOMAIN = "org.openvinotoolkit";
 const char* MICROSOFT_DOMAIN = "com.microsoft";
 const char* PYTORCH_ATEN_DOMAIN = "org.pytorch.aten";
 const char* MMDEPLOY_DOMAIN = "mmdeploy";
+const char* AIONNX_ML_DOMAIN = "ai.onnx.ml";
+const char* AIONNX_CONTRIB_DOMAIN = "ai.onnx.contrib";
+const char* AIONNX_DOMAIN = "";
 
 // Central storage of supported translators for operations
 typedef std::unordered_map<std::string, DomainOpset> SupportedOps;
@@ -174,6 +175,34 @@ OperatorSet OperatorsBridge::get_operator_set(const std::string& domain, int64_t
     return result;
 }
 
+const Operator* OperatorsBridge::get_operator(const std::string& domain,
+                                              const std::string& name,
+                                              const int64_t version) const {
+    const auto dm = m_map.find(domain);
+    if (dm == std::end(m_map)) {
+        OPENVINO_DEBUG("Domain not recognized by OpenVINO");
+        return nullptr;
+    }
+    if (domain == "" && version > LATEST_SUPPORTED_ONNX_OPSET_VERSION) {
+        OPENVINO_WARN("Currently ONNX operator set version: ",
+                      version,
+                      " is unsupported. Falling back to: ",
+                      LATEST_SUPPORTED_ONNX_OPSET_VERSION);
+    }
+    for (const auto& op : dm->second) {
+        if (op.first != name)
+            continue;
+
+        const auto& it = find(version, op.second);
+        if (it == std::end(op.second)) {
+            OPENVINO_THROW("Unsupported operator version: " + (domain.empty() ? "" : domain + ".") + op.first + ":" +
+                           std::to_string(version));
+        }
+        return &it->second;
+    }
+    return nullptr;
+}
+
 bool OperatorsBridge::is_operator_registered(const std::string& name,
                                              int64_t version,
                                              const std::string& domain) const {
@@ -200,6 +229,24 @@ void OperatorsBridge::overwrite_operator(const std::string& name, const std::str
     register_operator(name, 1, domain, std::move(fn));
 }
 
+void OperatorsBridge::register_extensions(const std::vector<ov::frontend::ConversionExtensionBase::Ptr>& conversions) {
+    for (const auto& extension : conversions) {
+        if (const auto common_conv_ext = ov::as_type_ptr<ov::frontend::ConversionExtension>(extension)) {
+            overwrite_operator(common_conv_ext->get_op_type(),
+                               "",
+                               [common_conv_ext](const ov::frontend::onnx::Node& node) -> ov::OutputVector {
+                                   return common_conv_ext->get_converter()(ov::frontend::onnx::NodeContext(node));
+                               });
+        } else if (const auto onnx_conv_ext = ov::as_type_ptr<ov::frontend::onnx::ConversionExtension>(extension)) {
+            overwrite_operator(onnx_conv_ext->get_op_type(),
+                               onnx_conv_ext->get_domain(),
+                               [onnx_conv_ext](const ov::frontend::onnx::Node& node) -> ov::OutputVector {
+                                   return onnx_conv_ext->get_converter()(ov::frontend::onnx::NodeContext(node));
+                               });
+        }
+    }
+}
+
 #define REGISTER_OPERATOR(name_, ver_, fn_) \
     m_map[""][name_].emplace(ver_, std::bind(op::set_##ver_::fn_, std::placeholders::_1));
 
@@ -218,8 +265,21 @@ OperatorsBridge::OperatorsBridge() {
     // custom ops
 }
 
+const std::vector<std::pair<std::string, std::string>>& get_supported_ops_via_tokenizers() {
+    // op_type -> domain, empty domain (AIONNX_DOMAIN) denotes the default ONNX opset ("ai.onnx")
+    static const std::vector<std::pair<std::string, std::string>> ops{
+        {"StringNormalizer", AIONNX_DOMAIN},
+        {"TfIdfVectorizer", AIONNX_DOMAIN},
+        {"LabelEncoder", AIONNX_ML_DOMAIN},
+        {"Tokenizer", MICROSOFT_DOMAIN},
+        {"SentencepieceTokenizer", AIONNX_CONTRIB_DOMAIN},
+        {"SentencepieceDecoder", AIONNX_CONTRIB_DOMAIN},
+        {"VectorToString", AIONNX_CONTRIB_DOMAIN},
+        {"StringJoin", AIONNX_CONTRIB_DOMAIN},
+        {"StringSplit", AIONNX_CONTRIB_DOMAIN},
+    };
+    return ops;
+}
 #undef REGISTER_OPERATOR
 #undef REGISTER_OPERATOR_WITH_DOMAIN
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

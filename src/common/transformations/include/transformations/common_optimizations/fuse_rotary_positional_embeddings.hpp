@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,11 +15,16 @@ class TRANSFORMATIONS_API RoPEFusionGPTNEOX;
 class TRANSFORMATIONS_API RoPEFusionFlux;
 class TRANSFORMATIONS_API RoPEFusionGPTJ;
 class TRANSFORMATIONS_API RoPEFusionChatGLM;
+class TRANSFORMATIONS_API RoPEFusionChatGLMHF;
 class TRANSFORMATIONS_API RoPEFusionQwen;
 class TRANSFORMATIONS_API RoPEFusionIOSlicing;
 class TRANSFORMATIONS_API RoPEFusionPreprocess;
 class TRANSFORMATIONS_API RoPEFusionCosSinPreprocess;
 class TRANSFORMATIONS_API RoPEShareCosSin;
+class TRANSFORMATIONS_API RoPEFusionGPTOSS;
+class TRANSFORMATIONS_API RoPEFusionLtxVideo;
+class TRANSFORMATIONS_API RoPEFusionCohere;
+class TRANSFORMATIONS_API RoPEFusionSliceAssign;
 
 }  // namespace pass
 }  // namespace ov
@@ -27,13 +32,13 @@ class TRANSFORMATIONS_API RoPEShareCosSin;
 class ov::pass::RoPEFusionGPTNEOX : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("RoPEFusionGPTNEOX");
-    RoPEFusionGPTNEOX();
+    RoPEFusionGPTNEOX(int rank);
 };
 
 class ov::pass::RoPEFusionFlux : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("RoPEFusionFlux");
-    RoPEFusionFlux();
+    RoPEFusionFlux(bool num_heads_transposed = true);
 };
 
 class ov::pass::RoPEFusionGPTJ : public ov::pass::MatcherPass {
@@ -45,13 +50,19 @@ public:
 class ov::pass::RoPEFusionChatGLM : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("RoPEFusionChatGLM");
-    RoPEFusionChatGLM(int split_output_id, const bool support_2d_rope = false);
+    RoPEFusionChatGLM(const bool support_2d_rope = false);
+};
+
+class ov::pass::RoPEFusionChatGLMHF : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("RoPEFusionChatGLMHF");
+    RoPEFusionChatGLMHF();
 };
 
 class ov::pass::RoPEFusionQwen : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("RoPEFusionQwen");
-    RoPEFusionQwen(int split_output_id);
+    RoPEFusionQwen();
 };
 
 class ov::pass::RoPEFusionIOSlicing : public ov::pass::MatcherPass {
@@ -82,6 +93,30 @@ private:
     std::shared_ptr<ov::Node> m_shared_cos0;
     std::shared_ptr<ov::Node> m_shared_sin0;
     std::vector<std::shared_ptr<ov::Node>> m_shared_inputs{2, nullptr};
+};
+
+class ov::pass::RoPEFusionGPTOSS : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("RoPEFusionGPTOSS");
+    RoPEFusionGPTOSS();
+};
+
+class ov::pass::RoPEFusionLtxVideo : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("RoPEFusionLtxVideo");
+    RoPEFusionLtxVideo();
+};
+
+class ov::pass::RoPEFusionCohere : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("RoPEFusionCohere");
+    RoPEFusionCohere();
+};
+
+class ov::pass::RoPEFusionSliceAssign : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("RoPEFusionSliceAssign");
+    RoPEFusionSliceAssign();
 };
 
 /**

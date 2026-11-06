@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -675,7 +675,7 @@ const auto createU1ConstantFunc = [](const Shape& s, const uint8_t* data) {
 
     return std::make_shared<ov::Model>(OutputVector{c}, ParameterVector{});
 };
-}
+}  // namespace
 
 TEST(TransformationTests, ConstantComparison_ElementTypeU1_Positive_1stbit) {
     const Shape shape{1};

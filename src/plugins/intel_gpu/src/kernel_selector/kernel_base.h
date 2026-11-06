@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -36,7 +36,7 @@ public:
     using IndexType = FusedOpsConfiguration::IndexType;
 
     explicit KernelBase(const std::string name) : kernelName(name) {}
-    virtual ~KernelBase() {}
+    virtual ~KernelBase() = default;
 
     virtual KernelsData GetKernelsData(const Params& params) const = 0;
     virtual KernelsData GetKernelsDataForAutoTune(const Params& params) const {
@@ -63,7 +63,7 @@ protected:
     const std::string kernelName;
 
     static void CheckDispatchData(const std::string& kernelName, const kernel_selector::CommonDispatchData& dispatchData,
-                                  const size_t maxWorkGroupSize);
+                                  const EngineInfo& engineInfo);
     virtual Datatype GetUnitType(const base_params& params) const;
 
     bool IsFusedPrimitiveSupported(const fused_operation_desc& fused_op) const;

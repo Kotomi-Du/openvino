@@ -1,10 +1,12 @@
-// Copyright (C) 2024-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
 #include "implementation_map.hpp"
+#include "intel_gpu/primitives/paged_attention.hpp"
+#include "intel_gpu/primitives/scaled_dot_product_attention.hpp"
 
 #ifdef ENABLE_ONEDNN_FOR_GPU
     #define OV_GPU_WITH_ONEDNN 1
@@ -19,8 +21,15 @@
 #define OV_GPU_WITH_OCL 1
 #define OV_GPU_WITH_COMMON 1
 #define OV_GPU_WITH_CPU 1
-#define OV_GPU_WITH_CM 1
+#ifdef ENABLE_CM_FOR_GPU
+    #define OV_GPU_WITH_CM 1
+#else
+    #define OV_GPU_WITH_CM 0
+#endif
 
+#ifdef EXPAND
+#undef EXPAND
+#endif
 #define COUNT_N(_1, _2, _3, _4, _5, N, ...) N
 #define COUNT(...) EXPAND(COUNT_N(__VA_ARGS__, 5, 4, 3, 2, 1))
 #define CAT(a, b) a ## b
@@ -58,7 +67,7 @@
 #    define OV_GPU_CREATE_INSTANCE_ONEDNN(...)
 #endif
 
-#if OV_GPU_WITH_SYCL
+#ifdef OV_GPU_WITH_SYCL_RT
 #    define OV_GPU_CREATE_INSTANCE_SYCL(...) EXPAND(CREATE_INSTANCE(__VA_ARGS__))
 #else
 #    define OV_GPU_CREATE_INSTANCE_SYCL(...)
@@ -79,8 +88,10 @@
 #endif
 
 #if OV_GPU_WITH_COMMON
-#    define OV_GPU_GET_INSTANCE_COMMON(prim, ...) EXPAND(GET_INSTANCE(prim, cldnn::impl_types::common, __VA_ARGS__))
+#    define OV_GPU_CREATE_INSTANCE_COMMON(...) EXPAND(CREATE_INSTANCE(__VA_ARGS__))
+#    define OV_GPU_GET_INSTANCE_COMMON(prim, ...) EXPAND(SELECT(COUNT(__VA_ARGS__), prim, impl_types::ocl, __VA_ARGS__))
 #else
+#    define OV_GPU_CREATE_INSTANCE_COMMON(...)
 #    define OV_GPU_GET_INSTANCE_COMMON(...)
 #endif
 
@@ -136,13 +147,22 @@ REGISTER_IMPLS(fake_convert);
 REGISTER_IMPLS(fully_connected);
 REGISTER_IMPLS(gather);
 REGISTER_IMPLS(gather_nd);
+REGISTER_IMPLS(gated_delta_net);
+REGISTER_IMPLS(selective_ssm);
 REGISTER_IMPLS(gemm);
 REGISTER_IMPLS(group_normalization);
+REGISTER_IMPLS(loop);
 REGISTER_IMPLS(lora);
 REGISTER_IMPLS(lstm_cell);
 REGISTER_IMPLS(lstm_seq);
 REGISTER_IMPLS(gru_seq);
+REGISTER_IMPLS(mvn);
 REGISTER_IMPLS(non_max_suppression);
+REGISTER_IMPLS(paged_attention);
+REGISTER_IMPLS(paged_gated_delta_net);
+REGISTER_IMPLS(paged_selective_ssm);
+REGISTER_IMPLS(pa_kv_reorder);
+REGISTER_IMPLS(paged_causal_conv1d);
 REGISTER_IMPLS(pooling);
 REGISTER_IMPLS(reduce);
 REGISTER_IMPLS(reorder);
@@ -150,18 +170,35 @@ REGISTER_IMPLS(reshape);
 REGISTER_IMPLS(range);
 REGISTER_IMPLS(rope);
 REGISTER_IMPLS(select);
+REGISTER_IMPLS(scaled_dot_product_attention);
 REGISTER_IMPLS(scatter_update);
 REGISTER_IMPLS(scatter_elements_update);
+REGISTER_IMPLS(scatter_nd_update);
+REGISTER_IMPLS(segment_max);
+REGISTER_IMPLS(slice_scatter);
 REGISTER_IMPLS(softmax);
 REGISTER_IMPLS(shape_of);
 REGISTER_IMPLS(strided_slice);
 REGISTER_IMPLS(tile);
 REGISTER_IMPLS(col2im);
+REGISTER_IMPLS(msda);
+REGISTER_IMPLS(vl_sdpa);
+REGISTER_IMPLS(moe_3gemm_fused_compressed);
+REGISTER_IMPLS(moe_router_fused);
+REGISTER_IMPLS(moe_mask_gen);
+REGISTER_IMPLS(moe_mask_gen_reshape);
+REGISTER_IMPLS(moe_gemm);
+REGISTER_IMPLS(moe_scatter_reduction);
+REGISTER_IMPLS(moe_gather);
+REGISTER_IMPLS(gather_matmul);
+#ifdef ENABLE_MLIR_FOR_GPU
+REGISTER_IMPLS(mlir_primitive);
+#endif
+REGISTER_IMPLS(grouped_matmul);
 
 REGISTER_DEFAULT_IMPLS(assign, CPU_S, CPU_D);
 REGISTER_DEFAULT_IMPLS(read_value, CPU_S, CPU_D);
 REGISTER_DEFAULT_IMPLS(condition, COMMON_S, COMMON_D);
-REGISTER_DEFAULT_IMPLS(loop, COMMON_S, COMMON_D);
 REGISTER_DEFAULT_IMPLS(input_layout, COMMON_S, COMMON_D);
 REGISTER_DEFAULT_IMPLS(non_max_suppression_gather, CPU_S);
 REGISTER_DEFAULT_IMPLS(proposal, CPU_S, CPU_D);
@@ -183,19 +220,18 @@ REGISTER_DEFAULT_IMPLS(gather_elements, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(generate_proposals, OCL_S);
 REGISTER_DEFAULT_IMPLS(grid_sample, OCL_S);
 REGISTER_DEFAULT_IMPLS(kv_cache, OCL_S, OCL_D);
+REGISTER_DEFAULT_IMPLS(stateless_kv, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(lrn, OCL_S);
 REGISTER_DEFAULT_IMPLS(multiclass_nms, OCL_S);
 REGISTER_DEFAULT_IMPLS(multinomial, OCL_S);
 REGISTER_DEFAULT_IMPLS(mutable_data, OCL_S);
-REGISTER_DEFAULT_IMPLS(mvn, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(matrix_nms, OCL_S);
 REGISTER_DEFAULT_IMPLS(normalize, OCL_S);
 REGISTER_DEFAULT_IMPLS(one_hot, OCL_S);
-REGISTER_DEFAULT_IMPLS(paged_attention, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(permute, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(prior_box, OCL_S);
 REGISTER_DEFAULT_IMPLS(quantize, OCL_S, OCL_D);
-REGISTER_DEFAULT_IMPLS(random_uniform, OCL_S);
+REGISTER_DEFAULT_IMPLS(random_uniform, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(region_yolo, OCL_S);
 REGISTER_DEFAULT_IMPLS(reorg_yolo, OCL_S);
 REGISTER_DEFAULT_IMPLS(reverse, OCL_S);
@@ -204,7 +240,6 @@ REGISTER_DEFAULT_IMPLS(rms, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(roi_align, OCL_S);
 REGISTER_DEFAULT_IMPLS(roi_pooling, OCL_S);
 REGISTER_DEFAULT_IMPLS(roll, OCL_S);
-REGISTER_DEFAULT_IMPLS(scatter_nd_update, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(shuffle_channels, OCL_S);
 REGISTER_DEFAULT_IMPLS(slice, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(space_to_batch, OCL_S);
@@ -223,7 +258,7 @@ REGISTER_DEFAULT_IMPLS(gather_nonzero, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(eye, OCL_S);
 REGISTER_DEFAULT_IMPLS(unique_count, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(unique_gather, OCL_S, OCL_D);
-REGISTER_DEFAULT_IMPLS(scaled_dot_product_attention, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(search_sorted, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(STFT, OCL_S, OCL_D);
 REGISTER_DEFAULT_IMPLS(ISTFT, OCL_S, OCL_D);
+REGISTER_DEFAULT_IMPLS(sparse_fill_empty_rows, OCL_S, OCL_D);

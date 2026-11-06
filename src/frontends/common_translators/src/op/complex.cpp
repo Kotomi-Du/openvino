@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,9 +18,7 @@
 using namespace std;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace common_translators {
+namespace ov::frontend::common_translators {
 
 OutputVector translate_complex(const NodeContext& context) {
     num_inputs_check(context, 2, 2);
@@ -54,6 +52,4 @@ OutputVector translate_imag(const NodeContext& context) {
     return {complex_type_mark->get_imag()};
 };
 
-}  // namespace common_translators
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::common_translators

@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -9,6 +9,7 @@ endif()
 set(TARGET_NAME unit_test_utils)
 
 add_subdirectory(mocks/mock_engine)
+add_subdirectory(mocks/mock_dispatch_candidate)
 
 ov_add_target(
         NAME ${TARGET_NAME}
@@ -26,7 +27,6 @@ ov_add_target(
             PUBLIC
                 "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>"
 )
-
 # install & export
 
 ov_developer_package_export_targets(TARGET ${TARGET_NAME}

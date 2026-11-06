@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,48 +6,34 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
+
+#include "openvino/core/except.hpp"
+#include "openvino/util/memory.hpp"
 
 namespace ov {
-AlignedBuffer::AlignedBuffer() : m_allocated_buffer(nullptr), m_aligned_buffer(nullptr), m_byte_size(0) {}
+IBufferDescriptor::~IBufferDescriptor() = default;
 
-AlignedBuffer::AlignedBuffer(size_t byte_size, size_t alignment) : m_byte_size(byte_size) {
-    m_byte_size = std::max<size_t>(1, byte_size);
-    size_t allocation_size = m_byte_size + alignment;
-    m_allocated_buffer = new char[allocation_size];
-    m_aligned_buffer = m_allocated_buffer;
-    size_t mod = (alignment != 0) ? reinterpret_cast<size_t>(m_aligned_buffer) % alignment : 0;
+AlignedBuffer::AlignedBuffer() : m_aligned_buffer(nullptr), m_byte_size(0) {}
 
-    if (mod != 0) {
-        m_aligned_buffer += (alignment - mod);
-    }
+AlignedBuffer::AlignedBuffer(size_t byte_size, size_t alignment) : m_byte_size(std::max<size_t>(1, byte_size)) {
+    m_aligned_buffer = static_cast<char*>(util::aligned_alloc(m_byte_size, alignment));
+    OPENVINO_ASSERT(m_aligned_buffer, "Failed to allocate ", m_byte_size, " bytes (alignment: ", alignment, ")");
 }
 
 AlignedBuffer::AlignedBuffer(AlignedBuffer&& other)
-    : m_allocated_buffer(other.m_allocated_buffer),
-      m_aligned_buffer(other.m_aligned_buffer),
-      m_byte_size(other.m_byte_size) {
-    other.m_allocated_buffer = nullptr;
-    other.m_aligned_buffer = nullptr;
-    other.m_byte_size = 0;
-}
+    : m_aligned_buffer(std::exchange(other.m_aligned_buffer, nullptr)),
+      m_byte_size(std::exchange(other.m_byte_size, 0)) {}
 
 AlignedBuffer::~AlignedBuffer() {
-    if (m_allocated_buffer != nullptr) {
-        delete[] m_allocated_buffer;
-    }
+    util::aligned_free(m_aligned_buffer);  // safe with nullptr
 }
 
 AlignedBuffer& AlignedBuffer::operator=(AlignedBuffer&& other) {
     if (this != &other) {
-        if (m_allocated_buffer != nullptr) {
-            delete[] m_allocated_buffer;
-        }
-        m_allocated_buffer = other.m_allocated_buffer;
-        m_aligned_buffer = other.m_aligned_buffer;
-        m_byte_size = other.m_byte_size;
-        other.m_allocated_buffer = nullptr;
-        other.m_aligned_buffer = nullptr;
-        other.m_byte_size = 0;
+        util::aligned_free(m_aligned_buffer);
+        m_aligned_buffer = std::exchange(other.m_aligned_buffer, nullptr);
+        m_byte_size = std::exchange(other.m_byte_size, 0);
     }
     return *this;
 }
@@ -56,4 +42,36 @@ AttributeAdapter<std::shared_ptr<ov::AlignedBuffer>>::AttributeAdapter(std::shar
     : DirectValueAccessor<std::shared_ptr<ov::AlignedBuffer>>(value) {}
 
 AttributeAdapter<std::shared_ptr<AlignedBuffer>>::~AttributeAdapter() = default;
+
+std::shared_ptr<IBufferDescriptor> AlignedBuffer::get_descriptor() const {
+    return nullptr;
+}
+
+void AlignedBuffer::hint_evict() noexcept {}
+
+void AlignedBuffer::hint_evict(size_t offset, size_t size) noexcept {}
+
+void AlignedBuffer::invoke_evict(AlignedBuffer& buffer, size_t offset, size_t size) noexcept {
+    buffer.hint_evict(offset, size);
+}
+
+void AlignedBuffer::hint_prefetch() const {}
+
+void AlignedBuffer::invoke_hint_prefetch(const AlignedBuffer& buffer) {
+    buffer.hint_prefetch();
+}
+
+util::PrefetchToken AlignedBuffer::hint_prefetch_async() const noexcept {
+    return {};
+}
+
+util::PrefetchToken AlignedBuffer::hint_prefetch_async(size_t, size_t) const noexcept {
+    return {};
+}
+
+util::PrefetchToken AlignedBuffer::invoke_hint_prefetch_async(const AlignedBuffer& buffer,
+                                                              size_t offset,
+                                                              size_t size) noexcept {
+    return buffer.hint_prefetch_async(offset, size);
+}
 }  // namespace ov

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,19 +15,23 @@ SliceKernelRefNeededInputs SliceKernelRefNeededInputs::Create(const slice_node& 
     SliceKernelRefNeededInputs inputs;
 
     const auto& node_inputs = node.get_dependencies();
+    const auto& slice_primitive = *node.get_primitive();
 
     const bool axes_in_runtime =
-        ((node_inputs.size() == InputIndices::kInputsNum) && !node_inputs[InputIndices::kAxes].first->is_constant());
-    const bool start_in_runtime = !node_inputs[InputIndices::kStart].first->is_constant();
-    const bool step_in_runtime = !node_inputs[InputIndices::kStep].first->is_constant();
+        ((node_inputs.size() == InputIndices::kInputsNum) && ((slice_primitive.non_constant_input_mask & slice::SLICE_NON_CONST_INPUT::AXES) != 0));
+    const bool start_in_runtime = (slice_primitive.non_constant_input_mask & slice::SLICE_NON_CONST_INPUT::START) != 0;
+    const bool step_in_runtime = (slice_primitive.non_constant_input_mask & slice::SLICE_NON_CONST_INPUT::STEP) != 0;
 
     inputs.neededIndexes.push_back(InputIndices::kData);
-    if (start_in_runtime)
+    if (start_in_runtime) {
         inputs.neededIndexes.push_back(InputIndices::kStart);
-    if (step_in_runtime)
+    }
+    if (step_in_runtime) {
         inputs.neededIndexes.push_back(InputIndices::kStep);
-    if (axes_in_runtime)
+    }
+    if (axes_in_runtime) {
         inputs.neededIndexes.push_back(InputIndices::kAxes);
+    }
 
     // NOTE: stop is never needed as it is passed implicitely via output shape.
 
@@ -101,7 +105,7 @@ void slice_inst::update_shape_info_tensor(const kernel_impl_params& params) {
     }
 
     mem_lock<int32_t> lock(_shape_info_memory, _network.get_stream());
-    auto shape_info_ptr = lock.data();
+    auto* shape_info_ptr = lock.data();
     size_t offset = 0;
     const SliceKernelRefNeededInputs inputs = SliceKernelRefNeededInputs::Create(*_node);
 

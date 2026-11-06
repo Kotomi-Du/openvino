@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "register.hpp"
@@ -35,7 +35,7 @@ void register_implementations() {
     REGISTER_OCL(generate_proposals);
     REGISTER_OCL(grid_sample);
     REGISTER_OCL(kv_cache);
-    REGISTER_OCL(paged_attention);
+    REGISTER_OCL(stateless_kv);
     REGISTER_OCL(lrn);
     REGISTER_OCL(multiclass_nms);
     REGISTER_OCL(multinomial);
@@ -60,7 +60,6 @@ void register_implementations() {
     REGISTER_OCL(roi_align);
     REGISTER_OCL(roi_pooling);
     REGISTER_OCL(roll);
-    REGISTER_OCL(scatter_nd_update);
     REGISTER_OCL(select);
     REGISTER_OCL(shuffle_channels);
     REGISTER_OCL(space_to_batch);
@@ -82,10 +81,10 @@ void register_implementations() {
     REGISTER_OCL(eye);
     REGISTER_OCL(unique_count);
     REGISTER_OCL(unique_gather);
-    REGISTER_OCL(scaled_dot_product_attention);
     REGISTER_OCL(search_sorted);
     REGISTER_OCL(STFT);
     REGISTER_OCL(ISTFT);
+    REGISTER_OCL(sparse_fill_empty_rows);
 }
 
 }  // namespace ocl

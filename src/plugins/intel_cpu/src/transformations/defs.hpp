@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -46,16 +46,28 @@ namespace ov::intel_cpu {
 
 #endif  // OPENVINO_ARCH_X86
 
+#if defined(OPENVINO_ARCH_RISCV64)
+
+#    define CPU_SET_CALLBACK_RISCV64(MANAGER, CALLBACK, ...) CPU_SET_CALLBACK_COMMON(MANAGER, CALLBACK, __VA_ARGS__)
+
+#else
+
+#    define CPU_SET_CALLBACK_RISCV64(MANAGER, CALLBACK, ...)
+
+#endif  // OPENVINO_ARCH_RISCV64
+
 #if defined(OPENVINO_ARCH_ARM) || defined(OPENVINO_ARCH_ARM64)
 
 #    if defined(OPENVINO_ARCH_ARM)
 #        define CPU_REGISTER_PASS_ARM64(MANAGER, PASS, ...)
 #        define CPU_REGISTER_PASS_ARM32(MANAGER, PASS, ...) CPU_REGISTER_PASS_COMMON(MANAGER, PASS, __VA_ARGS__)
+#        define CPU_DISABLE_PASS_ARM64(MANAGER, PASS)
 #    endif
 
 #    if defined(OPENVINO_ARCH_ARM64)
 #        define CPU_REGISTER_PASS_ARM64(MANAGER, PASS, ...) CPU_REGISTER_PASS_COMMON(MANAGER, PASS, __VA_ARGS__)
 #        define CPU_REGISTER_PASS_ARM32(MANAGER, PASS, ...)
+#        define CPU_DISABLE_PASS_ARM64(MANAGER, PASS) CPU_DISABLE_PASS_COMMON(MANAGER, PASS)
 #    endif
 
 #    define CPU_REGISTER_PASS_ARM(MANAGER, PASS, ...)    CPU_REGISTER_PASS_COMMON(MANAGER, PASS, __VA_ARGS__)
@@ -68,6 +80,7 @@ namespace ov::intel_cpu {
 #    define CPU_REGISTER_PASS_ARM64(MANAGER, PASS, ...)
 #    define CPU_REGISTER_PASS_ARM32(MANAGER, PASS, ...)
 #    define CPU_REGISTER_PASS_ARM(MANAGER, PASS, ...)
+#    define CPU_DISABLE_PASS_ARM64(MANAGER, PASS)
 #    define CPU_DISABLE_PASS_ARM(MANAGER, PASS)
 #    define CPU_ENABLE_PASS_ARM(MANAGER, PASS)
 #    define CPU_SET_CALLBACK_ARM(MANAGER, CALLBACK, ...)

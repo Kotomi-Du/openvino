@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,10 +11,9 @@
 #include "openvino/op/constant.hpp"
 #include "openvino/opsets/opset12.hpp"
 #include "openvino/pass/graph_rewrite.hpp"
-#include "transformations/rt_info/disable_fp16_compression.hpp"
+#include "transformations/rt_info/disable_precision_conversion.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 
 OutputVector make_random_normal(pass::NodeRegistry& registry,
                                 const Output<Node>& sizes,
@@ -32,7 +31,7 @@ OutputVector make_random_normal(pass::NodeRegistry& registry,
     // uint32 zero value).
     // Float -0 value will be interpreted as a valid uint32 value.
     const void* seed_ptr = &seed;  // To prevent strict-aliasing error
-    const uint64_t op_seed = static_cast<const uint64_t>(*static_cast<const uint32_t*>(seed_ptr));
+    const uint64_t op_seed = static_cast<uint64_t>(*static_cast<const uint32_t*>(seed_ptr));
 
     // We need to use two op_seeds to make sure we get different results for two RandomUniform series
     // But we also have to keep original logic and pass "0" (auto-generated seed) to RandomUniform
@@ -64,8 +63,8 @@ OutputVector make_random_normal(pass::NodeRegistry& registry,
     auto sum = registry.make<op::v1::Add>(product, mean);
 
     // if we don't disable down-casting then log(float32_min) gives -inf
-    disable_fp16_compression(uniform_1);
-    disable_fp16_compression(log);
+    ov::disable_conversion(uniform_1, element::f16);
+    ov::disable_conversion(log, element::f16);
 
     return {sum};
 }
@@ -80,5 +79,4 @@ std::pair<OutputVector, pass::NodeRegistry> make_random_normal(const Output<Node
     return std::make_pair(res, registry);
 }
 
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

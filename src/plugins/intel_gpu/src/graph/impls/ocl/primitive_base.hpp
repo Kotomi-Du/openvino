@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -33,6 +33,17 @@
 namespace cldnn {
 namespace ocl {
 
+inline void validate_f4e2m1_packed_output(const layout& output_layout, const char* primitive_name) {
+    if (output_layout.data_type != ov::element::f4e2m1 || output_layout.is_dynamic()) {
+        return;
+    }
+
+    OPENVINO_ASSERT(output_layout.get_linear_size() % 8 == 0,
+                    "[GPU] ", primitive_name, ": f4e2m1 output size must be a multiple of 8 elements "
+                    "(32-bit atomic write granularity), but got: ",
+                    output_layout.get_linear_size());
+}
+
 /*
 Base class for all GPU implementation of specified primitive type.
 For example, all gpu convolution implementations should derive from typed_primitive_impl_ocl<convolution>.
@@ -42,8 +53,7 @@ struct typed_primitive_impl_ocl : public typed_primitive_impl<PType> {
     kernel_selector::kernel_data _kernel_data;
     std::vector<kernel::ptr> _kernels;
 
-    // a pair of batch program hash and kernel entry hash of each ocl impl.
-    std::pair<std::string, std::string> kernel_dump_info;
+    mutable KernelDumpInfo kernel_dump_info;
 
     typed_primitive_impl_ocl() : _kernel_data({}), _kernels({}) {}
 
@@ -91,9 +101,9 @@ struct typed_primitive_impl_ocl : public typed_primitive_impl<PType> {
     static std::unique_ptr<primitive_impl> create(const typed_program_node<PType>& arg, const kernel_impl_params& impl_param) {
         // concat buffer fusing for dynamic shape is adaptively applied at runtime. So we need to build dynamic impl at build time.
         if (impl_param.can_be_optimized() &&
-            !((impl_param.is_type<concatenation>() ||
-               impl_param.is_type<crop>() ||
-               impl_param.runtime_skippable()) && impl_param.is_dynamic())) {
+            ((!impl_param.is_type<concatenation>() &&
+               !impl_param.is_type<crop>() &&
+               !impl_param.runtime_skippable()) || !impl_param.is_dynamic())) {
             return std::make_unique<ImplType>(kernel_selector::kernel_data{});
         }
         auto kernel_params = ImplType::get_kernel_params(ImplType::static_canonicalize_shapes(impl_param));
@@ -139,16 +149,11 @@ protected:
         if (is_cpu()) {
             return;
         }
-
         _kernels.clear();
         if (!_kernel_data.kernels.empty()) {
             auto compiled_kernels = kernels_cache.get_kernels(params);
             _kernels.insert(_kernels.begin(), compiled_kernels.begin(), compiled_kernels.end());
-            // batch program hash and kernel entry point to find corresponding cl source code
-            kernel_dump_info = std::make_pair(std::to_string(kernels_cache.get_kernel_batch_hash(params)),
-                                          _kernel_data.kernels[0].code.kernelString->entry_point);
-            for (size_t i = 1; i < _kernel_data.kernels.size(); ++i)
-                kernel_dump_info.second += " " + _kernel_data.kernels[i].code.kernelString->entry_point;
+            kernel_dump_info.set_batch_hash(std::to_string(kernels_cache.get_kernel_batch_hash(params)));
         }
         this->can_share_kernels = kernels_cache.get_kernels_reuse();
     }
@@ -185,8 +190,9 @@ protected:
     }
 
     std::vector<BufferDescriptor> get_internal_buffer_descs(const kernel_impl_params&) const override {
-        if (_kernel_data.internalBuffers.empty())
+        if (_kernel_data.internalBuffers.empty()) {
             return {};
+        }
 
         std::vector<BufferDescriptor> internal_buffers;
         auto dtype = from_data_type(_kernel_data.internalBufferDataType);
@@ -215,6 +221,7 @@ protected:
 
             auto args = get_arguments(instance);
             args.scalars = &_kernel_data.kernels[kd_idx].params.scalars;
+            args.local_memory_args = &_kernel_data.kernels[kd_idx].params.local_memory_args;
 
             for (const auto& m : instance.get_intermediates_memories()) {
                 args.intermediates.push_back(m);
@@ -232,8 +239,9 @@ protected:
         stream& stream = instance.get_network().get_stream();
 
         for (size_t k = 0; k < _kernels.size(); ++k) {
-            if (_kernel_data.kernels[k].skip_execution)
+            if (_kernel_data.kernels[k].skip_execution) {
                 continue;
+            }
 
             stream.set_arguments(*_kernels[k], _kernel_data.kernels[k].params, args);
         }
@@ -242,8 +250,9 @@ protected:
     event::ptr execute_impl(const std::vector<event::ptr>& events,
                             typed_primitive_inst<PType>& instance) override {
         stream& stream = instance.get_network().get_stream();
+        kernel_dump_info.clear_entries();
         if (instance.can_be_optimized()) {
-            return stream.aggregate_events(events, false, instance.is_output());
+            return stream.aggregate_events(events, events.size() > 1, instance.is_output());
         }
         std::vector<event::ptr> tmp_events(events);
         std::vector<event::ptr> all_events;
@@ -252,8 +261,9 @@ protected:
                                                                         "[GPU] KernelData count: ", _kernel_data.kernels.size(), "\n",
                                                                         "[GPU] Likely some issue with empty tensor handling happened");
         for (size_t kd_idx = 0; kd_idx < _kernel_data.kernels.size(); ++kd_idx) {
-            if (_kernel_data.kernels[kd_idx].skip_execution)
+            if (_kernel_data.kernels[kd_idx].skip_execution) {
                 continue;
+            }
             // If any user of the prim's users is CPU implementation or network's output, set prim as a output event (event won't be nullptr)
             bool needs_completion_event = instance.needs_completion_event();
 
@@ -277,10 +287,13 @@ protected:
                 tmp_events = {ev};
             }
             all_events.push_back(ev);
+
+            kernel_dump_info.add_entry_point(_kernels[kd_idx]->get_id());
         }
 
-        if ((all_events.size() == 0) && (tmp_events.size() > 0))
+        if ((all_events.empty()) && (!tmp_events.empty())) {
             return stream.aggregate_events(tmp_events);
+        }
 
         bool group_events = (all_events.size() > 1);
         return stream.aggregate_events(all_events, group_events);
@@ -301,8 +314,9 @@ protected:
     }
 
     void set_kernels(cldnn::kernels_cache::compiled_kernels kernels) override {
-        if (is_cpu())
+        if (is_cpu()) {
             return;
+        }
         OPENVINO_ASSERT(kernels.size() == 1, "Only the kernels of the single primitive should be allowed.");
         auto& kernel_vec = kernels.begin()->second;
         _kernels.clear();
@@ -313,7 +327,25 @@ protected:
         }
     }
 
-    std::pair<std::string, std::string> get_kernels_dump_info() const override {
+    // Regardless of the model's dynamism, the compile time graph will rely on the skip_execution mechanism to determine which kernels will be executed
+    // The runtime graph relies on the actual execution of the kernel in execute_impl(..)
+    KernelDumpInfo get_kernels_dump_info(const cldnn::kernel_impl_params& impl_params) const override {
+        if (kernel_dump_info.has_entries()) {
+            return kernel_dump_info;
+        }
+
+        for (size_t i = 0; i < _kernel_data.kernels.size(); ++i) {
+            if (_kernel_data.kernels[i].skip_execution) {
+                continue;
+            }
+
+            if (_kernel_data.kernels[i].code.kernelString) {
+                kernel_dump_info.add_entry_point(_kernel_data.kernels[i].code.kernelString->entry_point);
+            } else if (i < _kernels.size() && _kernels[i]) {
+                kernel_dump_info.add_entry_point(_kernels[i]->get_id());
+            }
+        }
+
         return kernel_dump_info;
     }
 

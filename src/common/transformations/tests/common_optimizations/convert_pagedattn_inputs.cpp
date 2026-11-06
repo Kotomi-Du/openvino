@@ -1,20 +1,26 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "transformations/common_optimizations/convert_pagedattn_inputs.hpp"
+#include "transformations/paged_attention/convert_pagedattn_inputs.hpp"
 
 #include <gtest/gtest.h>
 
 #include "common_test_utils/ov_test_utils.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/paged_attention.hpp"
+#include "openvino/op/paged_causal_conv1d.hpp"
+#include "openvino/op/paged_gated_delta_net.hpp"
+#include "openvino/op/paged_selective_ssm.hpp"
+#include "openvino/pass/constant_folding.hpp"
+#include "openvino/pass/manager.hpp"
 #include "openvino/runtime/properties.hpp"
+#include "transformations/convert_precision.hpp"
+#include "transformations/rt_info/keep_const_precision.hpp"
 #include "transformations/utils/gen_pattern.hpp"
 
 using namespace ov::test;
 using namespace ov;
-using namespace ov::op;
 using namespace ov::gen_pattern;
 using ConvertPagedAttnInputsParams = std::tuple<std::vector<ov::element::Type>,  // cache_precision
                                                 std::vector<size_t>,             // cache_group_size
@@ -24,25 +30,20 @@ using ConvertPagedAttnInputsParams = std::tuple<std::vector<ov::element::Type>, 
                                                 bool,                            // accuracy_mode
                                                 bool                             // is_ir_kv_cache_f16
                                                 >;
+
+namespace v0 = ov::op::v0;
 namespace {
 class ConvertPagedAttnInputsTest : public TransformationTestsF,
                                    public testing::WithParamInterface<ConvertPagedAttnInputsParams> {
 public:
     static std::string getTestCaseName(const testing::TestParamInfo<ConvertPagedAttnInputsParams>& obj) {
-        std::vector<ov::element::Type> cachePrecision;
-        std::vector<size_t> cacheGroupSize;
-        std::vector<size_t> blcokSize;
-        bool quantKeybychannel;
-        bool isAccuracyMode;
-        bool isIRKVCacheF16;
-        ov::element::Type inferPrec;
-        std::tie(cachePrecision,
-                 cacheGroupSize,
-                 blcokSize,
-                 inferPrec,
-                 quantKeybychannel,
-                 isAccuracyMode,
-                 isIRKVCacheF16) = obj.param;
+        const auto& [cachePrecision,
+                     cacheGroupSize,
+                     blcokSize,
+                     inferPrec,
+                     quantKeybychannel,
+                     isAccuracyMode,
+                     isIRKVCacheF16] = obj.param;
         std::ostringstream result;
         result << "KeyPrc=" << cachePrecision[0] << "_";
         result << "ValuePrc=" << cachePrecision[1] << "_";
@@ -74,10 +75,18 @@ public:
 };
 
 TEST_P(ConvertPagedAttnInputsTest, checkPrecisionAndShape) {
-    std::vector<ov::element::Type> cachePrecision;
-    std::vector<size_t> cacheGroupSize;
-    std::tie(cachePrecision, cacheGroupSize, blockSize, inferPrec, quantKeybychannel, isAccuracyMode, isIRKVCacheF16) =
-        this->GetParam();
+    const auto& [cachePrecision,
+                 cacheGroupSize,
+                 _blockSize,
+                 _inferPrec,
+                 _quantKeybychannel,
+                 _isAccuracyMode,
+                 _isIRKVCacheF16] = this->GetParam();
+    blockSize = _blockSize;
+    inferPrec = _inferPrec;
+    quantKeybychannel = _quantKeybychannel;
+    isAccuracyMode = _isAccuracyMode;
+    isIRKVCacheF16 = _isIRKVCacheF16;
     keyCachePrecision = cachePrecision[0];
     valueCachePrecision = cachePrecision[1];
     keyCacheGroupSize = cacheGroupSize[0];
@@ -106,21 +115,52 @@ TEST_P(ConvertPagedAttnInputsTest, checkPrecisionAndShape) {
         auto sliding_window = std::make_shared<v0::Constant>(element::i32, Shape{}, 0);
         auto alibi_slopes = std::make_shared<v0::Constant>(element::f32, Shape{0});
         auto score_aggregation_window = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto rotated_block_indices = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto rotation_deltas = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto rotation_trig_lut = std::make_shared<v0::Parameter>(ov::element::f32, PartialShape{DYN});
+        auto xattention_threshold = std::make_shared<v0::Parameter>(ov::element::f32, PartialShape{DYN});
+        auto xattention_block_size = std::make_shared<v0::Parameter>(ov::element::i32, Shape{});
+        auto xattention_stride = std::make_shared<v0::Parameter>(ov::element::i32, Shape{});
+        auto sinks = std::make_shared<v0::Constant>(element::f32, Shape{0, 0, 0, 0});
+        auto adaptive_rkv_start_size = std::make_shared<v0::Parameter>(ov::element::i32, Shape{});
+        auto adaptive_rkv_evictable_sizes = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto adaptive_rkv_diversity_block_set_indices =
+            std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto adaptive_rkv_diversity_block_set_indices_begins =
+            std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto token_type_ids = std::make_shared<op::v0::Parameter>(ov::element::i32, ov::Shape{0});
 
-        auto pa = std::make_shared<op::PagedAttentionExtension>(OutputVector{Q,
-                                                                             K,
-                                                                             V,
-                                                                             key_cache_0,
-                                                                             value_cache_0,
-                                                                             past_lens,
-                                                                             subsequence_begins,
-                                                                             block_indices,
-                                                                             block_indices_begins,
-                                                                             scale,
-                                                                             sliding_window,
-                                                                             alibi_slopes,
-                                                                             max_context_len,
-                                                                             score_aggregation_window});
+        auto qq_bias = std::make_shared<v0::Parameter>(ov::element::u8, PartialShape{DYN});
+        auto qq_bias_begins = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto pa =
+            std::make_shared<op::PagedAttentionExtension>(OutputVector{Q,
+                                                                       K,
+                                                                       V,
+                                                                       key_cache_0,
+                                                                       value_cache_0,
+                                                                       past_lens,
+                                                                       subsequence_begins,
+                                                                       block_indices,
+                                                                       block_indices_begins,
+                                                                       scale,
+                                                                       sliding_window,
+                                                                       alibi_slopes,
+                                                                       max_context_len,
+                                                                       score_aggregation_window,
+                                                                       rotated_block_indices,
+                                                                       rotation_deltas,
+                                                                       rotation_trig_lut,
+                                                                       xattention_threshold,
+                                                                       xattention_block_size,
+                                                                       xattention_stride,
+                                                                       sinks,
+                                                                       adaptive_rkv_start_size,
+                                                                       adaptive_rkv_evictable_sizes,
+                                                                       adaptive_rkv_diversity_block_set_indices,
+                                                                       adaptive_rkv_diversity_block_set_indices_begins,
+                                                                       token_type_ids,
+                                                                       qq_bias,
+                                                                       qq_bias_begins});
         pa->get_rt_info()["num_k_heads"] = numKeyHeads;
         pa->get_rt_info()["k_head_size"] = keyHeadSize;
         pa->get_rt_info()["num_v_heads"] = numValueHeads;
@@ -137,7 +177,21 @@ TEST_P(ConvertPagedAttnInputsTest, checkPrecisionAndShape) {
                                                                 block_indices,
                                                                 block_indices_begins,
                                                                 max_context_len,
-                                                                score_aggregation_window});
+                                                                score_aggregation_window,
+                                                                rotated_block_indices,
+                                                                rotation_deltas,
+                                                                rotation_trig_lut,
+                                                                xattention_threshold,
+                                                                xattention_block_size,
+                                                                xattention_stride,
+                                                                adaptive_rkv_start_size,
+                                                                adaptive_rkv_evictable_sizes,
+                                                                adaptive_rkv_diversity_block_set_indices,
+                                                                adaptive_rkv_diversity_block_set_indices_begins,
+                                                                token_type_ids,
+                                                                qq_bias,
+                                                                qq_bias_begins});
+
         if (isIRKVCacheF16) {
             model->set_rt_info("f16", "runtime_options", ov::hint::kv_cache_precision.name());
         }
@@ -203,21 +257,52 @@ TEST_P(ConvertPagedAttnInputsTest, checkPrecisionAndShape) {
         auto sliding_window = std::make_shared<v0::Constant>(element::i32, Shape{}, 0);
         auto alibi_slopes = std::make_shared<v0::Constant>(element::f32, Shape{0});
         auto score_aggregation_window = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto rotated_block_indices = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto rotation_deltas = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto rotation_trig_lut = std::make_shared<v0::Parameter>(ov::element::f32, PartialShape{DYN});
+        auto xattention_threshold = std::make_shared<v0::Parameter>(ov::element::f32, PartialShape{DYN});
+        auto xattention_block_size = std::make_shared<v0::Parameter>(ov::element::i32, Shape{});
+        auto xattention_stride = std::make_shared<v0::Parameter>(ov::element::i32, Shape{});
+        auto sinks = std::make_shared<v0::Constant>(element::f32, Shape{0, 0, 0, 0});
+        auto adaptive_rkv_start_size = std::make_shared<v0::Parameter>(ov::element::i32, Shape{});
+        auto adaptive_rkv_evictable_sizes = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto adaptive_rkv_diversity_block_set_indices =
+            std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto adaptive_rkv_diversity_block_set_indices_begins =
+            std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto token_type_ids = std::make_shared<v0::Parameter>(ov::element::i32, ov::Shape{0});
 
-        auto pa = std::make_shared<op::PagedAttentionExtension>(OutputVector{Q,
-                                                                             K,
-                                                                             V,
-                                                                             key_cache_0,
-                                                                             value_cache_0,
-                                                                             past_lens,
-                                                                             subsequence_begins,
-                                                                             block_indices,
-                                                                             block_indices_begins,
-                                                                             scale,
-                                                                             sliding_window,
-                                                                             alibi_slopes,
-                                                                             max_context_len,
-                                                                             score_aggregation_window});
+        auto qq_bias = std::make_shared<v0::Parameter>(ov::element::u8, PartialShape{DYN});
+        auto qq_bias_begins = std::make_shared<v0::Parameter>(ov::element::i32, PartialShape{DYN});
+        auto pa =
+            std::make_shared<op::PagedAttentionExtension>(OutputVector{Q,
+                                                                       K,
+                                                                       V,
+                                                                       key_cache_0,
+                                                                       value_cache_0,
+                                                                       past_lens,
+                                                                       subsequence_begins,
+                                                                       block_indices,
+                                                                       block_indices_begins,
+                                                                       scale,
+                                                                       sliding_window,
+                                                                       alibi_slopes,
+                                                                       max_context_len,
+                                                                       score_aggregation_window,
+                                                                       rotated_block_indices,
+                                                                       rotation_deltas,
+                                                                       rotation_trig_lut,
+                                                                       xattention_threshold,
+                                                                       xattention_block_size,
+                                                                       xattention_stride,
+                                                                       sinks,
+                                                                       adaptive_rkv_start_size,
+                                                                       adaptive_rkv_evictable_sizes,
+                                                                       adaptive_rkv_diversity_block_set_indices,
+                                                                       adaptive_rkv_diversity_block_set_indices_begins,
+                                                                       token_type_ids,
+                                                                       qq_bias,
+                                                                       qq_bias_begins});
         pa->get_rt_info()["num_k_heads"] = numKeyHeads;
         pa->get_rt_info()["k_head_size"] = keyHeadSize;
         pa->get_rt_info()["num_v_heads"] = numValueHeads;
@@ -234,7 +319,20 @@ TEST_P(ConvertPagedAttnInputsTest, checkPrecisionAndShape) {
                                                                     block_indices,
                                                                     block_indices_begins,
                                                                     max_context_len,
-                                                                    score_aggregation_window});
+                                                                    score_aggregation_window,
+                                                                    rotated_block_indices,
+                                                                    rotation_deltas,
+                                                                    rotation_trig_lut,
+                                                                    xattention_threshold,
+                                                                    xattention_block_size,
+                                                                    xattention_stride,
+                                                                    adaptive_rkv_start_size,
+                                                                    adaptive_rkv_evictable_sizes,
+                                                                    adaptive_rkv_diversity_block_set_indices,
+                                                                    adaptive_rkv_diversity_block_set_indices_begins,
+                                                                    token_type_ids,
+                                                                    qq_bias,
+                                                                    qq_bias_begins});
     }
     ov::pass::ConvertPagedAttnInputs::KVCacheConfig cacheConfig;
     cacheConfig.keyCacheBlockSize = blockSize[0];
@@ -278,6 +376,7 @@ std::vector<std::vector<ov::element::Type>> get_cache_prec() {
         {ov::element::f16, ov::element::f16},
         {ov::element::u8, ov::element::u8},
         {ov::element::u8, ov::element::u4},
+        {ov::element::u4, ov::element::u4},
     };
 }
 
@@ -297,5 +396,282 @@ INSTANTIATE_TEST_SUITE_P(smoke_ConvertPagedAttnInputsTest,
                                             ::testing::Values(true, false),
                                             ::testing::Values(true, false)),
                          ConvertPagedAttnInputsTest::getTestCaseName);
+
+class ConvertPagedAttnInputsStateTableTest : public testing::Test {};
+
+// The tests bellow replicate the behavior of ConvertPagedAttnInputs pass in a GPU pipeline.
+// Testing it in isolation does not really make sense because in a real pipeline the model is
+// different and it's important to replicate the same conditions that a model is going through.
+// TODO: consider moving ConvertPagedAttnInputs above in the pipeline so we avoid taking into account
+// the ConvertPrecision pass that much.
+TEST_F(ConvertPagedAttnInputsStateTableTest, ConvertPagedCausalConv1DInputsPrecision) {
+    auto input_embeds = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 256});
+    auto conv_state_table = std::make_shared<v0::Parameter>(element::dynamic, PartialShape{-1, 256, 4});
+    conv_state_table->set_friendly_name("conv_state_table.0");
+    ov::enable_keep_const_precision(conv_state_table);
+    auto conv_weight = std::make_shared<v0::Parameter>(element::f32, PartialShape{256, 1, 4});
+    auto conv_bias = std::make_shared<v0::Parameter>(element::f32, PartialShape{256});
+    auto subsequence_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto past_lens = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto cache_interval = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+
+    auto paged_conv = std::make_shared<op::internal::PagedCausalConv1D>(input_embeds,
+                                                                        conv_state_table,
+                                                                        conv_weight,
+                                                                        conv_bias,
+                                                                        subsequence_begins,
+                                                                        block_indices,
+                                                                        block_indices_begins,
+                                                                        past_lens,
+                                                                        cache_interval);
+    auto local_model = std::make_shared<Model>(OutputVector{paged_conv},
+                                               ParameterVector{input_embeds,
+                                                               conv_state_table,
+                                                               conv_weight,
+                                                               conv_bias,
+                                                               subsequence_begins,
+                                                               block_indices,
+                                                               block_indices_begins,
+                                                               past_lens,
+                                                               cache_interval});
+
+    // Replicate GPU pipeline: clear keep_const_precision on all nodes
+    for (auto& node : local_model->get_ops()) {
+        ov::disable_keep_const_precision(node);
+    }
+
+    ov::pass::ConvertPagedAttnInputs::KVCacheConfig cacheConfig;
+    cacheConfig.inferencePrecision = ov::element::f16;
+
+    ov::pass::Manager local_manager;
+
+    precisions_map fp_convert_precision_map = {{ov::element::f64, ov::element::f32},
+                                               {ov::element::f32, ov::element::f16}};
+    type_to_fuse_map empty_fuse_map = {};
+    local_manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
+                                                            empty_fuse_map,
+                                                            /*keep_precision_sensitive_in_fp32*/ true,
+                                                            /*convert_input_output_precision*/ false,
+                                                            /*store_original_precision_as_rt_attribute*/ true);
+
+    auto update_paged_attention_shape_func =
+        [](const ov::element::Type&, const bool, const size_t, int64_t&, int64_t&) {};
+    local_manager.register_pass<ov::pass::ConvertPagedAttnInputs>(cacheConfig, update_paged_attention_shape_func);
+    local_manager.run_passes(local_model);
+
+    // Verify no Convert node between Parameter and PagedCausalConv1D
+    EXPECT_TRUE(ov::is_type<v0::Parameter>(paged_conv->get_input_node_shared_ptr(1)));
+    EXPECT_EQ(conv_state_table->get_element_type(), ov::element::f16);
+}
+
+TEST_F(ConvertPagedAttnInputsStateTableTest, ConvertPagedGatedDeltaNetPrecision) {
+    auto query = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 64});
+    auto key = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 64});
+    auto value = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 64});
+    auto gated_delta_state_table = std::make_shared<v0::Parameter>(element::dynamic, PartialShape{-1, 2, 64, 64});
+    gated_delta_state_table->set_friendly_name("gated_delta_state_table.0");
+    enable_keep_const_precision(gated_delta_state_table);
+    auto gate = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2});
+    auto beta = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2});
+    auto subsequence_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto past_lens = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto cache_interval = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+
+    auto paged_gdn = std::make_shared<op::internal::PagedGatedDeltaNet>(query,
+                                                                        key,
+                                                                        value,
+                                                                        gated_delta_state_table,
+                                                                        gate,
+                                                                        beta,
+                                                                        subsequence_begins,
+                                                                        block_indices,
+                                                                        block_indices_begins,
+                                                                        past_lens,
+                                                                        cache_interval);
+    auto local_model = std::make_shared<Model>(OutputVector{paged_gdn},
+                                               ParameterVector{query,
+                                                               key,
+                                                               value,
+                                                               gated_delta_state_table,
+                                                               gate,
+                                                               beta,
+                                                               subsequence_begins,
+                                                               block_indices,
+                                                               block_indices_begins,
+                                                               past_lens,
+                                                               cache_interval});
+
+    // Replicate GPU pipeline: clear keep_const_precision on all nodes
+    for (auto& node : local_model->get_ops()) {
+        ov::disable_keep_const_precision(node);
+    }
+
+    ov::pass::ConvertPagedAttnInputs::KVCacheConfig cacheConfig;
+    cacheConfig.inferencePrecision = ov::element::f16;
+
+    ov::pass::Manager local_manager;
+
+    precisions_map fp_convert_precision_map = {{ov::element::f64, ov::element::f32},
+                                               {ov::element::f32, ov::element::f16}};
+    type_to_fuse_map empty_fuse_map = {};
+    local_manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
+                                                            empty_fuse_map,
+                                                            /*keep_precision_sensitive_in_fp32*/ true,
+                                                            /*convert_input_output_precision*/ false,
+                                                            /*store_original_precision_as_rt_attribute*/ true);
+
+    auto update_paged_attention_shape_func =
+        [](const ov::element::Type&, const bool, const size_t, int64_t&, int64_t&) {};
+    local_manager.register_pass<ov::pass::ConvertPagedAttnInputs>(cacheConfig, update_paged_attention_shape_func);
+    local_manager.run_passes(local_model);
+
+    // Verify no Convert node between Parameter and PagedGatedDeltaNet
+    EXPECT_TRUE(ov::is_type<v0::Parameter>(paged_gdn->get_input_node_shared_ptr(3)));
+    EXPECT_EQ(gated_delta_state_table->get_element_type(), ov::element::f16);
+}
+
+TEST_F(ConvertPagedAttnInputsStateTableTest, ConvertPagedSelectiveSSMPrecision) {
+    auto A = std::make_shared<v0::Parameter>(element::f32, PartialShape{4});
+    auto dt = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 4});
+    auto B = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 16});
+    auto x = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 4, 8});
+    auto C = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 16});
+    auto selective_ssm_state_table = std::make_shared<v0::Parameter>(element::dynamic, PartialShape{-1, 4, 8, 16});
+    selective_ssm_state_table->set_friendly_name("selective_ssm_state_table.0");
+    enable_keep_const_precision(selective_ssm_state_table);
+    auto subsequence_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto num_processed_tokens = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto cache_interval = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+
+    auto paged_ssm = std::make_shared<op::internal::PagedSelectiveSSM>(A,
+                                                                       dt,
+                                                                       B,
+                                                                       x,
+                                                                       C,
+                                                                       selective_ssm_state_table,
+                                                                       subsequence_begins,
+                                                                       block_indices,
+                                                                       block_indices_begins,
+                                                                       num_processed_tokens,
+                                                                       cache_interval);
+    auto local_model = std::make_shared<Model>(OutputVector{paged_ssm},
+                                               ParameterVector{A,
+                                                               dt,
+                                                               B,
+                                                               x,
+                                                               C,
+                                                               selective_ssm_state_table,
+                                                               subsequence_begins,
+                                                               block_indices,
+                                                               block_indices_begins,
+                                                               num_processed_tokens,
+                                                               cache_interval});
+
+    // Replicate GPU pipeline: clear keep_const_precision on all nodes
+    for (auto& node : local_model->get_ops()) {
+        ov::disable_keep_const_precision(node);
+    }
+
+    ov::pass::ConvertPagedAttnInputs::KVCacheConfig cacheConfig;
+    cacheConfig.inferencePrecision = ov::element::f16;
+
+    ov::pass::Manager local_manager;
+
+    precisions_map fp_convert_precision_map = {{ov::element::f64, ov::element::f32},
+                                               {ov::element::f32, ov::element::f16}};
+    type_to_fuse_map empty_fuse_map = {};
+    local_manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
+                                                            empty_fuse_map,
+                                                            /*keep_precision_sensitive_in_fp32*/ true,
+                                                            /*convert_input_output_precision*/ false,
+                                                            /*store_original_precision_as_rt_attribute*/ true);
+
+    auto update_paged_attention_shape_func =
+        [](const ov::element::Type&, const bool, const size_t, int64_t&, int64_t&) {};
+    local_manager.register_pass<ov::pass::ConvertPagedAttnInputs>(cacheConfig, update_paged_attention_shape_func);
+    local_manager.run_passes(local_model);
+
+    for (size_t input = 0; input < 5; ++input) {
+        EXPECT_EQ(paged_ssm->get_input_element_type(input), element::f16);
+    }
+    // Verify no Convert node between Parameter and PagedSelectiveSSM
+    EXPECT_TRUE(ov::is_type<v0::Parameter>(paged_ssm->get_input_node_shared_ptr(5)));
+    EXPECT_EQ(selective_ssm_state_table->get_element_type(), ov::element::f16);
+    EXPECT_EQ(paged_ssm->get_output_element_type(0), element::f16);
+}
+
+TEST_F(ConvertPagedAttnInputsStateTableTest, ConvertPagedSelectiveSSMIndependentStatePrecision) {
+    auto A = std::make_shared<v0::Parameter>(element::f32, PartialShape{4});
+    auto dt = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 4});
+    auto B = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 16});
+    auto x = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 4, 8});
+    auto C = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, 2, 16});
+    auto selective_ssm_state_table = std::make_shared<v0::Parameter>(element::dynamic, PartialShape{-1, 4, 8, 16});
+    selective_ssm_state_table->set_friendly_name("selective_ssm_state_table.0");
+    for (const auto& parameter : {A, dt, B, x, C, selective_ssm_state_table}) {
+        enable_keep_const_precision(parameter);
+    }
+    auto subsequence_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto num_processed_tokens = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto cache_interval = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+
+    auto paged_ssm = std::make_shared<op::internal::PagedSelectiveSSM>(A,
+                                                                       dt,
+                                                                       B,
+                                                                       x,
+                                                                       C,
+                                                                       selective_ssm_state_table,
+                                                                       subsequence_begins,
+                                                                       block_indices,
+                                                                       block_indices_begins,
+                                                                       num_processed_tokens,
+                                                                       cache_interval);
+    auto local_model = std::make_shared<Model>(OutputVector{paged_ssm},
+                                               ParameterVector{A,
+                                                               dt,
+                                                               B,
+                                                               x,
+                                                               C,
+                                                               selective_ssm_state_table,
+                                                               subsequence_begins,
+                                                               block_indices,
+                                                               block_indices_begins,
+                                                               num_processed_tokens,
+                                                               cache_interval});
+
+    ov::pass::ConvertPagedAttnInputs::KVCacheConfig cacheConfig;
+    cacheConfig.inferencePrecision = ov::element::f16;
+
+    ov::pass::Manager local_manager;
+
+    precisions_map fp_convert_precision_map = {{ov::element::f64, ov::element::f32},
+                                               {ov::element::f32, ov::element::f16}};
+    type_to_fuse_map empty_fuse_map = {};
+    local_manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
+                                                            empty_fuse_map,
+                                                            /*keep_precision_sensitive_in_fp32*/ true,
+                                                            /*convert_input_output_precision*/ false,
+                                                            /*store_original_precision_as_rt_attribute*/ true);
+
+    auto update_paged_attention_shape_func =
+        [](const ov::element::Type&, const bool, const size_t, int64_t&, int64_t&) {};
+    local_manager.register_pass<ov::pass::ConvertPagedAttnInputs>(cacheConfig, update_paged_attention_shape_func);
+    local_manager.run_passes(local_model);
+
+    for (size_t input = 0; input < 5; ++input) {
+        EXPECT_EQ(paged_ssm->get_input_element_type(input), element::f32);
+    }
+    EXPECT_TRUE(ov::is_type<v0::Parameter>(paged_ssm->get_input_node_shared_ptr(5)));
+    EXPECT_EQ(selective_ssm_state_table->get_element_type(), ov::element::f16);
+    EXPECT_EQ(paged_ssm->get_output_element_type(0), element::f32);
+}
 
 }  // namespace

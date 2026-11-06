@@ -1,8 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "include/batch_headers/fetch_data.cl"
+#if INPUT0_IS_F8E4M3 || INPUT2_IS_F8E4M3
+#include "include/f8_utils.cl"  // fp8e4m3_t typedef
+#endif
 
 #define AXIS_B (0)
 #define AXIS_F (1)
@@ -13,16 +16,52 @@
 
 #define GET_OUTPUT_INDEX(idx_order) OUTPUT_GET_INDEX(idx_order)
 #define GET_INPUT_INDEX(idx_order) INPUT0_GET_INDEX(idx_order)
+#define GET_UPDATES_INDEX(idx_order) UPDATES_GET_INDEX(idx_order)
+
+#define INDICES_SIZE INPUT1_LENGTH
 
 #if OUTPUT_DIMS == 4
     #define ORDER b,f,y,x
+#    if AXIS_VALUE == AXIS_B
+#        define AXIS_SIZE OUTPUT_BATCH_NUM
+#    elif AXIS_VALUE == AXIS_F
+#        define AXIS_SIZE OUTPUT_FEATURE_NUM
+#    elif AXIS_VALUE == AXIS_Y
+#        define AXIS_SIZE OUTPUT_SIZE_Y
+#    else
+#        define AXIS_SIZE OUTPUT_SIZE_X
+#    endif
 #elif OUTPUT_DIMS == 5
     #define ORDER b,f,z,y,x
+#    if AXIS_VALUE == AXIS_B
+#        define AXIS_SIZE OUTPUT_BATCH_NUM
+#    elif AXIS_VALUE == AXIS_F
+#        define AXIS_SIZE OUTPUT_FEATURE_NUM
+#    elif AXIS_VALUE == AXIS_Z
+#        define AXIS_SIZE OUTPUT_SIZE_Z
+#    elif AXIS_VALUE == AXIS_Y
+#        define AXIS_SIZE OUTPUT_SIZE_Y
+#    else
+#        define AXIS_SIZE OUTPUT_SIZE_X
+#    endif
 #elif OUTPUT_DIMS == 6
     #define ORDER b,f,w,z,y,x
+#    if AXIS_VALUE == AXIS_B
+#        define AXIS_SIZE OUTPUT_BATCH_NUM
+#    elif AXIS_VALUE == AXIS_F
+#        define AXIS_SIZE OUTPUT_FEATURE_NUM
+#    elif AXIS_VALUE == AXIS_W
+#        define AXIS_SIZE OUTPUT_SIZE_W
+#    elif AXIS_VALUE == AXIS_Z
+#        define AXIS_SIZE OUTPUT_SIZE_Z
+#    elif AXIS_VALUE == AXIS_Y
+#        define AXIS_SIZE OUTPUT_SIZE_Y
+#    else
+#        define AXIS_SIZE OUTPUT_SIZE_X
+#    endif
 #endif
 
-#ifdef BLOCKED_LAYOUT
+#ifdef USE_LAYOUT_AWARE_INDEXING
 inline void FUNC(planar_to_bfyx)(const uint planar_index,
                                  const uint batch_num, const uint channel_num, const uint height, const uint width,
                                  uint* dst_b, uint* dst_f, uint* dst_y, uint* dst_x)
@@ -85,7 +124,7 @@ inline void FUNC(planar_to_bfwzyx)(const uint planar_index,
     *dst_x = dst_xy % width;
 }
 #endif // INPUT2_DIMS
-#endif // BLOCKED_LAYOUT
+#endif // USE_LAYOUT_AWARE_INDEXING
 
 KERNEL(scatter_update_ref)(OPTIONAL_SHAPE_INFO_ARG
                    const __global INPUT0_TYPE* dictionary,
@@ -129,6 +168,9 @@ KERNEL(scatter_update_ref)(OPTIONAL_SHAPE_INFO_ARG
     #if HAS_FUSED_OPS
         FUSED_OPS_FIRST_KERNEL;
         output[output_idx] = TO_OUTPUT_TYPE(FUSED_OPS_RESULT_FIRST_KERNEL);
+    #elif INPUT0_IS_F8E4M3
+        // fp8 is a 1-byte struct; ScatterUpdate just moves data, so copy the byte (ACTIVATION won't compile on it).
+        output[output_idx] = val;
     #else
         output[output_idx] = ACTIVATION(val, ACTIVATION_PARAMS);
     #endif
@@ -187,7 +229,7 @@ KERNEL(scatter_update_ref)(OPTIONAL_SHAPE_INFO_ARG
         #endif
     #endif
 
-    #ifdef BLOCKED_LAYOUT
+    #ifdef USE_LAYOUT_AWARE_INDEXING
         const uint planar_axis_idx = OUTPUT_INDEX_ON_AXIS;
         uint b_b, b_f, b_w, b_z, b_y, b_x;
         FUNC_CALL(planar_to_bfyx)(planar_axis_idx, INPUT1_BATCH_NUM, INPUT1_FEATURE_NUM, INPUT1_SIZE_Y, INPUT1_SIZE_X,
@@ -198,9 +240,14 @@ KERNEL(scatter_update_ref)(OPTIONAL_SHAPE_INFO_ARG
         const uint index_by_axis = convert_int(indices[OUTPUT_INDEX_ON_AXIS]);
     #endif
 
+        // No exception path on GPU (unlike CPU's assert in scatter_update.cpp): skip OOB writes instead.
+        if (index_by_axis >= (uint)AXIS_SIZE) {
+            return;
+        }
+
     const uint output_idx = GET_OUTPUT_INDEX(SECOND_ITER_OUTPUT_INDEX_ORDER);
 
-    #ifdef BLOCKED_LAYOUT
+    #ifdef USE_LAYOUT_AWARE_INDEXING
         const uint planar_updates_idx = GET_UPDATES_INDEX(UPDATES_INDEX_ORDER);
 
         #if INPUT2_DIMS == 4
@@ -229,12 +276,17 @@ KERNEL(scatter_update_ref)(OPTIONAL_SHAPE_INFO_ARG
     #if HAS_FUSED_OPS
         FUSED_OPS_SECOND_KERNEL;
         output[output_idx] = TO_OUTPUT_TYPE(FUSED_OPS_RESULT_SECOND_KERNEL);
+    #elif INPUT2_IS_F8E4M3
+        // fp8 is a 1-byte struct; ScatterUpdate just moves data, so copy the byte (ACTIVATION won't compile on it).
+        output[output_idx] = val;
     #else
         output[output_idx] = ACTIVATION(val, ACTIVATION_PARAMS);
     #endif
 #endif
 }
 
+#undef INDICES_SIZE
+#undef GET_UPDATES_INDEX
 #undef GET_OUTPUT_INDEX
 #undef GET_INPUT_INDEX
 #undef ORDER
@@ -244,3 +296,4 @@ KERNEL(scatter_update_ref)(OPTIONAL_SHAPE_INFO_ARG
 #undef AXIS_Z
 #undef AXIS_Y
 #undef AXIS_X
+#undef AXIS_SIZE

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,8 +12,10 @@ ParamsKey ConcatenationKernel_depth_bfyx_no_pitch::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F32);
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableInputLayout(DataLayout::bfyx);
     k.EnableInputLayout(DataLayout::bf);
     k.EnableOutputLayout(DataLayout::bfyx);
@@ -31,7 +33,7 @@ DeviceFeaturesKey ConcatenationKernel_depth_bfyx_no_pitch::get_required_device_f
 
 bool ConcatenationKernel_depth_bfyx_no_pitch::Validate(const Params& p) const {
     if (!ConcatenationKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const concatenation_params& params = static_cast<const concatenation_params&>(p);
@@ -40,7 +42,7 @@ bool ConcatenationKernel_depth_bfyx_no_pitch::Validate(const Params& p) const {
     auto same_layout = params.inputs[0].GetLayout();
     for (const auto& lt : params.inputs) {
         if (lt.GetLayout() != same_layout) {
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 
@@ -50,8 +52,9 @@ bool ConcatenationKernel_depth_bfyx_no_pitch::Validate(const Params& p) const {
 
         for (size_t i = 0; i < params.inputs.size(); i++) {
             for (size_t b = 0; b < params.outputs[0].Batch().v; b++) {
-                if ((output_offset + b * params.inputs[i].Batch().pitch) % 2 != 0)
-                    return false;
+                if ((output_offset + b * params.inputs[i].Batch().pitch) % 2 != 0) {
+                    DO_NOT_USE_THIS_KERNEL(p.layerID);
+                }
             }
             output_offset += params.inputs[i].Batch().pitch;
         }

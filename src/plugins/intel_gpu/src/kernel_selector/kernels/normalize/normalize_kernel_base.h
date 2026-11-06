@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -33,7 +33,7 @@ struct normalize_params : public base_params {
 class NormalizeKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~NormalizeKernelBase() {}
+    ~NormalizeKernelBase() override = default;
 
     using DispatchData = CommonDispatchData;
 

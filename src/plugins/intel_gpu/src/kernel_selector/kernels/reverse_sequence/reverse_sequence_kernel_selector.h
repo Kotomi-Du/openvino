@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,7 +16,7 @@ public:
 
     reverse_sequence_kernel_selector();
 
-    virtual ~reverse_sequence_kernel_selector() {}
+    ~reverse_sequence_kernel_selector() override = default;
 
     KernelsData GetBestKernels(const Params& params) const override;
 };

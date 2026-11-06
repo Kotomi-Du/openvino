@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -19,10 +19,7 @@ using namespace ov;
 using namespace ov::op;
 using namespace ov::frontend::tensorflow;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 OutputVector translate_gru_block_cell_op(const ov::frontend::tensorflow::NodeContext& node) {
     // GRUBlockCell computes the GRU cell forward propagation for 1 time step
@@ -85,7 +82,7 @@ OutputVector translate_gru_block_cell_op(const ov::frontend::tensorflow::NodeCon
         hidden_size.is_static(),
         "[TensorFlow Frontend] internal error: GRUBlockCell is supported only for static hidden size");
 
-    // retrive input_size and hidden_size
+    // retrieve input_size and hidden_size
     auto x_shape = std::make_shared<v3::ShapeOf>(x, element::i64);
     auto ss_start = std::make_shared<v0::Constant>(element::i64, Shape{1}, 1);
     auto ss_end = std::make_shared<v0::Constant>(element::i64, Shape{1}, 2);
@@ -138,7 +135,4 @@ OutputVector translate_gru_block_cell_op(const ov::frontend::tensorflow::NodeCon
     return results;
 }
 
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

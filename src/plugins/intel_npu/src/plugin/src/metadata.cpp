@@ -1,14 +1,81 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "metadata.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <optional>
+#include <string>
 
-#include "intel_npu/utils/logger/logger.hpp"
+#include "intel_npu/compat_string_parser.hpp"
 #include "openvino/runtime/shared_buffer.hpp"
+
+namespace {
+
+// Compiler payload size + magic bytes
+constexpr size_t FOOTER_SIZE = sizeof(uint64_t) + intel_npu::MAGIC_BYTES.size();
+// Metadata version + compiler payload size + magic bytes
+constexpr size_t MINIMUM_BLOB_SIZE = sizeof(uint32_t) + FOOTER_SIZE;
+constexpr size_t SIZE_OF_INIT_SCHEDULE_SIZE = sizeof(uint64_t);
+constexpr size_t SIZE_OF_LAYOUT_SIZE = sizeof(uint16_t);
+
+constexpr std::string_view MISSING_METADATA_MESSAGE = "The blob is missing the NPU metadata!";
+constexpr std::string_view BLOB_TOO_SMALL_MESSAGE =
+    "The blob received for parsing is too small to contain all mandatory information. Blob size: ";
+constexpr std::string_view INVALID_PAYLOAD_SIZE_MESSAGE =
+    "The size of the compiler payload parsed from the blob is greater "
+    "than the size of the blob. Compiler payload size: ";
+
+template <typename T>
+void write_text_field(std::ostream& stream, std::string_view key, const T& value) {
+    if (stream.tellp() != std::streampos(0)) {
+        stream << ';';
+    }
+    stream << key << '=' << value;
+}
+
+std::vector<uint16_t> parse_version(std::string_view sv) {
+    const auto hasOnlyDigits = [](std::string_view sv) {
+        return !sv.empty() && std::all_of(sv.begin(), sv.end(), [](unsigned char c) {
+            return std::isdigit(c);
+        });
+    };
+
+    std::vector<uint16_t> parts;
+    std::string_view remaining = sv;
+    while (true) {
+        const size_t dot = remaining.find('.');
+        const std::string_view part = remaining.substr(0, dot);
+        if (!hasOnlyDigits(part)) {
+            OPENVINO_THROW("Invalid version '",
+                           sv,
+                           "': version must meet the format MAJOR.MINOR.PATCH with numeric components");
+        }
+        parts.push_back(static_cast<uint16_t>(std::stoul(std::string(part))));
+        if (dot == std::string_view::npos) {
+            break;
+        }
+        remaining = remaining.substr(dot + 1);
+        if (remaining.empty()) {
+            OPENVINO_THROW("Invalid version '", sv, "': trailing dot");
+        }
+    }
+    return parts;
+}
+
+size_t get_and_check_remaining_source_size(intel_npu::BlobSource& source) {
+    const size_t remaining = source.get_remaining_size();
+
+    OPENVINO_ASSERT(remaining >= FOOTER_SIZE,
+                    "Invalid state. While parsing the NPU plugin metadata, it was found that the remaining number of "
+                    "bytes within the blob source is lower than the size of the footer.");
+    return remaining;
+}
+
+}  // namespace
 
 namespace intel_npu {
 
@@ -33,10 +100,10 @@ OpenvinoVersion::OpenvinoVersion(const OpenvinoVersion& version)
       _minor(version.get_minor()),
       _patch(version.get_patch()) {}
 
-void OpenvinoVersion::read(std::istream& stream) {
-    stream.read(reinterpret_cast<char*>(&_major), sizeof(_major));
-    stream.read(reinterpret_cast<char*>(&_minor), sizeof(_minor));
-    stream.read(reinterpret_cast<char*>(&_patch), sizeof(_patch));
+void OpenvinoVersion::read(BlobSource& source) {
+    source.read_into_buffer(&_major, sizeof(_major));
+    source.read_into_buffer(&_minor, sizeof(_minor));
+    source.read_into_buffer(&_patch, sizeof(_patch));
 }
 
 void OpenvinoVersion::write(std::ostream& stream) {
@@ -45,124 +112,614 @@ void OpenvinoVersion::write(std::ostream& stream) {
     stream.write(reinterpret_cast<const char*>(&_patch), sizeof(_patch));
 }
 
-Metadata<METADATA_VERSION_2_0>::Metadata(uint64_t blobSize, std::optional<OpenvinoVersion> ovVersion)
-    : MetadataBase{METADATA_VERSION_2_0},
-      _ovVersion{ovVersion.value_or(CURRENT_OPENVINO_VERSION)},
-      _blobDataSize{blobSize} {}
-
-void Metadata<METADATA_VERSION_2_0>::read(std::istream& stream) {
-    _ovVersion.read(stream);
+size_t OpenvinoVersion::get_openvino_version_size() const {
+    return sizeof(_major) + sizeof(_minor) + sizeof(_patch);
 }
 
-void Metadata<METADATA_VERSION_2_0>::write(std::ostream& stream) {
-    stream.write(reinterpret_cast<const char*>(&_version), sizeof(_version));
-    _ovVersion.write(stream);
-    stream.write(reinterpret_cast<const char*>(&_blobDataSize), sizeof(_blobDataSize));
+MetadataBase::MetadataBase(uint32_t version, uint64_t blobDataSize)
+    : _version(version),
+      _compilerPayloadSize(blobDataSize),
+      _logger("NPUBlobMetadata", Logger::global().level()) {}
+
+std::optional<BlobType> MetadataBase::get_blob_type() const {
+    return std::nullopt;
+}
+
+Metadata<METADATA_VERSION_2_0>::Metadata(uint64_t blobSize, const std::optional<OpenvinoVersion>& ovVersion)
+    : MetadataBase{METADATA_VERSION_2_0, blobSize},
+      _ovVersion{ovVersion.value_or(CURRENT_OPENVINO_VERSION)} {}
+
+Metadata<METADATA_VERSION_2_1>::Metadata(uint64_t blobSize,
+                                         const std::optional<OpenvinoVersion>& ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes)
+    : Metadata<METADATA_VERSION_2_0>{blobSize, ovVersion},
+      _initSizes{initSizes} {
+    _version = METADATA_VERSION_2_1;
+}
+
+Metadata<METADATA_VERSION_2_2>::Metadata(uint64_t blobSize,
+                                         std::optional<OpenvinoVersion> ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes,
+                                         const std::optional<int64_t>& batchSize)
+    : Metadata<METADATA_VERSION_2_1>{blobSize, ovVersion, initSizes},
+      _batchSize{batchSize} {
+    _version = METADATA_VERSION_2_2;
+}
+
+Metadata<METADATA_VERSION_2_3>::Metadata(uint64_t blobSize,
+                                         const std::optional<OpenvinoVersion>& ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes,
+                                         const std::optional<int64_t>& batchSize,
+                                         const std::optional<std::vector<ov::Layout>>& inputLayouts,
+                                         const std::optional<std::vector<ov::Layout>>& outputLayouts)
+    : Metadata<METADATA_VERSION_2_2>{blobSize, ovVersion, initSizes, batchSize},
+      _inputLayouts{inputLayouts},
+      _outputLayouts{outputLayouts} {
+    _version = METADATA_VERSION_2_3;
+}
+
+Metadata<METADATA_VERSION_2_4>::Metadata(uint64_t blobSize,
+                                         const std::optional<OpenvinoVersion>& ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes,
+                                         const std::optional<int64_t>& batchSize,
+                                         const std::optional<std::vector<ov::Layout>>& inputLayouts,
+                                         const std::optional<std::vector<ov::Layout>>& outputLayouts,
+                                         const std::optional<uint32_t>& compilerVersion)
+    : Metadata<METADATA_VERSION_2_3>{blobSize, ovVersion, initSizes, batchSize, inputLayouts, outputLayouts},
+      _compilerVersion{compilerVersion} {
+    _version = METADATA_VERSION_2_4;
+}
+
+Metadata<METADATA_VERSION_2_5>::Metadata(uint64_t blobSize,
+                                         const std::optional<OpenvinoVersion>& ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes,
+                                         const std::optional<int64_t>& batchSize,
+                                         const std::optional<std::vector<ov::Layout>>& inputLayouts,
+                                         const std::optional<std::vector<ov::Layout>>& outputLayouts,
+                                         const std::optional<uint32_t>& compilerVersion,
+                                         const std::optional<uint64_t>& blobSizeAfterEncryption)
+    : Metadata<METADATA_VERSION_2_4>{blobSizeAfterEncryption.has_value() ? blobSizeAfterEncryption.value() : blobSize,
+                                     ovVersion,
+                                     initSizes,
+                                     batchSize,
+                                     inputLayouts,
+                                     outputLayouts,
+                                     compilerVersion},
+      _isEncryptedBlob{blobSizeAfterEncryption.has_value()} {
+    _version = METADATA_VERSION_2_5;
+}
+
+Metadata<METADATA_VERSION_2_6>::Metadata(uint64_t blobSize,
+                                         const std::optional<OpenvinoVersion>& ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes,
+                                         const std::optional<int64_t> batchSize,
+                                         const std::optional<std::vector<ov::Layout>>& inputLayouts,
+                                         const std::optional<std::vector<ov::Layout>>& outputLayouts,
+                                         const std::optional<uint32_t> compilerVersion,
+                                         const std::optional<uint64_t>& blobSizeAfterEncryption,
+                                         const std::optional<std::string_view> compatibilityDescriptor)
+    : Metadata<METADATA_VERSION_2_5>{blobSize,
+                                     ovVersion,
+                                     initSizes,
+                                     batchSize,
+                                     inputLayouts,
+                                     outputLayouts,
+                                     compilerVersion,
+                                     blobSizeAfterEncryption},
+      _compatibilityDescriptor{compatibilityDescriptor} {
+    _version = METADATA_VERSION_2_6;
+}
+
+Metadata<METADATA_VERSION_2_7>::Metadata(uint64_t blobSize,
+                                         const std::optional<OpenvinoVersion>& ovVersion,
+                                         const std::optional<std::vector<uint64_t>>& initSizes,
+                                         const std::optional<int64_t> batchSize,
+                                         const std::optional<std::vector<ov::Layout>>& inputLayouts,
+                                         const std::optional<std::vector<ov::Layout>>& outputLayouts,
+                                         const std::optional<uint32_t> compilerVersion,
+                                         const std::optional<uint64_t>& blobSizeAfterEncryption,
+                                         const std::optional<std::string_view> compatibilityDescriptor,
+                                         BlobType blobType)
+    : Metadata<METADATA_VERSION_2_6>{blobSize,
+                                     ovVersion,
+                                     initSizes,
+                                     batchSize,
+                                     inputLayouts,
+                                     outputLayouts,
+                                     compilerVersion,
+                                     blobSizeAfterEncryption,
+                                     compatibilityDescriptor},
+      _blobType(blobType) {
+    _version = METADATA_VERSION_2_7;
+}
+
+void MetadataBase::read(BlobSource& source) {
+    read_unchecked(source);
+    get_and_check_remaining_source_size(source);
+
+    // Note: we could have placed an additional safeguard here. Something like "cursor = streamEnd - footerSize", to
+    // make sure the whole content of the metadata section has been read. However, such a safeguard would break
+    // compatibility, because some previous plugin versions are padding the space between the end of the metadata and
+    // the footer.
+}
+
+void MetadataBase::write(std::ostream& stream) {
+    write_without_footer(stream);
+
+    stream.write(reinterpret_cast<const char*>(&_compilerPayloadSize), sizeof(_compilerPayloadSize));
     stream.write(MAGIC_BYTES.data(), MAGIC_BYTES.size());
 }
 
-std::unique_ptr<MetadataBase> create_metadata(uint32_t version, uint64_t blobSize) {
-    if (MetadataBase::get_major(version) == CURRENT_METADATA_MAJOR_VERSION &&
-        MetadataBase::get_minor(version) > CURRENT_METADATA_MINOR_VERSION) {
-        return std::make_unique<Metadata<CURRENT_METADATA_VERSION>>(blobSize, std::nullopt);
+void Metadata<METADATA_VERSION_2_0>::read_unchecked(BlobSource& source) {
+    _ovVersion.read(source);
+}
+
+void Metadata<METADATA_VERSION_2_1>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_0>::read_unchecked(source);
+
+    uint64_t numberOfInits;
+    source.read_into_buffer(&numberOfInits, sizeof(numberOfInits));
+
+    if (numberOfInits) {
+        OPENVINO_ASSERT(
+            numberOfInits <= (get_and_check_remaining_source_size(source) - FOOTER_SIZE) / SIZE_OF_INIT_SCHEDULE_SIZE,
+            "The number of init schedules read from the blob is too great relative to the size of the blob");
+
+        _initSizes = std::vector<uint64_t>(numberOfInits);
+        for (uint64_t initIndex = 0; initIndex < numberOfInits; ++initIndex) {
+            source.read_into_buffer(&_initSizes->at(initIndex), sizeof(_initSizes->at(initIndex)));
+        }
     }
+}
+
+void Metadata<METADATA_VERSION_2_2>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_1>::read_unchecked(source);
+
+    int64_t batchSize;
+    source.read_into_buffer(&batchSize, sizeof(batchSize));
+
+    _batchSize = batchSize != 0 ? std::optional(batchSize) : std::nullopt;
+}
+
+void Metadata<METADATA_VERSION_2_3>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_2>::read_unchecked(source);
+
+    uint64_t numberOfInputLayouts, numberOfOutputLayouts;
+    source.read_into_buffer(&numberOfInputLayouts, sizeof(numberOfInputLayouts));
+    source.read_into_buffer(&numberOfOutputLayouts, sizeof(numberOfOutputLayouts));
+
+    const size_t maxLayouts = (get_and_check_remaining_source_size(source) - FOOTER_SIZE) / SIZE_OF_LAYOUT_SIZE;
+    OPENVINO_ASSERT(numberOfInputLayouts <= maxLayouts && numberOfOutputLayouts <= maxLayouts - numberOfInputLayouts,
+                    "The number of I/O layouts read from the blob is too great relative to the size of the blob");
+
+    const auto readNLayouts = [&](const uint64_t numberOfLayouts, const char* loggerAddition) {
+        std::optional<std::vector<ov::Layout>> layouts = std::nullopt;
+        if (!numberOfLayouts) {
+            return layouts;
+        }
+
+        uint16_t stringLength;
+        layouts = std::vector<ov::Layout>();
+        layouts->reserve(numberOfLayouts);
+        for (uint64_t layoutIndex = 0; layoutIndex < numberOfLayouts; ++layoutIndex) {
+            source.read_into_buffer(&stringLength, sizeof(stringLength));
+            OPENVINO_ASSERT(stringLength <= get_and_check_remaining_source_size(source) - FOOTER_SIZE,
+                            "The size of at least one layout exceeds the limit of the blob");
+
+            std::string layoutString(stringLength, 0);
+            source.read_into_buffer(layoutString.data(), stringLength);
+
+            try {
+                layouts->push_back(ov::Layout(std::move(layoutString)));
+            } catch (const ov::Exception&) {
+                _logger.warning("Error encountered while constructing an ov::Layout object. %s index: %d. Value "
+                                "read from blob: %s. A default value will be used instead.",
+                                loggerAddition,
+                                layoutIndex,
+                                layoutString.c_str());
+                layouts->push_back(ov::Layout());
+            }
+        }
+        return layouts;
+    };
+
+    _inputLayouts = readNLayouts(numberOfInputLayouts, "Input");
+    _outputLayouts = readNLayouts(numberOfOutputLayouts, "Output");
+}
+
+void Metadata<METADATA_VERSION_2_4>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_3>::read_unchecked(source);
+
+    uint32_t compilerVersion;
+    source.read_into_buffer(&compilerVersion, sizeof(compilerVersion));
+    _compilerVersion = compilerVersion != 0 ? std::optional(compilerVersion) : std::nullopt;
+}
+
+void Metadata<METADATA_VERSION_2_5>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_4>::read_unchecked(source);
+
+    uint8_t isEncryptedBlob;
+    source.read_into_buffer(&isEncryptedBlob, sizeof(isEncryptedBlob));
+
+    _isEncryptedBlob = isEncryptedBlob;
+}
+
+void Metadata<METADATA_VERSION_2_6>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_5>::read_unchecked(source);
+
+    uint64_t reqs_len;
+    source.read_into_buffer(&reqs_len, sizeof(reqs_len));
+    if (reqs_len > 0) {
+        OPENVINO_ASSERT(reqs_len <= (get_and_check_remaining_source_size(source) - FOOTER_SIZE),
+                        "The size of the runtime requirements surpasses the limit of the blob");
+
+        std::string reqs(reqs_len, '\0');
+        source.read_into_buffer(reqs.data(), reqs_len);
+        _compatibilityDescriptor = std::move(reqs);
+    }
+}
+
+void Metadata<METADATA_VERSION_2_7>::read_unchecked(BlobSource& source) {
+    Metadata<METADATA_VERSION_2_6>::read_unchecked(source);
+
+    uint8_t blobType;
+    source.read_into_buffer(&blobType, sizeof(blobType));
+    const auto type = static_cast<BlobType>(blobType);
+    OPENVINO_ASSERT(type == BlobType::ELF || type == BlobType::BYTECODE,
+                    "Invalid blob type in NPU blob metadata: ",
+                    static_cast<uint32_t>(blobType));
+    _blobType = type;
+}
+
+std::optional<BlobType> Metadata<METADATA_VERSION_2_7>::get_blob_type() const {
+    return _blobType;
+}
+
+void Metadata<METADATA_VERSION_2_0>::read_as_text(const std::map<std::string, std::string, std::less<>>& textAttrs) {
+    const auto it = textAttrs.find(MetadataTextKeys::OV);
+    if (it == textAttrs.end()) {
+        OPENVINO_THROW("Human-readable metadata missing '" + std::string(MetadataTextKeys::OV) + "' field.");
+    }
+    const auto ovParts = parse_version(it->second);
+    if (ovParts.size() != 3) {
+        OPENVINO_THROW("Human-readable metadata: '" + std::string(MetadataTextKeys::OV) +
+                       "' is not in MAJOR.MINOR.PATCH format: " + it->second);
+    }
+    _ovVersion = OpenvinoVersion(ovParts[0], ovParts[1], ovParts[2]);
+}
+
+void Metadata<METADATA_VERSION_2_1>::read_as_text(const std::map<std::string, std::string, std::less<>>& textAttrs) {
+    Metadata<METADATA_VERSION_2_0>::read_as_text(textAttrs);
+
+    const auto it = textAttrs.find(MetadataTextKeys::WS_INITS);
+    if (it == textAttrs.end()) {
+        return;
+    }
+    if (it->second != "1") {
+        OPENVINO_THROW("Human-readable metadata: '" + std::string(MetadataTextKeys::WS_INITS) +
+                       "' must be '1' when present; got: " + it->second);
+    }
+    _initSizes = std::vector<uint64_t>{};
+}
+
+void Metadata<METADATA_VERSION_2_2>::read_as_text(const std::map<std::string, std::string, std::less<>>& textAttrs) {
+    Metadata<METADATA_VERSION_2_1>::read_as_text(textAttrs);
+
+    const auto it = textAttrs.find(MetadataTextKeys::BATCH);
+    if (it == textAttrs.end()) {
+        return;
+    }
+    const int64_t batchValue = std::stoll(it->second);
+    _batchSize = batchValue != 0 ? std::optional<int64_t>(batchValue) : std::nullopt;
+}
+
+void Metadata<METADATA_VERSION_2_6>::read_as_text(const std::map<std::string, std::string, std::less<>>& textAttrs) {
+    Metadata<METADATA_VERSION_2_5>::read_as_text(textAttrs);
+
+    const auto it = textAttrs.find(MetadataTextKeys::COMPAT_DESC);
+    if (it == textAttrs.end() || it->second.empty()) {
+        return;
+    }
+
+    const std::string& v = it->second;
+    if (v.size() >= 2 && v.front() == '[' && v.back() == ']') {
+        _compatibilityDescriptor = v.substr(1, v.size() - 2);
+    } else {
+        OPENVINO_THROW("Human-readable metadata: 'desc' value is not bracket-enclosed: ", v);
+    }
+}
+
+void Metadata<METADATA_VERSION_2_0>::write_without_footer(std::ostream& stream) {
+    stream.write(reinterpret_cast<const char*>(&_version), sizeof(_version));
+    _ovVersion.write(stream);
+}
+
+void Metadata<METADATA_VERSION_2_1>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_0>::write_without_footer(stream);
+
+    _numberOfInits = _initSizes.has_value() ? _initSizes->size() : 0;
+    stream.write(reinterpret_cast<const char*>(&_numberOfInits), sizeof(_numberOfInits));
+
+    if (_initSizes.has_value()) {
+        for (uint64_t initSize : _initSizes.value()) {
+            stream.write(reinterpret_cast<const char*>(&initSize), sizeof(initSize));
+        }
+    }
+}
+
+void Metadata<METADATA_VERSION_2_2>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_1>::write_without_footer(stream);
+
+    int64_t batchValue = _batchSize.value_or(0);
+    stream.write(reinterpret_cast<const char*>(&batchValue), sizeof(batchValue));
+}
+
+void Metadata<METADATA_VERSION_2_3>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_2>::write_without_footer(stream);
+
+    const uint64_t numberOfInputLayouts = _inputLayouts.has_value() ? _inputLayouts->size() : 0;
+    const uint64_t numberOfOutputLayouts = _outputLayouts.has_value() ? _outputLayouts->size() : 0;
+    stream.write(reinterpret_cast<const char*>(&numberOfInputLayouts), sizeof(numberOfInputLayouts));
+    stream.write(reinterpret_cast<const char*>(&numberOfOutputLayouts), sizeof(numberOfOutputLayouts));
+
+    const auto writeLayouts = [&](const std::optional<std::vector<ov::Layout>>& layouts) {
+        if (layouts.has_value()) {
+            for (const ov::Layout& layout : layouts.value()) {
+                const std::string layoutString = layout.to_string();
+                const uint16_t stringLength = static_cast<uint16_t>(layoutString.size());
+                stream.write(reinterpret_cast<const char*>(&stringLength), sizeof(stringLength));
+                stream.write(layoutString.c_str(), stringLength);
+            }
+        }
+    };
+
+    writeLayouts(_inputLayouts);
+    writeLayouts(_outputLayouts);
+}
+
+void Metadata<METADATA_VERSION_2_4>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_3>::write_without_footer(stream);
+
+    uint32_t compilerVersion = _compilerVersion.value_or(0);
+    stream.write(reinterpret_cast<const char*>(&compilerVersion), sizeof(compilerVersion));
+}
+
+void Metadata<METADATA_VERSION_2_5>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_4>::write_without_footer(stream);
+
+    const uint8_t isEncryptedBlob = _isEncryptedBlob.value_or(false);
+    stream.write(reinterpret_cast<const char*>(&isEncryptedBlob), sizeof(isEncryptedBlob));
+}
+
+void Metadata<METADATA_VERSION_2_6>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_5>::write_without_footer(stream);
+
+    const std::string& compatDesc = _compatibilityDescriptor.value_or("");
+    const uint64_t compatDesc_len = compatDesc.size();
+    stream.write(reinterpret_cast<const char*>(&compatDesc_len), sizeof(compatDesc_len));
+    if (compatDesc_len > 0) {
+        stream.write(compatDesc.data(), static_cast<std::streamsize>(compatDesc_len));
+    }
+}
+
+void Metadata<METADATA_VERSION_2_7>::write_without_footer(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_6>::write_without_footer(stream);
+
+    const auto blobType = static_cast<uint8_t>(_blobType);
+    stream.write(reinterpret_cast<const char*>(&blobType), sizeof(blobType));
+}
+
+void Metadata<METADATA_VERSION_2_0>::write_as_text(std::ostream& stream) {
+    const uint16_t meta_major = MetadataBase::get_major(_version);
+    const uint16_t meta_minor = MetadataBase::get_minor(_version);
+    write_text_field(stream, MetadataTextKeys::META, std::to_string(meta_major) + "." + std::to_string(meta_minor));
+    write_text_field(stream,
+                     MetadataTextKeys::OV,
+                     std::to_string(OPENVINO_VERSION_MAJOR) + "." + std::to_string(OPENVINO_VERSION_MINOR) + "." +
+                         std::to_string(OPENVINO_VERSION_PATCH));
+}
+
+void Metadata<METADATA_VERSION_2_1>::write_as_text(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_0>::write_as_text(stream);
+
+    if (_initSizes.has_value() && !_initSizes->empty()) {
+        write_text_field(stream, MetadataTextKeys::WS_INITS, "1");
+    }
+}
+
+void Metadata<METADATA_VERSION_2_2>::write_as_text(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_1>::write_as_text(stream);
+
+    if (_batchSize.has_value() && _batchSize.value() != 0) {
+        write_text_field(stream, MetadataTextKeys::BATCH, _batchSize.value());
+    }
+}
+
+void Metadata<METADATA_VERSION_2_6>::write_as_text(std::ostream& stream) {
+    Metadata<METADATA_VERSION_2_5>::write_as_text(stream);
+
+    if (_compatibilityDescriptor.has_value() && !_compatibilityDescriptor->empty()) {
+        std::string desc = _compatibilityDescriptor.value();
+        if (!desc.empty() && desc.back() == '\0') {
+            desc.pop_back();
+        }
+        write_text_field(stream, MetadataTextKeys::COMPAT_DESC, '[' + desc + ']');
+    }
+}
+
+std::unique_ptr<MetadataBase> create_metadata(uint32_t version, uint64_t blobSize) {
+    auto logger = Logger::global().clone("create_metadata");
 
     switch (version) {
     case METADATA_VERSION_2_0:
-        return std::make_unique<Metadata<METADATA_VERSION_2_0>>(blobSize, std::nullopt);
-
+        logger.debug("Creating a metadata object of version 2.0");
+        return std::make_unique<Metadata<METADATA_VERSION_2_0>>(blobSize);
+    case METADATA_VERSION_2_1:
+        logger.debug("Creating a metadata object of version 2.1");
+        return std::make_unique<Metadata<METADATA_VERSION_2_1>>(blobSize);
+    case METADATA_VERSION_2_2:
+        logger.debug("Creating a metadata object of version 2.2");
+        return std::make_unique<Metadata<METADATA_VERSION_2_2>>(blobSize);
+    case METADATA_VERSION_2_3:
+        logger.debug("Creating a metadata object of version 2.3");
+        return std::make_unique<Metadata<METADATA_VERSION_2_3>>(blobSize);
+    case METADATA_VERSION_2_4:
+        logger.debug("Creating a metadata object of version 2.4");
+        return std::make_unique<Metadata<METADATA_VERSION_2_4>>(blobSize);
+    case METADATA_VERSION_2_5:
+        logger.debug("Creating a metadata object of version 2.5");
+        return std::make_unique<Metadata<METADATA_VERSION_2_5>>(blobSize);
+    case METADATA_VERSION_2_6:
+        logger.debug("Creating a metadata object of version 2.6");
+        return std::make_unique<Metadata<METADATA_VERSION_2_6>>(blobSize);
+    case METADATA_VERSION_2_7:
+        logger.debug("Creating a metadata object of version 2.7");
+        return std::make_unique<Metadata<METADATA_VERSION_2_7>>(blobSize);
     default:
-        OPENVINO_THROW("Metadata version is not supported!");
-    }
-}
-
-bool Metadata<METADATA_VERSION_2_0>::is_compatible() {
-    auto logger = Logger::global().clone("NPUBlobMetadata");
-    // checking if we can import the blob
-    if (_ovVersion != CURRENT_OPENVINO_VERSION) {
-        logger.error("Imported blob OpenVINO version: %d.%d.%d, but the current OpenVINO version is: %d.%d.%d",
-                     _ovVersion.get_major(),
-                     _ovVersion.get_minor(),
-                     _ovVersion.get_patch(),
-                     OPENVINO_VERSION_MAJOR,
-                     OPENVINO_VERSION_MINOR,
-                     OPENVINO_VERSION_PATCH);
-        return false;
-    }
-    return true;
-}
-
-std::streampos MetadataBase::getFileSize(std::istream& stream) {
-    auto log = intel_npu::Logger::global().clone("getFileSize");
-    if (!stream) {
-        OPENVINO_THROW("Stream is in bad status! Please check the passed stream status!");
-    }
-
-    if (dynamic_cast<ov::SharedStreamBuffer*>(stream.rdbuf()) != nullptr) {
-        return stream.rdbuf()->in_avail();
-    }
-    const std::streampos streamStart = stream.tellg();
-    stream.seekg(0, std::ios_base::end);
-    const std::streampos streamEnd = stream.tellg();
-    stream.seekg(streamStart, std::ios_base::beg);
-
-    log.debug("Read blob size: streamStart=%zu, streamEnd=%zu", streamStart, streamEnd);
-
-    if (streamEnd < streamStart) {
-        OPENVINO_THROW("Invalid stream size: streamEnd (",
-                       streamEnd,
-                       ") is not larger than streamStart (",
-                       streamStart,
-                       ")!");
-    }
-
-    return streamEnd - streamStart;
-}
-
-std::unique_ptr<MetadataBase> read_metadata_from(std::istream& stream) {
-    size_t magicBytesSize = MAGIC_BYTES.size();
-    std::string blobMagicBytes;
-    blobMagicBytes.resize(magicBytesSize);
-
-    std::streampos currentStreamPos = stream.tellg(), streamSize = MetadataBase::getFileSize(stream);
-    stream.seekg(streamSize - std::streampos(magicBytesSize), std::ios::cur);
-    stream.read(blobMagicBytes.data(), magicBytesSize);
-    if (MAGIC_BYTES != blobMagicBytes) {
-        OPENVINO_THROW("Blob is missing NPU metadata!");
-    }
-
-    uint64_t blobDataSize;
-    stream.seekg(-std::streampos(magicBytesSize) - sizeof(blobDataSize), std::ios::cur);
-    stream.read(reinterpret_cast<char*>(&blobDataSize), sizeof(blobDataSize));
-    stream.seekg(-stream.tellg() + currentStreamPos + blobDataSize, std::ios::cur);
-
-    uint32_t metaVersion;
-    stream.read(reinterpret_cast<char*>(&metaVersion), sizeof(metaVersion));
-
-    std::unique_ptr<MetadataBase> storedMeta;
-    try {
-        storedMeta = create_metadata(metaVersion, blobDataSize);
-        storedMeta->read(stream);
-    } catch (const std::exception& ex) {
-        OPENVINO_THROW(ex.what(),
-                       "Imported blob metadata version: ",
-                       MetadataBase::get_major(metaVersion),
+        OPENVINO_THROW("Metadata version is not supported! Imported blob metadata version: ",
+                       MetadataBase::get_major(version),
                        ".",
-                       MetadataBase::get_minor(metaVersion),
+                       MetadataBase::get_minor(version),
                        " but the current version is: ",
                        CURRENT_METADATA_MAJOR_VERSION,
                        ".",
                        CURRENT_METADATA_MINOR_VERSION);
+    }
+}
+
+std::unique_ptr<MetadataBase> read_metadata_from(BlobSource& source) {
+    const size_t startingPosition = source.tellg();
+    const size_t npuBlobSize = source.get_remaining_size();
+
+    OPENVINO_ASSERT(npuBlobSize >= MINIMUM_BLOB_SIZE, BLOB_TOO_SMALL_MESSAGE, npuBlobSize);
+
+    std::string blobMagicBytes(MAGIC_BYTES.size(), 0);
+    source.seekg(-static_cast<int>(MAGIC_BYTES.size()), std::ios::end);
+    source.read_into_buffer(blobMagicBytes.data(), MAGIC_BYTES.size());
+    OPENVINO_ASSERT(MAGIC_BYTES == blobMagicBytes, MISSING_METADATA_MESSAGE);
+
+    uint64_t payloadSize;
+    source.seekg(-static_cast<int>(MAGIC_BYTES.size()) - static_cast<int>(sizeof(payloadSize)), std::ios::end);
+    source.read_into_buffer(&payloadSize, sizeof(payloadSize));
+
+    // Subtraction form avoids integer overflow when payloadSize is near UINT64_MAX.
+    OPENVINO_ASSERT(payloadSize <= npuBlobSize - MINIMUM_BLOB_SIZE, INVALID_PAYLOAD_SIZE_MESSAGE, payloadSize);
+
+    uint32_t metaVersion;
+    source.seekg(startingPosition + payloadSize, std::ios::beg);
+    source.read_into_buffer(&metaVersion, sizeof(metaVersion));
+
+    std::unique_ptr<MetadataBase> storedMeta;
+    try {
+        storedMeta = create_metadata(metaVersion, payloadSize);
+        storedMeta->read(source);
+    } catch (const std::exception& ex) {
+        OPENVINO_THROW("Can't read NPU metadata: ", ex.what());
     } catch (...) {
         OPENVINO_THROW("Unexpected exception while reading blob NPU metadata");
     }
-    stream.seekg(-stream.tellg() + currentStreamPos, std::ios::cur);
+
+    source.seekg(startingPosition, std::ios::beg);
 
     return storedMeta;
 }
 
-uint64_t Metadata<METADATA_VERSION_2_0>::get_blob_size() const {
-    return _blobDataSize;
+std::unique_ptr<MetadataBase> read_as_text(std::string_view input) {
+    std::string versionStr;
+    compat::Parser::attr_map_type attrs;
+    try {
+        compat::Parser parser(input, metadataTextAttributes);
+        versionStr = parser.getAttribute(std::string(MetadataTextKeys::META));
+        attrs = parser.getAttributes();
+    } catch (const std::exception& ex) {
+        OPENVINO_THROW("NPU compatibility string is malformed: ", ex.what());
+    }
+
+    const auto metaParts = parse_version(versionStr);
+    if (metaParts.size() != 2) {
+        OPENVINO_THROW("NPU compatibility string is malformed: 'meta' must be in MAJOR.MINOR format: ", versionStr);
+    }
+    const uint32_t metaVersion = MetadataBase::make_version(metaParts[0], metaParts[1]);
+
+    std::unique_ptr<MetadataBase> storedMeta;
+    try {
+        storedMeta = create_metadata(metaVersion, 0);
+        storedMeta->read_as_text(attrs);
+    } catch (const std::exception& ex) {
+        OPENVINO_THROW("Can't read NPU human-readable metadata: ", ex.what());
+    } catch (...) {
+        OPENVINO_THROW("Unexpected exception while reading NPU human-readable metadata");
+    }
+
+    return storedMeta;
+}
+
+uint64_t MetadataBase::get_compiler_payload_size() const {
+    return _compilerPayloadSize;
+}
+
+uint64_t MetadataBase::get_main_schedule_size() const {
+    uint64_t accumulator = 0;
+    const auto initSizes = get_init_sizes();
+    return initSizes.has_value()
+               ? get_compiler_payload_size() - std::accumulate(initSizes->begin(), initSizes->end(), accumulator)
+               : get_compiler_payload_size();
+}
+
+std::optional<std::vector<uint64_t>> MetadataBase::get_init_sizes() const {
+    return std::nullopt;
+}
+
+std::optional<int64_t> MetadataBase::get_batch_size() const {
+    return std::nullopt;
+}
+
+std::optional<std::vector<ov::Layout>> MetadataBase::get_input_layouts() const {
+    return std::nullopt;
+}
+
+std::optional<std::vector<ov::Layout>> MetadataBase::get_output_layouts() const {
+    return std::nullopt;
+}
+
+std::optional<uint32_t> MetadataBase::get_compiler_version() const {
+    return std::nullopt;
+}
+
+std::optional<bool> MetadataBase::is_encrypted_blob() const {
+    return std::nullopt;
+}
+
+std::optional<std::string_view> MetadataBase::get_compatibility_descriptor() const {
+    return std::nullopt;
+}
+
+std::optional<std::vector<uint64_t>> Metadata<METADATA_VERSION_2_1>::get_init_sizes() const {
+    return _initSizes;
+}
+
+std::optional<int64_t> Metadata<METADATA_VERSION_2_2>::get_batch_size() const {
+    return _batchSize;
+}
+
+std::optional<std::vector<ov::Layout>> Metadata<METADATA_VERSION_2_3>::get_input_layouts() const {
+    return _inputLayouts;
+}
+
+std::optional<std::vector<ov::Layout>> Metadata<METADATA_VERSION_2_3>::get_output_layouts() const {
+    return _outputLayouts;
+}
+
+std::optional<uint32_t> Metadata<METADATA_VERSION_2_4>::get_compiler_version() const {
+    return _compilerVersion;
+}
+
+std::optional<bool> Metadata<METADATA_VERSION_2_5>::is_encrypted_blob() const {
+    return _isEncryptedBlob;
+}
+
+std::optional<std::string_view> Metadata<METADATA_VERSION_2_6>::get_compatibility_descriptor() const {
+    return _compatibilityDescriptor;
 }
 
 }  // namespace intel_npu

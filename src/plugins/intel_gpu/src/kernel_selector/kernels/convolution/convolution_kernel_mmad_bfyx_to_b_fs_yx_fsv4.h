@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ class ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv4 : public ConvolutionKernelBase
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv4() : ConvolutionKernelBase("convolution_gpu_mmad_bfyx_to_b_fs_yx_fsv4") {}
-    virtual ~ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv4() {}
+    ~ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv4() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsData GetKernelsDataForAutoTune(const Params& params) const override;
@@ -44,6 +44,6 @@ private:
     };
 
     AutoTuneOption GetAutoTuneOptions(const Params& arg, int autoTuneIndex) const;
-    std::vector<AutoTuneOption> autoTuneOptions = {};
+    std::vector<AutoTuneOption> autoTuneOptions;
 };
 }  // namespace kernel_selector

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ class LRNKernelAcrossChannel_b8 : public LRNKernelBase {
 public:
     using Parent = LRNKernelBase;
     LRNKernelAcrossChannel_b8() : LRNKernelBase("lrn_gpu_across_channel_yxfb_b8_opt") {}
-    virtual ~LRNKernelAcrossChannel_b8() {}
+    ~LRNKernelAcrossChannel_b8() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

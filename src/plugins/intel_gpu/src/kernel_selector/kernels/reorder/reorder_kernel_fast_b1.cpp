@@ -1,16 +1,20 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "reorder_kernel_fast_b1.h"
 #include "kernel_selector_utils.h"
 
+#include <limits>
+
 namespace kernel_selector {
 ParamsKey ReorderKernelFastBatch1::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableDifferentTypes();
 
@@ -44,16 +48,18 @@ ParamsKey ReorderKernelFastBatch1::GetSupportedKey() const {
 
 bool ReorderKernelFastBatch1::Validate(const Params& p) const {
     if (!ReorderKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const reorder_params& params = static_cast<const reorder_params&>(p);
 
-    if (params.outputs[0].GetLayout() == DataLayout::fs_b_yx_fsv32)
-        return false;
+    if (params.outputs[0].GetLayout() == DataLayout::fs_b_yx_fsv32) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (params.inputs[0].GetLayout() == DataLayout::fs_b_yx_fsv32)
-        return false;
+    if (params.inputs[0].GetLayout() == DataLayout::fs_b_yx_fsv32) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }
@@ -66,9 +72,9 @@ JitConstants ReorderKernelFastBatch1::GetJitConstants(const reorder_params& para
     reorder_params& newParams = *static_cast<reorder_params*>(kd.params.get());
 
     const auto& input = newParams.inputs[0];
-    jit.AddConstant(MakeJitConstant("ELEMENTS_COUNT", input.LogicalSize()));
-
     const auto& output = newParams.outputs[0];
+
+    jit.AddConstant(MakeJitConstant("ELEMENTS_COUNT", input.LogicalSize()));
 
     if (input.GetLayout() == output.GetLayout() && input.SameDimsSizes(output) &&
         !input.PitchesDifferFromLogicalDims() && !output.PitchesDifferFromLogicalDims() &&
@@ -85,9 +91,13 @@ ReorderKernelFastBatch1::DispatchData ReorderKernelFastBatch1::SetDefault(const 
 
     const auto& output = params.outputs[0];
 
-    unsigned int gws = (unsigned int)output.LogicalSize();
+    size_t gws = output.LogicalSize();
 
-    dispatchData.gws[0] = Align(gws, 32);
+    OPENVINO_ASSERT(gws <= static_cast<size_t>(std::numeric_limits<unsigned int>::max()),
+                    "[GPU] reorder_data_fast_b1 global work size exceeds 32-bit index range: ",
+                    gws);
+
+    dispatchData.gws[0] = Align(gws, size_t{32});
     dispatchData.gws[1] = 1;
     dispatchData.gws[2] = 1;
 

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,9 +18,7 @@ class NodeDef;
 class AttrValue;
 }  // namespace tensorflow
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
+namespace ov::frontend::tensorflow {
 
 void parse_producer_name(const std::string& producer_port_name,
                          std::string& producer_name,
@@ -65,6 +63,4 @@ private:
     // both GraphDef and FunctionDef objects must be alive in the memory
     const std::shared_ptr<::tensorflow::FunctionDef> m_func_def;
 };
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow

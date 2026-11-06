@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -88,7 +88,6 @@ public:
                                                   inputShapes.first,
                                                   inputShapes.second,
                                                   testValues.broadcast,
-                                                  TestTransformationParams::toParams(testValues.params),
                                                   testValues.actual.precision1,
                                                   testValues.actual.dequantization1,
                                                   testValues.actual.precision2,
@@ -112,7 +111,6 @@ public:
                                                       inputShape1Ref,
                                                       inputShape2Ref,
                                                       testValues.broadcast,
-                                                      TestTransformationParams::toParams(testValues.params),
                                                       testValues.expected.precision1,
                                                       testValues.expected.dequantization1,
                                                       testValues.expected.precision2,

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -19,8 +19,9 @@ static void CreateGatherElementsOp(ProgramBuilder& p, const std::shared_ptr<ov::
 
     size_t rank = op->get_input_partial_shape(0).size();
     int64_t axis = op->get_axis();
-    if (axis < 0)
+    if (axis < 0) {
         axis += rank;
+    }
     OPENVINO_ASSERT(axis >= 0 && axis < static_cast<int64_t>(rank),
                     "GatherElements axis is not correspond to number of dimensions");
 

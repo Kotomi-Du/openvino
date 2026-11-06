@@ -1,9 +1,10 @@
-# Copyright (C) 2024 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
 import os
-import subprocess
+# Docker/CLI orchestration in CI; commands are constructed by trusted workflow code.
+import subprocess  # nosec B404
 from ghapi.all import GhApi
 from pathlib import Path
 

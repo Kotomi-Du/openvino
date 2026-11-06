@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -34,6 +34,17 @@ install(DIRECTORY ${OpenVINOBenchmarkTool_SOURCE_DIR}/openvino
         COMPONENT ${OV_CPACK_COMP_BENCHMARK_APP}
         ${OV_CPACK_COMP_BENCHMARK_APP_EXCLUDE_ALL}
         USE_SOURCE_PERMISSIONS)
+
+#
+# Tests
+#
+
+if(ENABLE_TESTS)
+    install(DIRECTORY unit_tests
+            DESTINATION tests/benchmark_tool
+            COMPONENT tests
+            EXCLUDE_FROM_ALL)
+endif()
 
 #
 # Cpack

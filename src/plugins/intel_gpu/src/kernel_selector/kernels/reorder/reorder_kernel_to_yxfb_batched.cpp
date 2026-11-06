@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,8 +9,10 @@ namespace kernel_selector {
 ParamsKey ReorderKernel_to_yxfb_batched::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableDifferentTypes();
     k.EnableAllInputLayout();
@@ -31,11 +33,12 @@ DeviceFeaturesKey ReorderKernel_to_yxfb_batched::get_required_device_features_ke
 
 bool ReorderKernel_to_yxfb_batched::Validate(const Params& params) const {
     if (!ReorderKernelBase::Validate(params)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
-    if (!IsSIMDSizeSupported(params.engineInfo, 8))
-        return false;
+    if (!IsSIMDSizeSupported(params.engineInfo, 8)) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
 
     const reorder_params& r_params = static_cast<const reorder_params&>(params);
 
@@ -43,12 +46,13 @@ bool ReorderKernel_to_yxfb_batched::Validate(const Params& params) const {
     // output cannot have padding for this implementation
     if (output.X().pad.Total() != 0 || output.Y().pad.Total() != 0 || output.Feature().pad.Total() != 0 ||
         output.Batch().pad.Total() != 0) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     if ((r_params.inputs[0].GetLayout() == DataLayout::b_fs_zyx_fsv16 || r_params.inputs[0].GetLayout() == DataLayout::bs_fs_zyx_bsv16_fsv16) &&
-        r_params.inputs[0].Z().v != 1)
-        return false;
+        r_params.inputs[0].Z().v != 1) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
 
     return true;
 }

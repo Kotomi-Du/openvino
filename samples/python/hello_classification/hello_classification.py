@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import logging as log
@@ -43,6 +43,9 @@ def main():
 # --------------------------- Step 3. Set up input --------------------------------------------------------------------
     # Read input image
     image = cv2.imread(image_path)
+    if image is None:
+        log.error(f'Failed to read the image: {image_path}')
+        return -1
     # Add N dimension
     input_tensor = np.expand_dims(image, 0)
 

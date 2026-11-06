@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -82,7 +82,7 @@ void test_d2411_axisF(bool is_caching_test) {
     auto outputs = network->execute();
 
     auto output = outputs.at("scatter_elements_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<T> expected_results = {
         10.f, 11.f, 5.f, 4.f,
@@ -101,6 +101,8 @@ TEST(scatter_elements_update_gpu_fp16, d2411_axisF) {
 namespace {
 template<typename T, typename T_IND>
 struct ScatterElementsUpdateParams {
+    // Axis follows the logical (ov::Shape) order of the plain format, i.e. bfyx / bfzyx / bfwzyx,
+    // not the cldnn tensor argument order (b, f, x, y, z, w). So for bfzyx axis 2 is z and axis 4 is x.
     int64_t axis;
     tensor data_tensor;
     std::vector<T> data;
@@ -199,7 +201,7 @@ std::vector<ScatterElementsUpdateParams<T, T_IND>> generateScatterElementsUpdate
             getValues<T_IND>({ 0, 3, 1, 2 }),
             getValues<T>({ -100, -110, -120, -130 }),
         },
-        {   4,
+        {   2,  // bfzyx axis 2 is z, the only dimension the indices tensor reduces (3 -> 2)
             tensor{2, 4, 1, 1, 3},
             getValues<T>({ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 }),
             tensor{2, 1, 1, 1, 2},
@@ -222,12 +224,14 @@ std::vector<ScatterElementsUpdateParams<T, T_IND>> generateScatterElementsUpdate
 template<typename T, typename T_IND>
 std::vector<ScatterElementsUpdateParams<T, T_IND>> generateScatterElementsUpdateParams4D() {
     const std::vector<ScatterElementsUpdateParams<T, T_IND>> result = {
-        {   5,
+        {   2,  // bfwzyx axis 2 is w, whose size 3 is what the index values (max 2) address
             tensor{2, 4, 2, 1, 1, 3},
             getValues<T>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
                           24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47}),
             tensor{2, 1, 1, 1, 1, 2},
-            getValues<T_IND>({2, 1, 1, 1}),
+            // distinct per batch: duplicates would make the NONE reduction order-dependent,
+            // and the GPU scatters in parallel while the reference writes sequentially
+            getValues<T_IND>({2, 1, 1, 0}),
             getValues<T>({-100, -110, -120, -130}),
         },
         {
@@ -262,12 +266,8 @@ struct PrintToStringParamName {
     template<typename T, typename T_IND>
     std::string operator()(const testing::TestParamInfo<ScatterElementsUpdateParamsWithFormat<T, T_IND> > &param) {
         std::stringstream buf;
-        ScatterElementsUpdateParams<T, T_IND> p;
-        format::type plain_format;
-        format::type target_data_format;
-        format::type target_indices_format;
-        format::type target_updates_format;
-        std::tie(p, plain_format, target_data_format, target_indices_format, target_updates_format) = param.param;
+
+        const auto& [p, plain_format, target_data_format, target_indices_format, target_updates_format] = param.param;
         buf << "_axis=" << p.axis
             << "_data=" << p.data_tensor.to_string()
             << "_indices=" << p.indices_tensor.to_string()
@@ -281,11 +281,8 @@ struct PrintToStringParamName {
     template<typename T, typename T_IND>
     std::string operator()(const testing::TestParamInfo<ScatterElementsUpdateReduceParamsWithFormat<T, T_IND> > &param) {
         std::stringstream buf;
-        ScatterElementsUpdateParams<T, T_IND> p;
-        ScatterElementsUpdateOp::Reduction mode;
-        bool use_init_value;
-        format::type plain_format;
-        std::tie(p, mode, use_init_value, plain_format) = param.param;
+
+        const auto& [p, mode, use_init_value, plain_format] = param.param;
         using ov::op::operator<<;
         buf << "_axis=" << p.axis
             << "_mode=" << mode
@@ -305,13 +302,10 @@ public:
     void test(bool is_caching_test) {
         const auto data_type = ov::element::from<T>();
         const auto indices_type = ov::element::from<T_IND>();
-        ScatterElementsUpdateParams<T, T_IND> params;
-        format::type plain_format;
-        format::type target_data_format;
-        format::type target_indices_format;
-        format::type target_updates_format;
 
-        std::tie(params, plain_format, target_data_format, target_indices_format, target_updates_format) = this->GetParam();
+        const auto& [params, plain_format, target_data_format, _target_indices_format, _target_updates_format] = this->GetParam();
+        auto target_indices_format = _target_indices_format;
+        auto target_updates_format = _target_updates_format;
         auto expected = generateReferenceOutput(plain_format, params, ov::op::v12::ScatterElementsUpdate::Reduction::NONE, false);
         if (target_indices_format == format::any) {
             target_indices_format = target_data_format;
@@ -350,7 +344,7 @@ public:
 
         const auto outputs = network->execute();
         const auto output = outputs.at("ScatterEelementsUpdatePlain").get_memory();
-        const cldnn::mem_lock<T> output_ptr(output, get_test_stream());
+        const cldnn::mem_lock<T, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(params.data.size(), output_ptr.size());
         ASSERT_EQ(expected.size(), output_ptr.size());
@@ -367,11 +361,11 @@ private:
             vec[i] = t.sizes()[i];
         }
         std::reverse(vec.begin() + 2, vec.end());
-    
+
         return ov::Shape(vec.begin(), vec.end());
     }
-    
-    
+
+
     static std::vector<T> generateReferenceOutput(const format fmt,
                                                   const ScatterElementsUpdateParams<T, T_IND>& p,
                                                   const ScatterElementsUpdateOp::Reduction mode,
@@ -379,7 +373,7 @@ private:
         std::vector<T> out(p.data_tensor.count());
         const auto data_shape = tensorToShape(p.data_tensor, fmt);
         const auto indices_shape = tensorToShape(p.indices_tensor, fmt);
-                                                
+
         ov::reference::scatter_elem_update<T, T_IND>(p.data.data(),
                                                      p.indices.data(),
                                                      p.updates.data(),
@@ -404,11 +398,8 @@ public:
     void test(bool is_caching_test) {
         const auto data_type = ov::element::from<T>();
         const auto indices_type = ov::element::from<T_IND>();
-        ScatterElementsUpdateParams<T, T_IND> params;
-        format::type plain_format;
-        ScatterElementsUpdateOp::Reduction mode;
-        bool use_init_value;
-        std::tie(params, mode, use_init_value, plain_format) = this->GetParam();
+
+        const auto& [params, mode, use_init_value, plain_format] = this->GetParam();
         auto expected = generateReferenceOutput(plain_format, params, mode, use_init_value);
 
         auto& engine = get_test_engine();
@@ -441,7 +432,7 @@ public:
 
         const auto outputs = network->execute();
         const auto output = outputs.at("ScatterElementsUpdate").get_memory();
-        const cldnn::mem_lock<T> output_ptr(output, get_test_stream());
+        const cldnn::mem_lock<T, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         ASSERT_EQ(params.data.size(), output_ptr.size());
         ASSERT_EQ(expected.size(), output_ptr.size());
@@ -561,8 +552,13 @@ INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_formats_test_mixed_inputs,
                          ),
                          PrintToStringParamName());
 
+using scatter_elements_update_gpu_reduction_test_f16 = scatter_elements_update_gpu_reduction_test<ov::float16, int32_t>;
 using scatter_elements_update_gpu_reduction_test_f32 = scatter_elements_update_gpu_reduction_test<float, int32_t>;
 using scatter_elements_update_gpu_reduction_test_i32 = scatter_elements_update_gpu_reduction_test<int32_t, int32_t>;
+
+TEST_P(scatter_elements_update_gpu_reduction_test_f16, basic) {
+    ASSERT_NO_FATAL_FAILURE(test(false));
+}
 
 TEST_P(scatter_elements_update_gpu_reduction_test_f32, basic) {
     ASSERT_NO_FATAL_FAILURE(test(false));
@@ -576,10 +572,19 @@ const std::vector<ov::op::v12::ScatterElementsUpdate::Reduction> reduce_modes{
     ov::op::v12::ScatterElementsUpdate::Reduction::SUM,
     ov::op::v12::ScatterElementsUpdate::Reduction::PROD,
     ov::op::v12::ScatterElementsUpdate::Reduction::MIN,
-    // MAX mode omitted intentionally - see dedicated MAX tests below 
+    // MAX mode omitted intentionally - see dedicated MAX tests below
     ov::op::v12::ScatterElementsUpdate::Reduction::MEAN
 };
 
+INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_f16_2d,
+                         scatter_elements_update_gpu_reduction_test_f16,
+                         ::testing::Combine(
+                                 ::testing::ValuesIn(generateScatterElementsUpdateParams2D<ov::float16, int32_t>()),
+                                 ::testing::ValuesIn(reduce_modes),
+                                 ::testing::ValuesIn({true, false}),
+                                 ::testing::Values(format::bfyx)
+                         ),
+                         PrintToStringParamName());
 
 INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_f32_2d,
                          scatter_elements_update_gpu_reduction_test_f32,
@@ -601,6 +606,16 @@ INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_i32_2d,
                          ),
                          PrintToStringParamName());
 
+INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_f16_3d,
+                         scatter_elements_update_gpu_reduction_test_f16,
+                         ::testing::Combine(
+                                 ::testing::ValuesIn(generateScatterElementsUpdateParams3D<ov::float16, int32_t>()),
+                                 ::testing::ValuesIn(reduce_modes),
+                                 ::testing::ValuesIn({true, false}),
+                                 ::testing::Values(format::bfzyx)
+                         ),
+                         PrintToStringParamName());
+
 INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_f32_3d,
                          scatter_elements_update_gpu_reduction_test_f32,
                          ::testing::Combine(
@@ -608,6 +623,16 @@ INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_f32_3d,
                                  ::testing::ValuesIn(reduce_modes),
                                  ::testing::ValuesIn({true, false}),
                                  ::testing::Values(format::bfzyx)
+                         ),
+                         PrintToStringParamName());
+
+INSTANTIATE_TEST_SUITE_P(scatter_elements_update_gpu_reduction_test_f16_4d,
+                         scatter_elements_update_gpu_reduction_test_f16,
+                         ::testing::Combine(
+                                 ::testing::ValuesIn(generateScatterElementsUpdateParams4D<ov::float16, int32_t>()),
+                                 ::testing::ValuesIn(reduce_modes),
+                                 ::testing::ValuesIn({true, false}),
+                                 ::testing::Values(format::bfwzyx)
                          ),
                          PrintToStringParamName());
 
@@ -683,7 +708,7 @@ TEST(scatter_elements_update_gpu_fp32, smoke_multiple_indices_mean_big_1d_dynami
     auto input1 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{num, 1, 1, 1 } }); // input
     auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, tensor{num, 1, 1, 1 } });  // indices
     auto input3 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{num, 1, 1, 1 } });  // updates
-    
+
     std::vector<float> data(num, 0);
     std::vector<int32_t> indices(num, 0);
     std::vector<float> updates(num, 0);
@@ -719,11 +744,145 @@ TEST(scatter_elements_update_gpu_fp32, smoke_multiple_indices_mean_big_1d_dynami
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_elements_update").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
-   std::vector<float> expected_results(num, 0);
-   expected_results.front() = 1;
+    std::vector<float> expected_results(num, 0);
+    expected_results.front() = 1;
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], output_ptr[i]);
     }
+}
+
+TEST(scatter_elements_update_gpu_fp32, smoke_multiple_indices_sum_big_1d_dynamic) {
+    auto& engine = get_test_engine();
+    int32_t num = 10000;
+    auto input1 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{num, 1, 1, 1 } }); // input
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, tensor{num, 1, 1, 1 } }); // indices
+    auto input3 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{num, 1, 1, 1 } }); // updates
+
+    std::vector<float> data(num, 0);
+    std::vector<int32_t> indices(num, 0);
+    std::vector<float> updates(num, 0);
+
+    const std::vector<int32_t> target_update_positions = { 0, 100, 200, 1000, 5000, 6000, 6001 };
+    for (auto pos : target_update_positions) {
+        updates[pos] = num;
+        indices[pos] = pos;
+    }
+
+    int32_t axis = 0;
+    ScatterElementsUpdateOp::Reduction mode = ov::op::v12::ScatterElementsUpdate::Reduction::SUM;
+    bool use_init_value = true;
+
+    set_values(input1, data);
+    set_values(input2, indices);
+    set_values(input3, updates);
+
+    topology topology;
+    topology.add(input_layout("input", { ov::PartialShape{ ov::Dimension(-1) }, data_types::f32, format::bfyx }));
+    topology.add(input_layout("indices", { ov::PartialShape{ ov::Dimension(-1) }, data_types::i32, format::bfyx }));
+    topology.add(input_layout("updates", { ov::PartialShape{ ov::Dimension(-1) }, data_types::f32, format::bfyx }));
+    topology.add(
+        scatter_elements_update(
+            "scatter_elements_update",
+            input_info("input"),
+            input_info("indices"),
+            input_info("updates"),
+            axis,
+            mode,
+            use_init_value));
+
+    network network(engine, topology, get_test_default_config(engine));
+
+    network.set_input_data("input", input1);
+    network.set_input_data("indices", input2);
+    network.set_input_data("updates", input3);
+
+    auto outputs = network.execute();
+
+    auto output = outputs.at("scatter_elements_update").get_memory();
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
+
+    std::vector<float> expected_results(num, 0);
+    for (auto pos : target_update_positions) {
+        expected_results[pos] = num;
+    }
+
+    for (size_t i = 0; i < expected_results.size(); ++i) {
+        ASSERT_EQ(expected_results[i], output_ptr[i]);
+    }
+}
+
+TEST(scatter_elements_update_gpu_fp32, smoke_sum_large_values_overflow_guard) {
+    // Verifies that f32 SUM with update values >> 32768 (= INT32_MAX / FP_SCALE)
+    // does not overflow the fixed-point accumulator.
+    // Before the CAS fix: val * 65536 > INT32_MAX → convert_int_rte() UB → result ~0.
+    auto& engine = get_test_engine();
+    const int32_t num = 1;
+    auto input1 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{num, 1, 1, 1} });
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, tensor{3,  1, 1, 1} });
+    auto input3 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{3,  1, 1, 1} });
+
+    // Each update value is 1e7 (>> 32768), all scattered to index 0.
+    // Expected: output[0] = 0.0 (init) + 1e7 + 1e7 + 1e7 = 3e7
+    set_values(input1, std::vector<float>{0.0f});
+    set_values(input2, std::vector<int32_t>{0, 0, 0});
+    set_values(input3, std::vector<float>{1e7f, 1e7f, 1e7f});
+
+    topology topology;
+    topology.add(input_layout("input",   input1->get_layout()));
+    topology.add(input_layout("indices", input2->get_layout()));
+    topology.add(input_layout("updates", input3->get_layout()));
+    topology.add(scatter_elements_update("scatter_elements_update",
+                                         input_info("input"),
+                                         input_info("indices"),
+                                         input_info("updates"),
+                                         0,
+                                         ScatterElementsUpdateOp::Reduction::SUM,
+                                         true));
+
+    network network(engine, topology, get_test_default_config(engine));
+    network.set_input_data("input",   input1);
+    network.set_input_data("indices", input2);
+    network.set_input_data("updates", input3);
+    auto outputs = network.execute();
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(
+        outputs.at("scatter_elements_update").get_memory(), get_test_stream());
+
+    ASSERT_NEAR(output_ptr[0], 3e7f, 1.0f);  // must not be ~0 or inf
+}
+
+TEST(scatter_elements_update_gpu_fp32, smoke_sum_large_values_overflow_guard_dynamic) {
+    // Same overflow guard as above but with dynamic (shape-agnostic) shapes,
+    // which dispatch a different kernel path than static shapes.
+    auto& engine = get_test_engine();
+    auto input1 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{1, 1, 1, 1} });
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, tensor{3, 1, 1, 1} });
+    auto input3 = engine.allocate_memory({ data_types::f32, format::bfyx, tensor{3, 1, 1, 1} });
+
+    set_values(input1, std::vector<float>{0.0f});
+    set_values(input2, std::vector<int32_t>{0, 0, 0});
+    set_values(input3, std::vector<float>{1e7f, 1e7f, 1e7f});
+
+    topology topology;
+    topology.add(input_layout("input",   { ov::PartialShape{ ov::Dimension(-1) }, data_types::f32, format::bfyx }));
+    topology.add(input_layout("indices", { ov::PartialShape{ ov::Dimension(-1) }, data_types::i32, format::bfyx }));
+    topology.add(input_layout("updates", { ov::PartialShape{ ov::Dimension(-1) }, data_types::f32, format::bfyx }));
+    topology.add(scatter_elements_update("scatter_elements_update",
+                                         input_info("input"),
+                                         input_info("indices"),
+                                         input_info("updates"),
+                                         0,
+                                         ScatterElementsUpdateOp::Reduction::SUM,
+                                         true));
+
+    network network(engine, topology, get_test_default_config(engine));
+    network.set_input_data("input",   input1);
+    network.set_input_data("indices", input2);
+    network.set_input_data("updates", input3);
+    auto outputs = network.execute();
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(
+        outputs.at("scatter_elements_update").get_memory(), get_test_stream());
+
+    ASSERT_NEAR(output_ptr[0], 3e7f, 1.0f);
 }

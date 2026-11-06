@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -31,12 +31,7 @@ class ReduceLayerGPUTest : public testing::WithParamInterface<ReduceLayerTestPar
                            virtual public ov::test::SubgraphBaseTest {
 public:
     static std::string getTestCaseName(const testing::TestParamInfo<ReduceLayerTestParamSet>& obj) {
-        ReduceInput input_data;
-        ov::element::Type netType;
-        ov::test::utils::ReductionType reductionType;
-        bool keepDims;
-        std::string targetDevice;
-        std::tie(input_data, netType, reductionType, keepDims, targetDevice) = obj.param;
+        const auto& [input_data, netType, reductionType, keepDims, targetDevice] = obj.param;
 
         std::vector<InputShape> inshapes = input_data.data_shape;
         std::vector<int> axes = input_data.axes;
@@ -66,11 +61,8 @@ public:
 
 protected:
     void SetUp() override {
-        ReduceInput input_data;
-        ov::element::Type netPrecision;
-        ov::test::utils::ReductionType reductionType;
-        bool keepDims;
-        std::tie(input_data, netPrecision, reductionType, keepDims, targetDevice) = this->GetParam();
+        const auto& [input_data, netPrecision, reductionType, keepDims, _targetDevice] = this->GetParam();
+        targetDevice = _targetDevice;
 
         std::vector<InputShape> inputShapes = input_data.data_shape;
         std::vector<int> axes = input_data.axes;
@@ -212,14 +204,14 @@ const auto reduceMean = ::testing::Combine(
 );
 INSTANTIATE_TEST_SUITE_P(smoke_reduce_mean_compareWithRefs_dynamic, ReduceLayerGPUTest, reduceMean, ReduceLayerGPUTest::getTestCaseName);
 
-const auto reduceProd = ::testing::Combine(
-        ::testing::ValuesIn({dyn2d, dyn4d}),
-        ::testing::ValuesIn({ov::element::f32}),
-        ::testing::Values(ov::test::utils::ReductionType::Prod),
-        ::testing::ValuesIn(keepDims),
-        ::testing::Values(ov::test::utils::DEVICE_GPU)
-);
-INSTANTIATE_TEST_SUITE_P(smoke_reduce_prod_compareWithRefs_dynamic, ReduceLayerGPUTest, reduceProd, ReduceLayerGPUTest::getTestCaseName);
+INSTANTIATE_TEST_SUITE_P(smoke_reduce_prod_compareWithRefs_dynamic,
+                         ReduceLayerGPUTest,
+                         ::testing::Combine(::testing::ValuesIn({dyn2d, dyn4d}),
+                                            ::testing::ValuesIn({ov::element::f32}),
+                                            ::testing::Values(ov::test::utils::ReductionType::Prod),
+                                            ::testing::ValuesIn(keepDims),
+                                            ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                         ReduceLayerGPUTest::getTestCaseName);
 
 const auto reduceL2 = ::testing::Combine(
         ::testing::ValuesIn({dyn4d, dyn5d}),

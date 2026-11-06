@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,11 +25,17 @@ private:
 
     std::map<std::string, std::shared_ptr<RemoteContextImpl>> get_default_contexts() const;
 
+    // Rename our enumerated devices to the ids Core assigned (ov::internal::device_id_map).
+    void apply_device_id_map(const std::map<std::string, std::string>& id_map);
+
     std::shared_ptr<ov::Model> clone_and_transform_model(const std::shared_ptr<const ov::Model>& network,
-                                                         const ExecutionConfig& config,
+                                                         ExecutionConfig& config,
                                                          const std::shared_ptr<RemoteContextImpl>& context) const;
     void transform_model(std::shared_ptr<ov::Model>& model, const ExecutionConfig& config, const std::shared_ptr<RemoteContextImpl>& context) const;
     void register_primitives() const;
+    bool is_weightless_cache_attributes_set(const std::shared_ptr<const ov::Model>& model) const;
+    void set_weightless_cache_attributes(const std::shared_ptr<const ov::Model>& model) const;
+    void create_weightless_cache_attributes(const std::shared_ptr<const ov::Model>& model, ExecutionConfig& config) const;
     std::string get_device_id_from_config(const ov::AnyMap& config) const;
     std::string get_device_id(const ov::AnyMap& config) const;
     std::shared_ptr<RemoteContextImpl> get_default_context(const std::string& device_id, bool initialize = true) const;
@@ -57,6 +63,10 @@ public:
     ov::Any get_property(const std::string& name, const ov::AnyMap& arguments) const override;
     std::shared_ptr<ov::ICompiledModel> import_model(std::istream& model, const ov::AnyMap& properties) const override;
     std::shared_ptr<ov::ICompiledModel> import_model(std::istream& model,
+                                                     const ov::SoPtr<ov::IRemoteContext>& context,
+                                                     const ov::AnyMap& properties) const override;
+    std::shared_ptr<ov::ICompiledModel> import_model(const ov::Tensor& model, const ov::AnyMap& properties) const override;
+    std::shared_ptr<ov::ICompiledModel> import_model(const ov::Tensor& model,
                                                      const ov::SoPtr<ov::IRemoteContext>& context,
                                                      const ov::AnyMap& properties) const override;
     ov::SupportedOpsMap query_model(const std::shared_ptr<const ov::Model>& model,

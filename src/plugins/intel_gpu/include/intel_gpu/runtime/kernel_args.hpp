@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -66,6 +66,7 @@ struct scalar_desc {
 
 using scalars_desc = std::vector<scalar_desc>;
 
+using local_memory_args_desc = std::vector<size_t>;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // ArgumentDescpirtor
@@ -85,7 +86,8 @@ struct argument_desc {
         ACTIVATIONS_ZERO_POINTS,
         COMPENSATION,
         INPUT_OF_FUSED_PRIMITIVE,
-        SHAPE_INFO
+        SHAPE_INFO,
+        LOCAL_MEMORY_SIZE
     };
 
     Types t;
@@ -102,6 +104,7 @@ struct kernel_arguments_desc {
     arguments_desc arguments;
     scalars_desc scalars;
     std::string layerID;
+    local_memory_args_desc local_memory_args;
 };
 
 struct kernel_arguments_data {
@@ -123,6 +126,7 @@ struct kernel_arguments_data {
 
     std::vector<memory::cptr> fused_op_inputs;
     const scalars_desc* scalars = nullptr;
+    const local_memory_args_desc* local_memory_args = nullptr;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -138,8 +142,7 @@ struct kernel_string {
     bool has_microkernels;
     kernel_language language;
 
-    kernel_string() : str(""), jit(""), undefs(""), options(""), entry_point(""),
-    batch_compilation(false), has_microkernels(false), language(kernel_language::OCLC) {}
+    kernel_string() : batch_compilation(false), has_microkernels(false), language(kernel_language::OCLC) {}
 
     std::string get_str() const { return str + jit + undefs + options + entry_point; }
     size_t get_hash() const { return std::hash<std::string>()(get_str()); }

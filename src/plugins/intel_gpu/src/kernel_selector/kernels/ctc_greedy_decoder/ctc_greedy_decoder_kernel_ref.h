@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class CTCGreedyDecoderKernelRef : public CTCGreedyDecoderKernelBase {
 public:
     using Parent = CTCGreedyDecoderKernelBase;
     CTCGreedyDecoderKernelRef() : CTCGreedyDecoderKernelBase("ctc_greedy_decoder_ref") {}
-    virtual ~CTCGreedyDecoderKernelRef() {}
+    ~CTCGreedyDecoderKernelRef() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

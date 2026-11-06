@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,7 +23,7 @@ struct profiling_period_ocl_start_stop {
 
 struct ocl_base_event : public event {
 public:
-    explicit ocl_base_event(uint64_t queue_stamp = 0) : event(), _queue_stamp(queue_stamp) { }
+    explicit ocl_base_event(uint64_t queue_stamp = 0) : _queue_stamp(queue_stamp) { }
     uint64_t get_queue_stamp() const { return _queue_stamp; }
     virtual cl::Event& get() = 0;
 

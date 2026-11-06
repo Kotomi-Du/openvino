@@ -1,20 +1,9 @@
 #
-# Copyright (C) 2023-2024 Intel Corporation.
+# Copyright (C) 2018-2026 Intel Corporation.
 # SPDX-License-Identifier: Apache 2.0
 #
 
 set(TARGET_NAME protopipe)
-
-if (NOT DEFINED PROJECT_NAME)
-    set(STANDALONE true)
-endif()
-
-# Enable CMP0048 policy
-if(POLICY CMP0048)
-    cmake_policy(SET CMP0048 NEW)
-endif()
-
-project(protopipe VERSION 1.0.0)
 
 execute_process(
   COMMAND git rev-parse --short HEAD
@@ -28,12 +17,13 @@ configure_file(
   @ONLY
 )
 
-if (STANDALONE)
+if (NOT DEFINED PROJECT_NAME)
     if(WIN32)
         cmake_minimum_required(VERSION 3.16)
     else()
         cmake_minimum_required(VERSION 3.13)
     endif()
+    project(protopipe_standalone)
     include("cmake/standalone.cmake")
     return()
 endif()
@@ -69,8 +59,7 @@ endif()
 
 set(PROTOPIPE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-ov_add_target(ADD_CPPLINT
-              TYPE EXECUTABLE
+ov_add_target(TYPE EXECUTABLE
               NAME ${TARGET_NAME}
               ROOT ${CMAKE_CURRENT_SOURCE_DIR}
               ADDITIONAL_SOURCE_DIRS ${PROTOPIPE_SOURCE_DIR}
@@ -78,8 +67,12 @@ ov_add_target(ADD_CPPLINT
               LINK_LIBRARIES PRIVATE ${DEPENDENCIES})
 
 set_target_properties(${TARGET_NAME} PROPERTIES
-                          FOLDER ${CMAKE_CURRENT_SOURCE_DIR}
-                          CXX_STANDARD 17)
+                      FOLDER intel_npu_tools
+                      CXX_STANDARD 17)
+
+if (WIN32)
+    target_link_options(${TARGET_NAME} PRIVATE "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/protopipe.exe.manifest")
+endif()
 
 #
 # Install

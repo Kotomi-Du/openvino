@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 from functools import wraps
 from inspect import signature
-from typing import Any, Callable, Dict, Optional, Union, get_origin, get_args
+from typing import Any, Optional, Union, get_origin, get_args
+from collections.abc import Callable
 
 from openvino import Node, Output
 from openvino.utils.types import NodeInput, as_node, as_nodes
@@ -73,11 +74,15 @@ def custom_preprocess_function(custom_function: Callable) -> Callable:
 class MultiMethod(object):
     def __init__(self, name: str):
         self.name = name
-        self.typemap: Dict[tuple, Callable] = {}
+        self.typemap: dict[tuple, Callable] = {}
 
     # Checks if actual_type is a subclass of any type in the union
     def matches_union(self, union_type, actual_type) -> bool:  # type: ignore
         for type_arg in get_args(union_type):
+            origin = get_origin(type_arg)
+            if origin is not None:
+                type_arg = origin
+
             if isinstance(type_arg, type) and issubclass(actual_type, type_arg):
                 return True
             elif get_origin(type_arg) == list:
@@ -115,9 +120,13 @@ class MultiMethod(object):
                     break
         elif len(arg_types) == 0 and len(kwarg_types) != 0:
             for key, func in self.typemap.items():
-                func_signature = {arg_name: types.annotation for arg_name, types in signature(func).parameters.items()}
-                # if kwargs of called function are subset of overloaded function, we use this overload
-                if kwarg_types.keys() <= func_signature.keys():
+                params = signature(func).parameters
+                # parameters without a default, *args and **kwargs excluded
+                required = {n for n, p in params.items()
+                            if p.default is p.empty and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)}
+                # if kwargs of called function are subset of overloaded function
+                # and cover its required parameters, we use this overload
+                if kwarg_types.keys() <= params.keys() and required <= kwarg_types.keys():
                     key_matched = key
                     break
         elif len(arg_types) != 0 and len(kwarg_types) != 0:
@@ -142,7 +151,7 @@ class MultiMethod(object):
         self.typemap[types] = function
 
 
-registry: Dict[str, MultiMethod] = {}
+registry: dict[str, MultiMethod] = {}
 
 
 def overloading(*types: tuple) -> Callable:

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ namespace kernel_selector {
 class ConvolutionKernel_fs_byx_fsv32_depthwise : public ConvolutionKernelBase {
 public:
     ConvolutionKernel_fs_byx_fsv32_depthwise();
-    virtual ~ConvolutionKernel_fs_byx_fsv32_depthwise() {}
+    ~ConvolutionKernel_fs_byx_fsv32_depthwise() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsData GetKernelsDataForAutoTune(const Params& params) const override;

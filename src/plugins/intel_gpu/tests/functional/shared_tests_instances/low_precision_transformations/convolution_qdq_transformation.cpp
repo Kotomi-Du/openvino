@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -282,9 +282,9 @@ const std::vector<LayerTestsDefinitions::ConvolutionQDqTransformationParam> para
     },
 };
 
-const std::vector<ov::PartialShape> shapes = {
-    { 1, 3, 4, 4 },
-    { 4, 3, 4, 4 }
+const std::vector<ov::test::InputShape> shapes = {
+    {{}, {{ 1, 3, 4, 4 }}},
+    {{}, {{ 4, 3, 4, 4 }}},
 };
 
 INSTANTIATE_TEST_SUITE_P(smoke_LPT, ConvolutionQDqTransformation,

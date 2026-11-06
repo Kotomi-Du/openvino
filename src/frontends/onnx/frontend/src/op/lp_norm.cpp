@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,11 +10,7 @@
 #include "utils/norm.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
-namespace opset_1 {
+namespace ov::frontend::onnx::ai_onnx::opset_1 {
 ov::OutputVector lp_norm(const ov::frontend::onnx::Node& node) {
     const ov::Output<ov::Node> data{node.get_ov_inputs().at(0)};
     const auto data_shape = data.get_partial_shape();
@@ -27,18 +23,17 @@ ov::OutputVector lp_norm(const ov::frontend::onnx::Node& node) {
                      p_norm == 1 || p_norm == 2,
                      "Invalid `p` attribute value: ",
                      p_norm,
-                     "Only normalization of 1st or 2nd order is supported.");
+                     " Only normalization of 1st or 2nd order is supported.");
 
     const auto normalize_axis_const = v0::Constant::create(ov::element::i64, {}, {normalize_axis});
-    std::shared_ptr<ov::Node> norm =
-        ov::op::util::lp_norm(data, normalize_axis_const, static_cast<std::size_t>(p_norm), 0.0f, true);
+    std::shared_ptr<ov::Node> norm = ov::op::util::lp_norm(data,
+                                                           normalize_axis_const,
+                                                           static_cast<std::size_t>(p_norm),
+                                                           std::numeric_limits<float>::epsilon(),
+                                                           true);
 
     return {std::make_shared<v1::Divide>(data, norm)};
 }
 
 ONNX_OP("LpNormalization", OPSET_SINCE(1), ai_onnx::opset_1::lp_norm);
-}  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx::opset_1

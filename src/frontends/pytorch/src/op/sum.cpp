@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,10 +7,7 @@
 #include "openvino/op/reduce_sum.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 OutputVector translate_sum(const NodeContext& context) {
     // aten::sum.dim_IntList(Tensor self, int[1]? dim, bool keepdim=False, *, ScalarType? dtype=None) -> Tensor
@@ -51,7 +48,7 @@ OutputVector translate_sum(const NodeContext& context) {
     if (context.input_is_none(axis_idx)) {
         axes = get_axes_range(context, 0);
     } else {
-        axes = context.get_input(static_cast<int>(axis_idx));
+        axes = get_input_concat_if_list(context, axis_idx);
     }
     if (!context.input_is_none(keep_dims_idx)) {
         keep_dims = context.const_input<bool>(keep_dims_idx);
@@ -88,7 +85,7 @@ OutputVector translate_sum_fx(const NodeContext& context) {
     if (context.input_is_none(1)) {
         axes = get_axes_range(context, 0);
     } else {
-        axes = context.get_input(1);
+        axes = get_input_concat_if_list(context, 1);
         // empty constant means default axes
         if (const auto constant = ov::as_type_ptr<ov::op::v0::Constant>(axes.get_node_shared_ptr())) {
             if (constant->get_byte_size() == 0)
@@ -102,7 +99,4 @@ OutputVector translate_sum_fx(const NodeContext& context) {
     return {context.mark_node(std::make_shared<ov::op::v1::ReduceSum>(data, axes, keep_dims))};
 };
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

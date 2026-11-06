@@ -1,0 +1,823 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#include "transformations/paged_attention/paged_causal_conv1d_fusion.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstdlib>
+#include <string>
+#include <tuple>
+#include <unordered_set>
+
+#include "common_test_utils/node_builders/constant.hpp"
+#include "common_test_utils/ov_test_utils.hpp"
+#include "openvino/core/model.hpp"
+#include "openvino/op/add.hpp"
+#include "openvino/op/concat.hpp"
+#include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
+#include "openvino/op/gather.hpp"
+#include "openvino/op/group_conv.hpp"
+#include "openvino/op/multiply.hpp"
+#include "openvino/op/paged_causal_conv1d.hpp"
+#include "openvino/op/parameter.hpp"
+#include "openvino/op/reshape.hpp"
+#include "openvino/op/result.hpp"
+#include "openvino/op/shape_of.hpp"
+#include "openvino/op/slice.hpp"
+#include "openvino/op/swish.hpp"
+#include "openvino/op/transpose.hpp"
+#include "openvino/op/unsqueeze.hpp"
+#include "openvino/pass/manager.hpp"
+#include "openvino/pass/sdpa_to_paged_attention.hpp"
+#include "openvino/runtime/core.hpp"
+
+namespace {
+
+using namespace ov;
+namespace v0 = ov::op::v0;
+namespace v1 = ov::op::v1;
+namespace v4 = ov::op::v4;
+namespace v8 = ov::op::v8;
+
+std::shared_ptr<ov::Model> build_model(bool add_present_state_result, bool use_read_value = true) {
+    const Shape input_shape{2, 3};
+    const Shape state_shape{2, 3, 4};
+
+    auto input_embeds = std::make_shared<v0::Parameter>(element::f32, input_shape);
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    past_state_param->set_friendly_name("past_state");
+
+    ov::Output<ov::Node> past_state = past_state_param;
+    if (use_read_value) {
+        auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+        read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+        past_state = read_value->output(0);
+    }
+
+    auto part_shape = v0::Constant::create(element::i64, Shape{3}, {2, 3, 1});
+    auto part0 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto part1 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto part2 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+
+    auto token_concat = std::make_shared<v0::Concat>(OutputVector{part0, part1, part2}, -1);
+    auto transpose_order = v0::Constant::create(element::i64, Shape{3}, {0, 2, 1});
+    auto token_transpose = std::make_shared<v1::Transpose>(token_concat, transpose_order);
+
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{past_state, token_transpose}, -1);
+
+    auto weights = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.25f));
+    auto group_conv = std::make_shared<v1::GroupConvolution>(state_concat,
+                                                             weights,
+                                                             Strides{1},
+                                                             CoordinateDiff{0},
+                                                             CoordinateDiff{0},
+                                                             Strides{1});
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+
+    auto slice2 = std::make_shared<v8::Slice>(group_conv, slice_begin, slice_end, slice_step, slice_axis);
+    auto swish = std::make_shared<v4::Swish>(slice2);
+
+    auto state_slice = std::make_shared<v8::Slice>(state_concat, slice_begin, slice_end, slice_step, slice_axis);
+    ResultVector results;
+    results.push_back(std::make_shared<v0::Result>(swish));
+
+    if (add_present_state_result) {
+        auto present_res = std::make_shared<v0::Result>(state_slice);
+        present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+        results.push_back(present_res);
+    }
+
+    ParameterVector params{input_embeds, past_state_param};
+    return std::make_shared<ov::Model>(results, params);
+}
+
+std::shared_ptr<ov::Model> build_model_with_multiply_post_op(bool add_present_state_result) {
+    const Shape state_shape{2, 3, 4};
+    const Shape token_shape{2, 3, 1};
+
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    past_state_param->set_friendly_name("past_state");
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+    auto past_state = read_value->output(0);
+
+    auto token = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto gate = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto token_mul = std::make_shared<v1::Multiply>(token, gate);
+
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{past_state, token_mul}, -1);
+
+    auto weights = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.25f));
+    auto group_conv = std::make_shared<v1::GroupConvolution>(state_concat,
+                                                             weights,
+                                                             Strides{1},
+                                                             CoordinateDiff{0},
+                                                             CoordinateDiff{0},
+                                                             Strides{1});
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+
+    auto slice2 = std::make_shared<v8::Slice>(group_conv, slice_begin, slice_end, slice_step, slice_axis);
+    auto post_op_mul_rhs = std::make_shared<v0::Parameter>(element::f32, PartialShape::dynamic(3));
+    auto post_op_mul = std::make_shared<v1::Multiply>(slice2, post_op_mul_rhs);
+
+    auto state_slice = std::make_shared<v8::Slice>(state_concat, slice_begin, slice_end, slice_step, slice_axis);
+
+    ResultVector results;
+    results.push_back(std::make_shared<v0::Result>(post_op_mul));
+    if (add_present_state_result) {
+        auto present_res = std::make_shared<v0::Result>(state_slice);
+        present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+        results.push_back(present_res);
+    }
+
+    ParameterVector params{token, gate, post_op_mul_rhs, past_state_param};
+    return std::make_shared<ov::Model>(results, params);
+}
+
+std::shared_ptr<ov::Model> build_model_with_converted_weights(bool add_present_state_result) {
+    const Shape state_shape{2, 3, 4};
+    const Shape token_shape{2, 3, 1};
+
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    past_state_param->set_friendly_name("past_state");
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+    auto past_state = read_value->output(0);
+
+    auto token = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto gate = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto token_mul = std::make_shared<v1::Multiply>(token, gate);
+
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{past_state, token_mul}, -1);
+
+    auto weights_u8 = v0::Constant::create(element::u8, Shape{3, 1, 1, 4}, std::vector<uint8_t>(12, 7));
+    auto weights_f32 = std::make_shared<v0::Convert>(weights_u8, element::f32);
+    auto group_conv = std::make_shared<v1::GroupConvolution>(state_concat,
+                                                             weights_f32,
+                                                             Strides{1},
+                                                             CoordinateDiff{0},
+                                                             CoordinateDiff{0},
+                                                             Strides{1});
+    group_conv->set_friendly_name("__module.model.model.layers.0.conv/aten::_convolution/GroupConvolution");
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+
+    auto slice2 = std::make_shared<v8::Slice>(group_conv, slice_begin, slice_end, slice_step, slice_axis);
+    auto swish = std::make_shared<v4::Swish>(slice2);
+
+    auto state_slice = std::make_shared<v8::Slice>(state_concat, slice_begin, slice_end, slice_step, slice_axis);
+    ResultVector results;
+    results.push_back(std::make_shared<v0::Result>(swish));
+    if (add_present_state_result) {
+        auto present_res = std::make_shared<v0::Result>(state_slice);
+        present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+        results.push_back(present_res);
+    }
+
+    ParameterVector params{token, gate, past_state_param};
+    return std::make_shared<ov::Model>(results, params);
+}
+
+// GroupConvolution followed by Add(bias) before Slice.
+std::shared_ptr<ov::Model> build_model_with_add_bias() {
+    const Shape input_shape{2, 3};
+    const Shape state_shape{2, 3, 4};
+
+    auto input_embeds = std::make_shared<v0::Parameter>(element::f32, input_shape);
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    past_state_param->set_friendly_name("past_state");
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+
+    auto part_shape = v0::Constant::create(element::i64, Shape{3}, {2, 3, 1});
+    auto part0 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto part1 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto part2 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto token_concat = std::make_shared<v0::Concat>(OutputVector{part0, part1, part2}, -1);
+    auto transpose_order = v0::Constant::create(element::i64, Shape{3}, {0, 2, 1});
+    auto token_transpose = std::make_shared<v1::Transpose>(token_concat, transpose_order);
+
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{read_value, token_transpose}, -1);
+
+    auto weights = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.25f));
+    auto group_conv = std::make_shared<v1::GroupConvolution>(state_concat,
+                                                             weights,
+                                                             Strides{1},
+                                                             CoordinateDiff{0},
+                                                             CoordinateDiff{0},
+                                                             Strides{1});
+
+    // explicit bias constant added after GroupConvolution
+    auto bias = v0::Constant::create(element::f32, Shape{3, 1}, std::vector<float>(3, 0.1f));
+    auto add_bias = std::make_shared<v1::Add>(group_conv, bias);
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+    auto slice2 = std::make_shared<v8::Slice>(add_bias, slice_begin, slice_end, slice_step, slice_axis);
+    auto swish = std::make_shared<v4::Swish>(slice2);
+
+    auto state_slice = std::make_shared<v8::Slice>(state_concat, slice_begin, slice_end, slice_step, slice_axis);
+    auto present_res = std::make_shared<v0::Result>(state_slice);
+    present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+
+    ParameterVector params{input_embeds, past_state_param};
+    return std::make_shared<ov::Model>(ResultVector{std::make_shared<v0::Result>(swish), present_res}, params);
+}
+
+std::shared_ptr<ov::Model> build_fused_reference_model(const bool use_explicit_bias) {
+    const Shape input_shape{2, 3};
+    const Shape state_shape{2, 3, 4};
+
+    auto input_embeds = std::make_shared<v0::Parameter>(element::f32, input_shape);
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    past_state_param->set_friendly_name("past_state");
+
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+
+    auto part_shape = v0::Constant::create(element::i64, Shape{3}, {2, 3, 1});
+    auto part0 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto part1 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+    auto part2 = std::make_shared<v1::Reshape>(input_embeds, part_shape, false);
+
+    auto token_concat = std::make_shared<v0::Concat>(OutputVector{part0, part1, part2}, -1);
+    auto transpose_order = v0::Constant::create(element::i64, Shape{3}, {0, 2, 1});
+    auto token_transpose = std::make_shared<v1::Transpose>(token_concat, transpose_order);
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{read_value, token_transpose}, -1);
+
+    auto input_embeds_shape = v0::Constant::create(element::i64, Shape{2}, std::vector<int64_t>{-1, 3});
+    auto input_embeds_node = std::make_shared<v1::Reshape>(token_transpose, input_embeds_shape, false);
+
+    auto weights = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.25f));
+    auto pa_weight_shape = v0::Constant::create(element::i64, Shape{3}, std::vector<int64_t>{3, 1, 4});
+    auto weight_reshaped = std::make_shared<v1::Reshape>(weights, pa_weight_shape, false);
+
+    std::shared_ptr<ov::Node> bias;
+    if (use_explicit_bias) {
+        auto bias_const = v0::Constant::create(element::f32, Shape{3, 1}, std::vector<float>(3, 0.1f));
+        auto bias_shape = v0::Constant::create(element::i64, Shape{1}, {-1});
+        bias = std::make_shared<v1::Reshape>(bias_const, bias_shape, false);
+    } else {
+        bias = v0::Constant::create(element::f32, Shape{0}, std::vector<float>{});
+    }
+
+    auto subsequence_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    subsequence_begins->set_friendly_name("subsequence_begins");
+    subsequence_begins->get_output_tensor(0).set_names({"subsequence_begins"});
+
+    auto block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    block_indices->set_friendly_name("la.block_indices");
+    block_indices->get_output_tensor(0).set_names({"la.block_indices"});
+
+    auto block_indices_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    block_indices_begins->set_friendly_name("la.block_indices_begins");
+    block_indices_begins->get_output_tensor(0).set_names({"la.block_indices_begins"});
+
+    auto past_lens = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    past_lens->set_friendly_name("la.past_lens");
+    past_lens->get_output_tensor(0).set_names({"la.past_lens"});
+
+    auto cache_interval = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    cache_interval->set_friendly_name("la.cache_interval");
+    cache_interval->get_output_tensor(0).set_names({"la.cache_interval"});
+
+    auto conv_state_table = std::make_shared<v0::Parameter>(element::dynamic, PartialShape{-1, 3, 4});
+    conv_state_table->set_friendly_name("conv_state_table.0");
+    conv_state_table->get_output_tensor(0).set_names({"conv_state_table.0"});
+
+    auto paged_conv = std::make_shared<ov::op::internal::PagedCausalConv1D>(input_embeds_node,
+                                                                            conv_state_table,
+                                                                            weight_reshaped,
+                                                                            bias,
+                                                                            subsequence_begins,
+                                                                            block_indices,
+                                                                            block_indices_begins,
+                                                                            past_lens,
+                                                                            cache_interval);
+    auto unsqueeze_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+    auto unsqueeze = std::make_shared<v0::Unsqueeze>(paged_conv, unsqueeze_axis);
+    auto swish = std::make_shared<v4::Swish>(unsqueeze);
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+    auto state_slice = std::make_shared<v8::Slice>(state_concat, slice_begin, slice_end, slice_step, slice_axis);
+    auto present_res = std::make_shared<v0::Result>(state_slice);
+    present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+
+    ParameterVector params{input_embeds,
+                           past_state_param,
+                           subsequence_begins,
+                           block_indices,
+                           block_indices_begins,
+                           past_lens,
+                           cache_interval,
+                           conv_state_table};
+    return std::make_shared<ov::Model>(ResultVector{std::make_shared<v0::Result>(swish), present_res}, params);
+}
+
+std::shared_ptr<ov::Model> build_model_without_concat_lfm2_like() {
+    const Shape state_shape{2, 3, 4};
+    const Shape token_shape{2, 3, 1};
+
+    auto conv_state_hint = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    conv_state_hint->set_friendly_name("conv_state_hint");
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(conv_state_hint->output(0), "cache_param_0");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+    auto cache_param_output = read_value->output(0);
+
+    auto token = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto gate = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto conv_input = std::make_shared<v1::Multiply>(token, gate);
+
+    auto weights = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.25f));
+    auto group_conv = std::make_shared<v1::GroupConvolution>(conv_input,
+                                                             weights,
+                                                             Strides{1},
+                                                             CoordinateDiff{2},
+                                                             CoordinateDiff{2},
+                                                             Strides{1});
+    group_conv->set_friendly_name("__module.model.model.layers.0.conv.conv/aten::_convolution/GroupConvolution");
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+
+    auto slice2 = std::make_shared<v8::Slice>(group_conv, slice_begin, slice_end, slice_step, slice_axis);
+    auto swish = std::make_shared<v4::Swish>(slice2);
+
+    ParameterVector params{token, gate, conv_state_hint};
+    return std::make_shared<ov::Model>(ResultVector{std::make_shared<v0::Result>(swish)}, params);
+}
+
+std::shared_ptr<ov::Model> build_model_without_concat_lfm2_like_multiple() {
+    const Shape state_shape{2, 3, 4};
+    const Shape token_shape{2, 3, 1};
+
+    auto conv_state_hint_0 = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    conv_state_hint_0->set_friendly_name("conv_state_hint_0");
+    auto read_value_0 = std::make_shared<ov::op::v3::ReadValue>(conv_state_hint_0->output(0), "cache_param_0");
+    read_value_0->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+
+    auto conv_state_hint_1 = std::make_shared<v0::Parameter>(element::f32, state_shape);
+    conv_state_hint_1->set_friendly_name("conv_state_hint_1");
+    auto read_value_1 = std::make_shared<ov::op::v3::ReadValue>(conv_state_hint_1->output(0), "cache_param_1");
+    read_value_1->get_output_tensor(0).set_names({"cache_params.past.conv.1"});
+
+    auto token_0 = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto gate_0 = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto conv_input_0 = std::make_shared<v1::Multiply>(token_0, gate_0);
+
+    auto token_1 = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto gate_1 = std::make_shared<v0::Parameter>(element::f32, token_shape);
+    auto conv_input_1 = std::make_shared<v1::Multiply>(token_1, gate_1);
+
+    auto weights_0 = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.25f));
+    auto group_conv_0 = std::make_shared<v1::GroupConvolution>(conv_input_0,
+                                                               weights_0,
+                                                               Strides{1},
+                                                               CoordinateDiff{2},
+                                                               CoordinateDiff{2},
+                                                               Strides{1});
+    group_conv_0->set_friendly_name("__module.model.model.layers.0.conv.conv/aten::_convolution/GroupConvolution");
+
+    auto weights_1 = v0::Constant::create(element::f32, Shape{3, 1, 1, 4}, std::vector<float>(12, 0.5f));
+    auto group_conv_1 = std::make_shared<v1::GroupConvolution>(conv_input_1,
+                                                               weights_1,
+                                                               Strides{1},
+                                                               CoordinateDiff{2},
+                                                               CoordinateDiff{2},
+                                                               Strides{1});
+    group_conv_1->set_friendly_name("__module.model.model.layers.1.conv.conv/aten::_convolution/GroupConvolution");
+
+    auto neg_one = v0::Constant::create(element::i64, Shape{1}, {-1});
+    auto one = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_begin = std::make_shared<v1::Multiply>(neg_one, one);
+    auto slice_end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto slice_step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto slice_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+
+    auto slice_0 = std::make_shared<v8::Slice>(group_conv_0, slice_begin, slice_end, slice_step, slice_axis);
+    auto slice_1 = std::make_shared<v8::Slice>(group_conv_1, slice_begin, slice_end, slice_step, slice_axis);
+
+    auto swish_0 = std::make_shared<v4::Swish>(slice_0);
+    auto swish_1 = std::make_shared<v4::Swish>(slice_1);
+
+    ParameterVector params{token_0, gate_0, token_1, gate_1, conv_state_hint_0, conv_state_hint_1};
+
+    ResultVector results{std::make_shared<v0::Result>(swish_0), std::make_shared<v0::Result>(swish_1)};
+    return std::make_shared<ov::Model>(results, params);
+}
+
+constexpr size_t hidden_size = 3;
+constexpr size_t kernel_size = 4;
+constexpr size_t seq_len = 8;
+
+std::shared_ptr<v8::Slice> make_last_n_slice(const ov::Output<ov::Node>& data, size_t n) {
+    auto begin = v0::Constant::create(element::i64, Shape{1}, {-static_cast<int64_t>(n)});
+    auto end = v0::Constant::create(element::i64, Shape{1}, {std::numeric_limits<int64_t>::max()});
+    auto step = v0::Constant::create(element::i64, Shape{1}, {1});
+    auto axis = v0::Constant::create(element::i64, Shape{1}, {2});
+    return std::make_shared<v8::Slice>(data, begin, end, step, axis);
+}
+
+// past[B, H, state_len] ++ tokens[B, H, T] -> GroupConv(dilation) -> keep last T outputs.
+std::shared_ptr<ov::Model> build_dilated_conv_model(size_t state_len,
+                                                    size_t dilation,
+                                                    bool with_output_slice = true,
+                                                    bool with_bias = false,
+                                                    size_t stride = 1,
+                                                    size_t pad = 0) {
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, Shape{2, hidden_size, state_len});
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+
+    auto token = std::make_shared<v0::Parameter>(element::f32, Shape{2, hidden_size, seq_len});
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{read_value, token}, -1);
+
+    auto weights = v0::Constant::create(element::f32,
+                                        Shape{hidden_size, 1, 1, kernel_size},
+                                        std::vector<float>(hidden_size * kernel_size, 0.25f));
+    auto group_conv = std::make_shared<v1::GroupConvolution>(state_concat,
+                                                             weights,
+                                                             Strides{stride},
+                                                             CoordinateDiff{static_cast<ptrdiff_t>(pad)},
+                                                             CoordinateDiff{static_cast<ptrdiff_t>(pad)},
+                                                             Strides{dilation});
+    std::shared_ptr<ov::Node> conv_out = group_conv;
+    if (with_bias) {
+        auto bias = v0::Constant::create(element::f32, Shape{1, hidden_size, 1}, {0.25f, -0.5f, 1.0f});
+        conv_out = std::make_shared<v1::Add>(conv_out, bias);
+    }
+    if (with_output_slice) {
+        conv_out = make_last_n_slice(conv_out, seq_len);
+    }
+
+    auto present_res = std::make_shared<v0::Result>(make_last_n_slice(state_concat, state_len));
+    present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+
+    auto conv_res = std::make_shared<v0::Result>(conv_out);
+    return std::make_shared<ov::Model>(ResultVector{conv_res, present_res}, ParameterVector{token, past_state_param});
+}
+
+std::shared_ptr<ov::Model> build_dilated_conv_fused_reference(size_t state_len,
+                                                              size_t dilation,
+                                                              bool with_bias = false) {
+    using ov::test::utils::make_param;
+    auto past_state_param = std::make_shared<v0::Parameter>(element::f32, Shape{2, hidden_size, state_len});
+    auto read_value = std::make_shared<ov::op::v3::ReadValue>(past_state_param->output(0), "past_cache");
+    read_value->get_output_tensor(0).set_names({"cache_params.past.conv.0"});
+
+    // The present-state branch is untouched by the fusion.
+    auto token = std::make_shared<v0::Parameter>(element::f32, Shape{2, hidden_size, seq_len});
+    auto state_concat = std::make_shared<v0::Concat>(OutputVector{read_value, token}, -1);
+    auto present_res = std::make_shared<v0::Result>(make_last_n_slice(state_concat, state_len));
+    present_res->get_output_tensor(0).set_names({"cache_params.present.conv.0"});
+
+    auto transpose_order = v0::Constant::create(element::i64, Shape{3}, {0, 2, 1});
+    auto token_transpose = std::make_shared<v1::Transpose>(token, transpose_order);
+    auto input_embeds_shape =
+        v0::Constant::create(element::i64, Shape{2}, std::vector<int64_t>{-1, static_cast<int64_t>(hidden_size)});
+    auto input_embeds = std::make_shared<v1::Reshape>(token_transpose, input_embeds_shape, false);
+
+    auto weights = v0::Constant::create(element::f32,
+                                        Shape{hidden_size, 1, 1, kernel_size},
+                                        std::vector<float>(hidden_size * kernel_size, 0.25f));
+    auto pa_weight_shape = v0::Constant::create(
+        element::i64,
+        Shape{3},
+        std::vector<int64_t>{static_cast<int64_t>(hidden_size), 1, static_cast<int64_t>(kernel_size)});
+    auto weight_reshaped = std::make_shared<v1::Reshape>(weights, pa_weight_shape, false);
+    std::shared_ptr<ov::Node> bias = v0::Constant::create(element::f32, Shape{0}, std::vector<float>{});
+    if (with_bias) {
+        auto bias_input = v0::Constant::create(element::f32, Shape{1, hidden_size, 1}, {0.25f, -0.5f, 1.0f});
+        auto bias_shape = v0::Constant::create(element::i64, Shape{1}, {-1});
+        bias = std::make_shared<v1::Reshape>(bias_input, bias_shape, false);
+    }
+
+    auto subsequence_begins = make_param(element::i32, PartialShape{-1}, "subsequence_begins");
+    auto block_indices = make_param(element::i32, PartialShape{-1}, "la.block_indices");
+    auto block_indices_begins = make_param(element::i32, PartialShape{-1}, "la.block_indices_begins");
+    auto past_lens = make_param(element::i32, PartialShape{-1}, "la.past_lens");
+    auto cache_interval = make_param(element::i32, PartialShape{-1}, "la.cache_interval");
+
+    auto conv_state_table = make_param(
+        element::dynamic,
+        PartialShape{-1, static_cast<int64_t>(hidden_size), static_cast<int64_t>((kernel_size - 1) * dilation + 1)},
+        "conv_state_table.0");
+
+    auto paged_conv = std::make_shared<ov::op::internal::PagedCausalConv1D>(input_embeds,
+                                                                            conv_state_table,
+                                                                            weight_reshaped,
+                                                                            bias,
+                                                                            subsequence_begins,
+                                                                            block_indices,
+                                                                            block_indices_begins,
+                                                                            past_lens,
+                                                                            cache_interval,
+                                                                            dilation);
+    auto unsqueeze_axis = v0::Constant::create(element::i64, Shape{1}, {2});
+    auto unsqueeze = std::make_shared<v0::Unsqueeze>(paged_conv, unsqueeze_axis);
+    auto conv_res = std::make_shared<v0::Result>(unsqueeze);
+
+    ParameterVector params{token,
+                           past_state_param,
+                           subsequence_begins,
+                           block_indices,
+                           block_indices_begins,
+                           past_lens,
+                           cache_interval,
+                           conv_state_table};
+    return std::make_shared<ov::Model>(ResultVector{conv_res, present_res}, params);
+}
+
+}  // namespace
+
+class PagedCausalConv1DFusionTest : public ::TransformationTestsF {};
+
+void run_paged_causal_conv1d_fusion(const std::shared_ptr<ov::Model>& model) {
+    ov::pass::paged_attention::PaParams pa_params{model->get_parameters()};
+    std::unordered_set<std::string> var_ids_to_remove;
+
+    ov::pass::Manager manager;
+    manager.set_per_pass_validation(false);
+    manager.register_pass<ov::pass::PagedCausalConv1DFusion>(pa_params, var_ids_to_remove);
+    manager.run_passes(model);
+    model->add_parameters(pa_params.items());
+    model->validate_nodes_and_infer_types();
+}
+
+TEST_F(PagedCausalConv1DFusionTest, DoesNotFuseWithoutPresentStateResult) {
+    model = build_model(false, false);
+    model_ref = build_model(false, false);
+
+    run_paged_causal_conv1d_fusion(model);
+
+    compare_functions(model, model_ref);
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesWhenPresentStateIsResult) {
+    model = build_model(true);
+
+    run_paged_causal_conv1d_fusion(model);
+
+    // Verify transformation result: PagedCausalConv1D present, GroupConv absent
+    size_t pcc_count = 0;
+    size_t group_conv_count = 0;
+    for (const auto& op : model->get_ordered_ops()) {
+        if (std::string(op->get_type_name()) == "PagedCausalConv1D") {
+            ++pcc_count;
+        }
+        if (ov::is_type<ov::op::v1::GroupConvolution>(op)) {
+            ++group_conv_count;
+        }
+    }
+    EXPECT_EQ(pcc_count, 1u) << "Expected 1 PagedCausalConv1D after fusion";
+    EXPECT_EQ(group_conv_count, 0u) << "Expected 0 GroupConvolution after fusion";
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesMultiplyPostOpAndGenericTokenInput) {
+    model = build_model_with_multiply_post_op(true);
+
+    run_paged_causal_conv1d_fusion(model);
+
+    // Verify transformation result: PagedCausalConv1D present, GroupConv and Slice removed
+    size_t pcc_count = 0;
+    size_t group_conv_count = 0;
+    for (const auto& op : model->get_ordered_ops()) {
+        if (std::string(op->get_type_name()) == "PagedCausalConv1D") {
+            ++pcc_count;
+        }
+        if (ov::is_type<ov::op::v1::GroupConvolution>(op)) {
+            ++group_conv_count;
+        }
+    }
+    EXPECT_EQ(pcc_count, 1u) << "Expected 1 PagedCausalConv1D after fusion";
+    EXPECT_EQ(group_conv_count, 0u) << "Expected 0 GroupConvolution after fusion";
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesNonConcatPatternWithSymmetricPadding) {
+    model = build_model_without_concat_lfm2_like();
+
+    run_paged_causal_conv1d_fusion(model);
+
+    // Verify transformation result: PagedCausalConv1D present, GroupConv and Slice removed
+    size_t pcc_count = 0;
+    size_t group_conv_count = 0;
+    size_t slice_count = 0;
+    for (const auto& op : model->get_ordered_ops()) {
+        if (std::string(op->get_type_name()) == "PagedCausalConv1D") {
+            ++pcc_count;
+        }
+        if (ov::is_type<ov::op::v1::GroupConvolution>(op)) {
+            ++group_conv_count;
+        }
+        if (ov::is_type<ov::op::v8::Slice>(op)) {
+            ++slice_count;
+        }
+    }
+    EXPECT_EQ(pcc_count, 0u) << "Expected no PagedCausalConv1D when fallback cache detection is disabled";
+    EXPECT_EQ(group_conv_count, 1u)
+        << "Expected GroupConvolution to remain when non-concat path has no matched ReadValue";
+    EXPECT_EQ(slice_count, 1u) << "Expected Slice to remain when fusion is not applied";
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesSeveralNonConcatPatternsWithSymmetricPadding) {
+    model = build_model_without_concat_lfm2_like_multiple();
+
+    run_paged_causal_conv1d_fusion(model);
+
+    // Verify transformation result: 2 PagedCausalConv1D, no GroupConv
+    size_t pcc_count = 0;
+    size_t group_conv_count = 0;
+    size_t slice_count = 0;
+    for (const auto& op : model->get_ordered_ops()) {
+        if (std::string(op->get_type_name()) == "PagedCausalConv1D") {
+            ++pcc_count;
+        }
+        if (ov::is_type<ov::op::v1::GroupConvolution>(op)) {
+            ++group_conv_count;
+        }
+        if (ov::is_type<ov::op::v8::Slice>(op)) {
+            ++slice_count;
+        }
+    }
+    EXPECT_EQ(pcc_count, 0u) << "Expected no PagedCausalConv1D when fallback cache detection is disabled";
+    EXPECT_EQ(group_conv_count, 2u)
+        << "Expected GroupConvolution nodes to remain when non-concat paths have no matched ReadValue";
+    EXPECT_EQ(slice_count, 2u) << "Expected Slice nodes to remain when fusion is not applied";
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesWhenWeightsComeFromConvertPath) {
+    model = build_model_with_converted_weights(true);
+
+    run_paged_causal_conv1d_fusion(model);
+
+    // Verify transformation result: PagedCausalConv1D present, GroupConv and Slice removed
+    size_t pcc_count = 0;
+    size_t group_conv_count = 0;
+    for (const auto& op : model->get_ordered_ops()) {
+        if (std::string(op->get_type_name()) == "PagedCausalConv1D") {
+            ++pcc_count;
+        }
+        if (ov::is_type<ov::op::v1::GroupConvolution>(op)) {
+            ++group_conv_count;
+        }
+    }
+    EXPECT_EQ(pcc_count, 1u) << "Expected 1 PagedCausalConv1D after fusion";
+    EXPECT_EQ(group_conv_count, 0u) << "Expected 0 GroupConvolution after fusion";
+}
+
+// Verifies that when GroupConvolution is followed by Add(bias_const) before Slice,
+// the fusion fires and the explicit bias constant is passed to PagedCausalConv1D.
+TEST_F(PagedCausalConv1DFusionTest, FusesWithExplicitBiasConstant) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    model = build_model_with_add_bias();
+    run_paged_causal_conv1d_fusion(model);
+
+    model_ref = build_fused_reference_model(true);
+}
+
+// Verifies that when GroupConvolution has no Add(bias) before Slice,
+// the fusion still fires and passes an empty bias Constant (shape {0}),
+// which represents "no bias" for PagedCausalConv1D.
+TEST_F(PagedCausalConv1DFusionTest, FusesNoBiasUsesEmptyBiasConstant) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    model = build_model(true);
+    run_paged_causal_conv1d_fusion(model);
+
+    model_ref = build_fused_reference_model(false);
+}
+
+// Dilated conv whose state holds the full causal window (K-1)*d+1 fuses and keeps the dilation.
+TEST_F(PagedCausalConv1DFusionTest, FusesDilatedConvWithCausalWindowState) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    constexpr size_t dilation = 3;
+    constexpr size_t causal_window = (kernel_size - 1) * dilation + 1;
+
+    model = build_dilated_conv_model(causal_window, dilation);
+    run_paged_causal_conv1d_fusion(model);
+    model_ref = build_dilated_conv_fused_reference(causal_window, dilation);
+}
+
+// Dilated conv whose state is only K long does not match the paged state layout and must stay untouched.
+TEST_F(PagedCausalConv1DFusionTest, DoesNotFuseDilatedConvWhenStateIsKernelSize) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    constexpr size_t dilation = 3;
+
+    model = build_dilated_conv_model(kernel_size, dilation);
+    run_paged_causal_conv1d_fusion(model);
+    model_ref = build_dilated_conv_model(kernel_size, dilation);
+}
+
+// PagedCausalConv1D has no stride attribute and always emits one output per input token.
+// With 4 taps, dilation 3, 9 history entries and 8 current tokens, GroupConvolution with
+// stride 2 would produce 4 outputs, while the fused op would wrongly produce 8. Must not fuse.
+TEST_F(PagedCausalConv1DFusionTest, DoesNotFuseStridedConv) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    constexpr size_t dilation = 3;
+    constexpr size_t history_length = (kernel_size - 1) * dilation;
+    constexpr size_t stride = 2;
+
+    model = build_dilated_conv_model(history_length,
+                                     dilation,
+                                     /*with_output_slice=*/false,
+                                     /*with_bias=*/false,
+                                     stride);
+    run_paged_causal_conv1d_fusion(model);
+    model_ref = build_dilated_conv_model(history_length,
+                                         dilation,
+                                         /*with_output_slice=*/false,
+                                         /*with_bias=*/false,
+                                         stride);
+}
+
+// PagedCausalConv1D has no padding attribute, so implicit zero padding from GroupConvolution
+// cannot be represented by the fused op. Must not fuse.
+TEST_F(PagedCausalConv1DFusionTest, DoesNotFusePaddedConv) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    constexpr size_t dilation = 3;
+    constexpr size_t causal_window = (kernel_size - 1) * dilation + 1;
+    constexpr size_t pad = 1;
+
+    model = build_dilated_conv_model(causal_window,
+                                     dilation,
+                                     /*with_output_slice=*/true,
+                                     /*with_bias=*/false,
+                                     /*stride=*/1,
+                                     pad);
+    run_paged_causal_conv1d_fusion(model);
+    model_ref = build_dilated_conv_model(causal_window,
+                                         dilation,
+                                         /*with_output_slice=*/true,
+                                         /*with_bias=*/false,
+                                         /*stride=*/1,
+                                         pad);
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesPLEWithHistoryOnlyAndNoOutputSlice) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    // PLE saves nine past inputs; the paged operation requires a ten-entry window.
+    constexpr size_t dilation = 3;
+    constexpr size_t history_length = (kernel_size - 1) * dilation;
+
+    model = build_dilated_conv_model(history_length, dilation, /*with_output_slice=*/false);
+    run_paged_causal_conv1d_fusion(model);
+    model_ref = build_dilated_conv_fused_reference(history_length, dilation);
+}
+
+TEST_F(PagedCausalConv1DFusionTest, FusesPLEWithBiasAndNoOutputSlice) {
+    comparator.enable(FunctionsComparator::CmpValues::ATTRIBUTES);
+    comparator.enable(FunctionsComparator::CmpValues::CONST_VALUES);
+
+    constexpr size_t dilation = 3;
+    constexpr size_t history_length = (kernel_size - 1) * dilation;
+
+    model = build_dilated_conv_model(history_length, dilation, /*with_output_slice=*/false, /*with_bias=*/true);
+    run_paged_causal_conv1d_fusion(model);
+    model_ref = build_dilated_conv_fused_reference(history_length, dilation, /*with_bias=*/true);
+}

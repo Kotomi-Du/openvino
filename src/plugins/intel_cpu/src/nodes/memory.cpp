@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,12 +23,13 @@
 #include "edge.h"
 #include "graph.h"
 #include "graph_context.h"
+#include "kernels/scaled_attn/cache_spec.hpp"
+#include "kernels/scaled_attn/mha_kv_cache_codec.hpp"
 #include "memory_desc/cpu_memory_desc.h"
 #include "memory_desc/cpu_memory_desc_utils.h"
 #include "memory_state.h"
 #include "node.h"
 #include "nodes/common/blocked_desc_creator.h"
-#include "nodes/common/cpu_convert.h"
 #include "nodes/input.h"
 #include "nodes/memory_state_base.h"
 #include "nodes/node_config.h"
@@ -40,7 +41,8 @@
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/op/assign.hpp"
 #include "openvino/op/read_value.hpp"
-#include "openvino/util/common_util.hpp"
+#include "openvino/runtime/internal_properties.hpp"
+#include "openvino/util/container_util.hpp"
 #include "proxy_mem_blk.h"
 #include "scaled_attn.h"
 #include "shape_inference/shape_inference_cpu.hpp"
@@ -140,7 +142,7 @@ private:
 bool MemoryOutputBase::isSupportedOperation(const std::shared_ptr<const ov::Node>& op,
                                             std::string& errorMessage) noexcept {
     try {
-        if (!one_of(op->get_type_info(),
+        if (none_of(op->get_type_info(),
                     ov::op::v3::Assign::get_type_info_static(),
                     ov::op::v6::Assign::get_type_info_static())) {
             errorMessage = "Node is not an instance of Assign from the operation set v3 or v6.";
@@ -304,7 +306,7 @@ void MemoryOutput::resolveInPlaceEdges(Edge::LOOK look) {
 
     auto parentEdge = getParentEdgeAt(0);  // always only one parent edge
 
-    CPU_NODE_ASSERT(one_of(parentEdge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
+    CPU_NODE_ASSERT(any_of(parentEdge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
                     " Unexpected inplace resolve call to an allocated edge: ",
                     *parentEdge);
 
@@ -387,7 +389,7 @@ void MemoryOutputStub::resolveInPlaceEdges(Edge::LOOK look) {
 
     auto parentEdge = getParentEdgeAt(0);  // always only one parent edge
 
-    CPU_NODE_ASSERT(one_of(parentEdge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
+    CPU_NODE_ASSERT(any_of(parentEdge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
                     " Unexpected inplace resolve call to an allocated edge: ",
                     *parentEdge);
 
@@ -404,7 +406,7 @@ void MemoryOutputStub::assignExtMemory(const MemoryPtr& mem, const MemoryDescPtr
 bool MemoryInputBase::isSupportedOperation(const std::shared_ptr<const ov::Node>& op,
                                            std::string& errorMessage) noexcept {
     try {
-        if (!one_of(op->get_type_info(),
+        if (none_of(op->get_type_info(),
                     ov::op::v3::ReadValue::get_type_info_static(),
                     ov::op::v6::ReadValue::get_type_info_static(),
                     ov::intel_cpu::ReadValueWithSubgraph::get_type_info_static())) {
@@ -470,7 +472,7 @@ MemoryInputBase::MemoryInputBase(const std::string& id,
     } else if (mode::single_read_value == mode) {
         executeHook = &MemoryInputBase::bypassAssignState;
     } else {
-        THROW_CPU_NODE_ERR("Unexpected MemoryInput mode");
+        CPU_NODE_THROW("Unexpected MemoryInput mode");
     }
 }
 
@@ -614,7 +616,7 @@ MemoryInput::MemoryInput(const std::shared_ptr<ov::Node>& op, const GraphContext
     auto rvWithSubgraph = ov::as_type_ptr<ov::intel_cpu::ReadValueWithSubgraph>(op);
     if (rvWithSubgraph) {
         body = rvWithSubgraph->get_function();
-        subGraph = make_unique<ov::intel_cpu::Graph>();
+        subGraph = std::make_unique<ov::intel_cpu::Graph>();
         if (isDynamic) {
             shapeInference = InternalDynShapeInferFactory().makeShapeInfer();
         }
@@ -634,7 +636,7 @@ MemoryInput::MemoryInput(const std::string& id,
     : MemoryInputBase::MemoryInputBase(id, name, type, output_shape, output_prc, context, input_shape, input_prc, mode),
       body(std::move(func)) {
     if (haveSubgraph()) {
-        subGraph = make_unique<ov::intel_cpu::Graph>();
+        subGraph = std::make_unique<ov::intel_cpu::Graph>();
         if (isDynamic) {
             shapeInference = InternalDynShapeInferFactory().makeShapeInfer();
         }
@@ -716,7 +718,95 @@ void MemoryInput::initOptimalPrimitiveDescriptor() {
     }
 }
 
-// @todo add ascii diagramm for memory mapping / reuse
+// Memory mapping / reuse for a MemoryInput <-> MemoryOutput sibling pair
+//
+// 1. Sibling pair and shared VariableState (double-buffer)
+// ---------------------------------------------------------
+//
+//   MemoryInput::makeState() always creates VariableStateDoubleBuffer.
+//   (MemoryInputSingle and MemoryInputSDPA use single-buffer variants
+//    where input_mem() == output_mem(); commit() does not swap buffers,
+//    but is still used to clear the reset-state flag.)
+//
+//   +--------------------------- VariableStateDoubleBuffer ---------------+
+//   |  buf[0]                                               buf[1]        |
+//   |                                                                     |
+//   |  prime_mem()  = buf[buffer_num]                                     |
+//   |  second_mem() = buf[buffer_num ^ 1]                                 |
+//   |                                                                     |
+//   |  input_mem()  --> prime_mem()    output_mem() --> second_mem()      |
+//   |                     commit(): buffer_num ^= 1  (toggles prime)      |
+//   +---------------------------------------------------------------------+
+//        |  read                                             ^  write
+//        v                                                   |
+//   +--------------+  child edge  +--------------+  parent edge  +----------------+
+//   | MemoryInput  | -----------> | Computation  | ------------> | MemoryOutput   |
+//   | (ReadValue)  |              |    nodes     |               |   (Assign)     |
+//   +--------------+              +--------------+               +----------------+
+//        |                                                              |
+//        +----------------------- sibling link ------------------------+
+//                      (both share the same VariableState)
+//
+//
+// 2. ProxyMemoryBlock edge reuse (the "reuse" this diagram describes)
+// -------------------------------------------------------------------
+//
+//   MemoryInput::resolveInPlaceEdges (LOOK_UP):
+//     Creates one ProxyMemoryBlock and wraps it in Memory for every child edge.
+//     At runtime (runStatic / runDynamic):
+//
+//       if internDesc compatible with assignedMem.desc:
+//         memBlock->setMemBlock(assignedMem->getMemoryBlock())
+//         --> child edge memory IS the state buffer  (zero-copy path)
+//       else:
+//         memBlock->reset()
+//         dst->load(*src)
+//         --> child edge has its own block, data is copied from state
+//
+//   MemoryOutput::resolveInPlaceEdges (LOOK_DOWN):
+//     Creates one ProxyMemoryBlock and wraps it in Memory for the parent edge.
+//     When state is assigned (assignExtMemory):
+//
+//       if inpDesc compatible with extMemDesc:
+//         memBlock->setMemBlockResize(assignedMem->getMemoryBlock())
+//         --> parent edge memory IS the state buffer (zero-copy path)
+//       else:
+//         memBlock->reset()
+//         assignedMem->load(*inputMem) in runStatic
+//         --> parent edge has its own block, data is copied into state
+//
+//
+// 3. MemoryInput with subgraph (ReadValueWithSubgraph)
+// -----------------------------------------------------
+//
+//   registerToAllocationContext() wires edges so data never copies across boundaries:
+//
+//   outer parent edge[i]  --sharedMemFrom-->  subGraph input node[i] child edges
+//   outer child  edge[i]  <--sharedMemFrom--  subGraph output node[i] parent edge
+//
+//   Resulting zero-copy flow:
+//
+//   [outer parent nodes]
+//          |  outer parent edge (owns memory)
+//          v
+//   +------------------+
+//   | subGraph Input   |  (shared from outer parent edge - no allocation)
+//   |    nodes         |
+//   +------------------+
+//          |  inner edges (own memory)
+//          v
+//   +------------------+
+//   | subGraph body    |
+//   +------------------+
+//          |  inner output edge (owns memory)
+//          v
+//   +------------------+
+//   | subGraph Output  |  (shared from outer child edge - no allocation)
+//   |    node          |
+//   +------------------+
+//          |  outer child edge (owns memory)
+//          v
+//   [outer child nodes]
 void MemoryInput::createPrimitive() {
     if (haveSubgraph()) {
         CPU_NODE_ASSERT(getParentEdges().size() == subGraph->inputsNumber(),
@@ -901,7 +991,7 @@ void MemoryInput::resolveInPlaceEdges(Edge::LOOK look) {
     memBlock = std::make_shared<ProxyMemoryBlock>();
 
     for (auto&& edge : getChildEdgesAtPort(0)) {  // always only one child port
-        CPU_NODE_ASSERT(one_of(edge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
+        CPU_NODE_ASSERT(any_of(edge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
                         "Unexpected inplace resolve call to an allocated edge: ",
                         *edge);
 
@@ -994,13 +1084,13 @@ MemStatePtr MemoryInputSDPA::makeState() const {
     auto node = m_sdpaNode.lock();
     // retrieve the internal precision and axis order from the SDPA node
     CPU_NODE_ASSERT(node, "SDPA node is not available");
-    auto kv_precision = node->getKVCachePrecision();
-    ScaledDotProductAttention::SDPAQuantParam quant_param;
-    if (kv_precision == ov::element::u8) {
-        const auto& edges_to_past_key = node->getParentEdgeAt(node->getParentEdges().size() - 2);
-        const auto& past_key = std::dynamic_pointer_cast<node::MemoryInputBase>(edges_to_past_key->getParent());
-        OPENVINO_ASSERT(past_key);
-        quant_param = past_key->getId() == state_name ? node->getKeyQuantParam() : node->getValueQuantParam();
+    // SDPA port convention: K = inputNumber - 2, V = inputNumber - 1.
+    const auto sdpa_inputs = node->getOriginalInputsNumber();
+    const bool is_key = static_cast<size_t>(m_child_port_idx) == sdpa_inputs - 2;
+    auto kv_precision = is_key ? node->getKeyCachePrecision() : node->getValueCachePrecision();
+    ov::Extensions::Cpu::CacheSpec quant_param;
+    if (kv_precision == ov::element::u8 || kv_precision == ov::element::u4) {
+        quant_param = is_key ? node->getKeySpec() : node->getValueSpec();
     }
 
     VectorDims order = {2, 0, 1, 3};
@@ -1008,13 +1098,24 @@ MemStatePtr MemoryInputSDPA::makeState() const {
         order = node->getKVCacheOrder();
     }
 
-    auto internal_desc = ArbitraryOrderDescCreator(order).createSharedDesc(kv_precision, outputShapes.at(0));
+    // For TurboQuant codecs, internal cache hidden dim is packed byte size per head record,
+    // not the original head_dim. Model-space output still uses head_dim.
+    auto internal_shape = outputShapes.at(0);
+    const auto& qp = is_key ? node->getKeySpec() : node->getValueSpec();
+    if (qp.alg == ov::internal::CacheQuantAlgorithm::TURBO) {
+        auto min_dims = internal_shape.getMinDims();
+        auto max_dims = internal_shape.getMaxDims();
+        const auto head_dim = static_cast<int>(max_dims.back());
+        const auto packed =
+            ov::Extensions::Cpu::XARCH::turboq_head_bytes(head_dim, static_cast<int>(qp.precision.bitwidth()));
+        min_dims.back() = packed;
+        max_dims.back() = packed;
+        internal_shape = Shape(min_dims, max_dims);
+    }
 
-    return std::make_shared<VariableStateKVcache>(state_name,
-                                                  original_desc,
-                                                  internal_desc,
-                                                  quant_param.isByChannel,
-                                                  quant_param.groupSize);
+    auto internal_desc = ArbitraryOrderDescCreator(order).createSharedDesc(kv_precision, internal_shape);
+
+    return std::make_shared<VariableStateKVcache>(state_name, original_desc, internal_desc, quant_param);
 }
 
 void MemoryInputSDPA::runStatic(dnnl::stream strm) {
@@ -1023,9 +1124,16 @@ void MemoryInputSDPA::runStatic(dnnl::stream strm) {
 
 void MemoryInputSDPA::runDynamic([[maybe_unused]] dnnl::stream strm) {
     auto currentState = getAssignedState();
+    auto sdpaState = std::dynamic_pointer_cast<VariableStateKVcache>(currentState);
+    // For TBQ, internal cache has packed hidden dim but downstream shape inference
+    // expects the original model head_dim. Report model-space dims here; the SDPA executor
+    // reads the packed cache directly via m_k_state->internal_state_mem(), bypassing this output.
+    const auto& base_shape = getBaseMemDescAtOutputPort(0)->getShape();
+    const bool is_tbq = sdpaState && sdpaState->get_spec().alg == ov::internal::CacheQuantAlgorithm::TURBO;
+
     if (currentState->is_reset_state()) {
         if (getParentEdges().empty()) {
-            auto newShape = MemoryDescUtils::makeDummyShape(getBaseMemDescAtOutputPort(0)->getShape(), 0);
+            auto newShape = MemoryDescUtils::makeDummyShape(base_shape, 0);
             redefineOutputMemory({newShape.getStaticDims()});
         } else {
             auto inpMem = getSrcMemoryAtPort(0);
@@ -1039,7 +1147,13 @@ void MemoryInputSDPA::runDynamic([[maybe_unused]] dnnl::stream strm) {
                         " is empty, node name: ",
                         getName());
 
-        redefineOutputMemory({stateMem->getStaticDims()});
+        if (is_tbq) {
+            auto dims = stateMem->getStaticDims();
+            dims.back() = base_shape.getDims().back();
+            redefineOutputMemory({dims});
+        } else {
+            redefineOutputMemory({stateMem->getStaticDims()});
+        }
     }
 }
 
@@ -1049,7 +1163,7 @@ void MemoryInputSDPA::resolveInPlaceEdges(Edge::LOOK look) {
     } else {
         auto memDesc = getBaseMemDescAtOutputPort(0);
         for (auto&& edge : getChildEdgesAtPort(0)) {  // always only one child port
-            CPU_NODE_ASSERT(one_of(edge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
+            CPU_NODE_ASSERT(any_of(edge->getStatus(), Edge::Status::Uninitialized, Edge::Status::NotAllocated),
                             " Unexpected inplace resolve call to an allocated edge: ",
                             *edge);
 

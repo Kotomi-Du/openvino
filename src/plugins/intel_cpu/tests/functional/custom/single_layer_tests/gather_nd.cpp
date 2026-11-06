@@ -1,9 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "shared_test_classes/base/ov_subgraph.hpp"
+#include "common_test_utils/test_assertions.hpp"
+#include "functional_test_utils/skip_tests_config.hpp"
 #include "openvino/op/gather_nd.hpp"
+#include "shared_test_classes/base/ov_subgraph.hpp"
 
 namespace ov {
 namespace test {
@@ -18,13 +20,8 @@ using GatherNDLayerCPUTestParamSet = std::tuple<InputShape,                     
 class GatherNDLayerCPUTest : public testing::WithParamInterface<GatherNDLayerCPUTestParamSet>,
                              virtual public SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<GatherNDLayerCPUTestParamSet> obj) {
-        InputShape shapes;
-        std::pair<Shape, std::vector<int>> indexes;
-        ElementType dataElementType, idxElementType;
-        int batchDims;
-        std::tie(shapes, indexes, dataElementType, idxElementType, batchDims) = obj.param;
-
+    static std::string getTestCaseName(const testing::TestParamInfo<GatherNDLayerCPUTestParamSet>& obj) {
+        const auto& [shapes, indexes, dataElementType, idxElementType, batchDims] = obj.param;
         std::ostringstream results;
         results << "IS=" << ov::test::utils::partialShape2str({shapes.first}) << "_";
         results << "TS=";
@@ -41,12 +38,7 @@ public:
 
 protected:
     void SetUp() override {
-        InputShape shapes;
-        std::pair<Shape, std::vector<int>> indexes;
-        ElementType dataElementType, idxElementType;
-        int batchDims;
-        std::tie(shapes, indexes, dataElementType, idxElementType, batchDims) = this->GetParam();
-
+        const auto& [shapes, indexes, dataElementType, idxElementType, batchDims] = this->GetParam();
         targetDevice = ov::test::utils::DEVICE_CPU;
         init_input_shapes({shapes});
 
@@ -64,18 +56,13 @@ protected:
 class GatherND8LayerCPUTest : public testing::WithParamInterface<GatherNDLayerCPUTestParamSet>,
                               virtual public SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<GatherNDLayerCPUTestParamSet> obj) {
+    static std::string getTestCaseName(const testing::TestParamInfo<GatherNDLayerCPUTestParamSet>& obj) {
         return GatherNDLayerCPUTest::getTestCaseName(obj);
     }
 
 protected:
     void SetUp() override {
-        InputShape shapes;
-        std::pair<Shape, std::vector<int>> indexes;
-        ElementType dataElementType, idxElementType;
-        int batchDims;
-        std::tie(shapes, indexes, dataElementType, idxElementType, batchDims) = this->GetParam();
-
+        const auto& [shapes, indexes, dataElementType, idxElementType, batchDims] = this->GetParam();
         targetDevice = ov::test::utils::DEVICE_CPU;
         init_input_shapes({shapes});
 
@@ -193,6 +180,36 @@ INSTANTIATE_TEST_SUITE_P(smoke_GatherND8DynamicBD_2,
                          GatherND8LayerCPUTest,
                          subset_BD2,
                          GatherNDLayerCPUTest::getTestCaseName);
+
+class GatherND8LayerCPUErrorConditionTest : public GatherND8LayerCPUTest {};
+
+TEST_P(GatherND8LayerCPUErrorConditionTest, ThrowsOnOutOfRangeIndices) {
+    SKIP_IF_CURRENT_TEST_IS_DISABLED();
+    compile_model();
+    // Both CPU and TEMPLATE plugins should throw; a mismatch is a bug.
+    for (const auto& targetStaticShapeVec : targetStaticShapes) {
+        generate_inputs(targetStaticShapeVec);
+        OV_EXPECT_THROW(get_plugin_outputs(), ov::Exception, ::testing::_);
+        OV_EXPECT_THROW(calculate_refs(), ov::Exception, ::testing::_);
+    }
+}
+
+const std::vector<InputShape> inputShapesOutOfRange = {
+    {{4, 4}, {{4, 4}}},
+};
+
+const std::vector<std::pair<Shape, std::vector<int>>> indexesShapesOutOfRange = {
+    std::pair<Shape, std::vector<int>>{{1, 2}, {40, 0}},
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_GatherND8OutOfRangeIndices,
+                         GatherND8LayerCPUErrorConditionTest,
+                         ::testing::Combine(::testing::ValuesIn(inputShapesOutOfRange),
+                                            ::testing::ValuesIn(indexesShapesOutOfRange),
+                                            ::testing::ValuesIn(inputPrecisions),
+                                            ::testing::ValuesIn(indexesPrecisions),
+                                            ::testing::Values(0)),
+                         GatherND8LayerCPUTest::getTestCaseName);
 
 }  // namespace
 }  // namespace test

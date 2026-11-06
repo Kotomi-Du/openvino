@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,6 +8,7 @@
 #include "kernel.hpp"
 #include "kernel_args.hpp"
 #include "execution_config.hpp"
+#include "command_recorder.hpp"
 
 #include <memory>
 #include <vector>
@@ -17,6 +18,7 @@
 #endif
 
 namespace cldnn {
+struct surfaces_lock;
 
 // Possible sync methods for kernels in stream
 enum class SyncMethods {
@@ -54,6 +56,10 @@ public:
     virtual void finish() const = 0;
     virtual void wait() = 0;
 
+    /// @brief Get the command recorder associated with the stream.
+    /// @return Command recorder object or nullptr if not supported.
+    virtual command_recorder::ptr get_recorder() const { return nullptr; }
+
     virtual void set_arguments(kernel& kernel, const kernel_arguments_desc& args_desc, const kernel_arguments_data& args) = 0;
     virtual event::ptr enqueue_kernel(kernel& kernel,
                                       const kernel_arguments_desc& args_desc,
@@ -61,17 +67,20 @@ public:
                                       std::vector<event::ptr> const& deps,
                                       bool is_output_event = false) = 0;
     virtual event::ptr enqueue_marker(std::vector<event::ptr> const& deps, bool is_output_event = false) = 0;
-    virtual void enqueue_barrier() = 0;
+    /// @brief Enqueue a barrier that blocks all following commands.
+    /// @param deps A vector of events that the barrier should wait for.
+    /// @note If deps is empty, the barrier will wait for all previously enqueued commands to complete.
+    virtual void enqueue_barrier(const std::vector<event::ptr>& deps = {}) = 0;
     virtual event::ptr group_events(std::vector<event::ptr> const& deps) = 0;
     virtual void wait_for_events(const std::vector<event::ptr>& events) = 0;
     virtual event::ptr create_user_event(bool set) = 0;
     virtual event::ptr create_base_event() = 0;
+    virtual std::unique_ptr<surfaces_lock> create_surfaces_lock(const std::vector<memory::ptr> &mem) const = 0;
     virtual event::ptr aggregate_events(const std::vector<event::ptr>& events, bool group = false, bool is_output = false);
 
     QueueTypes get_queue_type() const { return m_queue_type; }
     SyncMethods get_sync_method() const { return m_sync_method; }
 
-    static QueueTypes detect_queue_type(engine_types engine_type, void* queue_handle);
     static SyncMethods get_expected_sync_method(const ExecutionConfig& config);
 
 #ifdef ENABLE_ONEDNN_FOR_GPU

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,8 +7,7 @@
 #include "openvino/core/extension.hpp"
 #include "openvino/frontend/visibility.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 class FRONTEND_API ProgressReporterExtension : public ov::Extension {
 public:
     /// \brief A progress reporting callback signature. A FunctionObject that matches this signature should be passed
@@ -35,5 +34,4 @@ public:
 private:
     progress_notifier_callback m_callback;
 };
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

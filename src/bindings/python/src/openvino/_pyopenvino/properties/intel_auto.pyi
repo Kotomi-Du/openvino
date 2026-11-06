@@ -1,11 +1,12 @@
 # type: ignore
 from __future__ import annotations
+import collections.abc
 import openvino._pyopenvino
 import typing
 """
 openvino.properties.intel_auto submodule that simulates ov::intel_auto
 """
-__all__ = ['SchedulePolicy', 'device_bind_buffer', 'enable_runtime_fallback', 'enable_startup_fallback', 'schedule_policy']
+__all__: list[str] = ['SchedulePolicy', 'device_bind_buffer', 'devices_utilization_threshold', 'enable_runtime_fallback', 'enable_startup_fallback', 'low_power_device', 'perf_curve_table', 'schedule_policy']
 class SchedulePolicy:
     """
     Members:
@@ -32,7 +33,7 @@ class SchedulePolicy:
         ...
     def __index__(self) -> int:
         ...
-    def __init__(self, value: int) -> None:
+    def __init__(self, value: typing.SupportsInt | typing.SupportsIndex) -> None:
         ...
     def __int__(self) -> int:
         ...
@@ -44,7 +45,7 @@ class SchedulePolicy:
         ...
     def __repr__(self) -> str:
         ...
-    def __setstate__(self, state: int) -> None:
+    def __setstate__(self, state: typing.SupportsInt | typing.SupportsIndex) -> None:
         ...
     def __str__(self) -> str:
         ...
@@ -61,6 +62,12 @@ def device_bind_buffer() -> str:
 def device_bind_buffer(arg0: bool) -> tuple[str, openvino._pyopenvino.OVAny]:
     ...
 @typing.overload
+def devices_utilization_threshold() -> str:
+    ...
+@typing.overload
+def devices_utilization_threshold(arg0: collections.abc.Mapping[str, typing.SupportsInt | typing.SupportsIndex]) -> tuple[str, openvino._pyopenvino.OVAny]:
+    ...
+@typing.overload
 def enable_runtime_fallback() -> str:
     ...
 @typing.overload
@@ -71,6 +78,21 @@ def enable_startup_fallback() -> str:
     ...
 @typing.overload
 def enable_startup_fallback(arg0: bool) -> tuple[str, openvino._pyopenvino.OVAny]:
+    ...
+@typing.overload
+def low_power_device() -> str:
+    ...
+@typing.overload
+def low_power_device(arg0: str) -> tuple[str, openvino._pyopenvino.OVAny]:
+    ...
+@typing.overload
+def perf_curve_table() -> str:
+    ...
+@typing.overload
+def perf_curve_table(arg0: str) -> tuple[str, openvino._pyopenvino.OVAny]:
+    ...
+@typing.overload
+def perf_curve_table(arg0: collections.abc.Mapping[str, collections.abc.Mapping[typing.SupportsInt | typing.SupportsIndex, typing.SupportsFloat | typing.SupportsIndex]]) -> tuple[str, openvino._pyopenvino.OVAny]:
     ...
 @typing.overload
 def schedule_policy() -> str:

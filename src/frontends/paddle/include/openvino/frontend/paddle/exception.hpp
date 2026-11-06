@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,8 +7,7 @@
 #include "openvino/frontend/exception.hpp"
 
 namespace ov {
-namespace frontend {
-namespace paddle {
+namespace frontend::paddle {
 
 class NodeContext;
 
@@ -26,8 +25,7 @@ protected:
 private:
     static std::string get_error_msg_prefix_paddle(const NodeContext& node);
 };
-}  // namespace paddle
-}  // namespace frontend
+}  // namespace frontend::paddle
 
 /// \brief Macro to check whether a boolean condition holds.
 /// \param node_context Object of NodeContext class

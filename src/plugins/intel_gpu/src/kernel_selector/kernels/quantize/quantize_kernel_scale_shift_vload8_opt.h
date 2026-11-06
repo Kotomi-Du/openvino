@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ public:
     using Parent = QuantizeKernelBase;
 
     QuantizeKernelScaleShift_vload8() : QuantizeKernelBase("quantize_gpu_scale_shift_vload8_opt") {}
-    virtual ~QuantizeKernelScaleShift_vload8() {}
+    ~QuantizeKernelScaleShift_vload8() override = default;
     CommonDispatchData SetDefault(const quantize_params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;
     ParamsKey GetSupportedKey() const override;

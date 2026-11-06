@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -47,6 +47,12 @@ DeviceFeaturesKey EngineInfo::get_supported_device_features_key() const {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void ParamsKey::EnableInputDataType(Datatype dt) {
     switch (dt) {
+        case Datatype::UINT2:
+            key.inputType.val.uint2 = 1;
+            break;
+        case Datatype::UINT3:
+            key.inputType.val.uint3 = 1;
+            break;
         case Datatype::INT4:
             key.inputType.val.int4 = 1;
             break;
@@ -83,6 +89,18 @@ void ParamsKey::EnableInputDataType(Datatype dt) {
         case Datatype::BF16:
             key.inputType.val.BF16 = 1;
             break;
+        case Datatype::F4E2M1:
+            key.inputType.val.F4E2M1 = 1;
+            break;
+        case Datatype::F8E4M3:
+            key.inputType.val.F8E4M3 = 1;
+            break;
+        case Datatype::F8E5M2:
+            key.inputType.val.F8E5M2 = 1;
+            break;
+        case Datatype::F8E8M0:
+            key.inputType.val.F8E8M0 = 1;
+            break;
         default:
             break;
     }
@@ -92,6 +110,12 @@ void ParamsKey::EnableAllInputDataType() { key.inputType.raw = 0xffffffff; }
 
 void ParamsKey::EnableOutputDataType(Datatype dt) {
     switch (dt) {
+        case Datatype::UINT2:
+            key.outputType.val.uint2 = 1;
+            break;
+        case Datatype::UINT3:
+            key.outputType.val.uint3 = 1;
+            break;
         case Datatype::INT4:
             key.outputType.val.int4 = 1;
             break;
@@ -128,6 +152,18 @@ void ParamsKey::EnableOutputDataType(Datatype dt) {
         case Datatype::BF16:
             key.outputType.val.BF16 = 1;
             break;
+        case Datatype::F4E2M1:
+            key.outputType.val.F4E2M1 = 1;
+            break;
+        case Datatype::F8E4M3:
+            key.outputType.val.F8E4M3 = 1;
+            break;
+        case Datatype::F8E5M2:
+            key.outputType.val.F8E5M2 = 1;
+            break;
+        case Datatype::F8E8M0:
+            key.outputType.val.F8E8M0 = 1;
+            break;
         default:
             break;
     }
@@ -152,11 +188,29 @@ void ParamsKey::EnableInputWeightsType(WeightsType wt) {
         case WeightsType::UINT4:
             key.inputWeightsType.val.uint4 = 1;
             break;
+        case WeightsType::UINT2:
+            key.inputWeightsType.val.uint2 = 1;
+            break;
+        case WeightsType::UINT3:
+            key.inputWeightsType.val.uint3 = 1;
+            break;
         case WeightsType::INT32:
             key.inputWeightsType.val.int32 = 1;
             break;
         case WeightsType::BF16:
             key.inputWeightsType.val.BF16 = 1;
+            break;
+        case WeightsType::F4E2M1:
+            key.inputWeightsType.val.F4E2M1 = 1;
+            break;
+        case WeightsType::F8E4M3:
+            key.inputWeightsType.val.F8E4M3 = 1;
+            break;
+        case WeightsType::F8E5M2:
+            key.inputWeightsType.val.F8E5M2 = 1;
+            break;
+        case WeightsType::F8E8M0:
+            key.inputWeightsType.val.F8E8M0 = 1;
             break;
         default:
             break;
@@ -182,11 +236,29 @@ void ParamsKey::EnableOutputWeightsType(WeightsType wt) {
         case WeightsType::UINT4:
             key.outputWeightsType.val.uint4 = 1;
             break;
+        case WeightsType::UINT2:
+            key.outputWeightsType.val.uint2 = 1;
+            break;
+        case WeightsType::UINT3:
+            key.outputWeightsType.val.uint3 = 1;
+            break;
         case WeightsType::INT32:
             key.outputWeightsType.val.int32 = 1;
             break;
         case WeightsType::BF16:
             key.outputWeightsType.val.BF16 = 1;
+            break;
+        case WeightsType::F4E2M1:
+            key.outputWeightsType.val.F4E2M1 = 1;
+            break;
+        case WeightsType::F8E4M3:
+            key.outputWeightsType.val.F8E4M3 = 1;
+            break;
+        case WeightsType::F8E5M2:
+            key.outputWeightsType.val.F8E5M2 = 1;
+            break;
+        case WeightsType::F8E8M0:
+            key.outputWeightsType.val.F8E8M0 = 1;
             break;
         default:
             break;
@@ -333,6 +405,12 @@ void ParamsKey::EnableConcatAxis(ConcatAxis a) {
         case ConcatAxis::W:
             key.restrict.val.dedicated.concat.axisW = 1;
             break;
+        case ConcatAxis::U:
+            key.restrict.val.dedicated.concat.axisU = 1;
+            break;
+        case ConcatAxis::V:
+            key.restrict.val.dedicated.concat.axisV = 1;
+            break;
         case ConcatAxis::FEATURE:
             key.restrict.val.dedicated.concat.axisFeature = 1;
             break;
@@ -344,7 +422,7 @@ void ParamsKey::EnableConcatAxis(ConcatAxis a) {
     }
 }
 
-void ParamsKey::EnableReampleType(ResampleType a) {
+void ParamsKey::EnableResampleType(ResampleType a) {
     switch (a) {
         case ResampleType::NEAREST_NEIGHBOR:
             key.restrict.val.dedicated.resample.nearest_neighbor = 1;
@@ -419,28 +497,33 @@ void ParamsKey::EnableQuantization(QuantizationType q) {
 }
 
 bool ParamsKey::Support(const ParamsKey& k) const {
-    if (!((key.restrict.raw & k.key.restrict.raw) == k.key.restrict.raw))  // check if this kernel supports this params
+    if (!((key.restrict.raw & k.key.restrict.raw) == k.key.restrict.raw)) {  // check if this kernel supports this params
         return false;
-    if (!((key.inputType.raw & k.key.inputType.raw) == k.key.inputType.raw))
+    }
+    if (!((key.inputType.raw & k.key.inputType.raw) == k.key.inputType.raw)) {
         return false;
-    if (!((key.outputType.raw & k.key.outputType.raw) == k.key.outputType.raw))
+    }
+    if (!((key.outputType.raw & k.key.outputType.raw) == k.key.outputType.raw)) {
         return false;
-    if (!((key.inputWeightsType.raw & k.key.inputWeightsType.raw) == k.key.inputWeightsType.raw))
+    }
+    if (!((key.inputWeightsType.raw & k.key.inputWeightsType.raw) == k.key.inputWeightsType.raw)) {
         return false;
-    if (!((key.outputWeightsType.raw & k.key.outputWeightsType.raw) == k.key.outputWeightsType.raw))
+    }
+    if (!((key.outputWeightsType.raw & k.key.outputWeightsType.raw) == k.key.outputWeightsType.raw)) {
         return false;
-    if (!((key.inputLayout & k.key.inputLayout) != 0 || key.inputLayout == k.key.inputLayout))
+    }
+    if ((key.inputLayout & k.key.inputLayout) == 0 && key.inputLayout != k.key.inputLayout) {
         return false;
-    if (!((key.outputLayout & k.key.outputLayout) != 0 || key.outputLayout == k.key.outputLayout))
+    }
+    if ((key.outputLayout & k.key.outputLayout) == 0 && key.outputLayout != k.key.outputLayout) {
         return false;
-    if (!((key.weightsInputLayout & k.key.weightsInputLayout) != 0 ||
-          key.weightsInputLayout == k.key.weightsInputLayout))
+    }
+    if ((key.weightsInputLayout & k.key.weightsInputLayout) == 0 &&
+          key.weightsInputLayout != k.key.weightsInputLayout) {
         return false;
-    if (!((key.weightsOutputLayout & k.key.weightsOutputLayout) != 0 ||
-          key.weightsOutputLayout == k.key.weightsOutputLayout))
-        return false;
-
-    return true;
+    }
+    return (key.weightsOutputLayout & k.key.weightsOutputLayout) != 0 ||
+          key.weightsOutputLayout == k.key.weightsOutputLayout;
 }
 
 ParamsKey ParamsKey::Merge(const ParamsKey& k) const {

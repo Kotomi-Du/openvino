@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -112,4 +112,21 @@ TEST(onnx_importer, exception_msg_onnx_reduce_wrong_type_v3) {
 
 TEST(onnx_importer, no_exception_onnx_reduce_wrong_type_v4) {
     EXPECT_NO_THROW(convert_model("reduce_wrong_type_v4.onnx"));
+}
+
+TEST(onnx_importer, exception_msg_softmax_axis_out_of_range) {
+    try {
+        convert_model("softmax_invalid_axis_opset11.onnx");
+        // Should have thrown, so fail if it didn't
+        FAIL() << "ONNX Importer did not detected incorrect model!";
+    } catch (const ::ov::Exception& e) {
+        EXPECT_HAS_SUBSTRING(e.what(), std::string("out of tensor range"));
+    }
+    // On MacOS after we re-throw ov::Exception exception, we couldn't catch it as is,
+    // thus below workaround.
+    catch (const std::exception& e) {
+        EXPECT_HAS_SUBSTRING(e.what(), std::string("out of tensor range"));
+    } catch (...) {
+        FAIL() << "The ONNX model importer failed for unexpected reason";
+    }
 }

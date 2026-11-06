@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class ConvolutionKernel_b_fs_yx_fsv4_int8 : public ConvolutionKernelBase {
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_b_fs_yx_fsv4_int8() : Parent("convolution_gpu_b_fs_yx_fsv4_int8") {}
-    virtual ~ConvolutionKernel_b_fs_yx_fsv4_int8() {}
+    ~ConvolutionKernel_b_fs_yx_fsv4_int8() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

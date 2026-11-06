@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,10 +12,7 @@
 #include "openvino/op/shape_of.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
 
@@ -44,12 +41,9 @@ OutputVector translate_multinomial(const NodeContext& context) {
         std::make_shared<v12::ScatterElementsUpdate>(input_shape, const_neg_1, num_samples, const_neg_1));
     multinomial = context.mark_node(std::make_shared<v1::Reshape>(multinomial, out_shape, false));
 
-    if (!context.input_is_none(5)) {
-        context.mutate_input(5, multinomial);
+    if (!context.input_is_none(4)) {
+        context.mutate_input(4, multinomial);
     }
     return {multinomial};
 };
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

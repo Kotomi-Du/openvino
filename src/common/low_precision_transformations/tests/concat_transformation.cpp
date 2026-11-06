@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -145,6 +145,25 @@ const std::vector<ConcatTransformationTestValues> testValues = {
             {{}, {}},
             ov::element::u8,
             {ov::element::f32, {128.f}, {0.1f}}
+        }
+    },
+    // dynamic concatenation axis with f16 multiply constants
+    {
+        {{-1, -1, 128}, {-1, -1, 128}},
+        std::int64_t{1},
+        LayerTransformation::createParamsU8I8().setUpdatePrecisions(false),
+        {
+            ov::element::f32,
+            {
+                {ov::element::f32, {}, DequantizationOperations::Multiply{128.f}.setConstantPrecision(ov::element::f16)},
+                {ov::element::f32, {}, DequantizationOperations::Multiply{128.f}.setConstantPrecision(ov::element::f16)}
+            }
+        },
+        {
+            ov::element::f32,
+            {{}, {}},
+            ov::element::f32,
+            {ov::element::f32, {}, DequantizationOperations::Multiply{128.f}.setConstantPrecision(ov::element::f16)}
         }
     },
     // dynamic concatenation axis, but the same per-tensor values

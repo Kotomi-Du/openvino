@@ -1,7 +1,8 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "intel_gpu/graph/kernel_impl_params.hpp"
+#include "loop.hpp"
 #include "loop_inst.h"
 #include "registry/implementation_map.hpp"
 #include "register.hpp"
@@ -97,8 +98,7 @@ struct loop_impl : typed_primitive_impl<loop> {
 
     loop_impl() : parent() {}
 
-    loop_impl(const loop_impl& other) : typed_primitive_impl<loop>(other),
-        _back_edges(other._back_edges) {}
+    loop_impl(const loop_impl& other) = default;
 
     explicit loop_impl(const loop_node& node) {
         set_node_params(node);
@@ -168,8 +168,9 @@ struct loop_impl : typed_primitive_impl<loop> {
         int64_t execution_condition = 1;
         if (!instance.get_initial_execution_id().empty()) {
             // Wait for completion of the execution_condition of outer_network
-            if (outer_network.has_event(instance.get_initial_execution_id()))
+            if (outer_network.has_event(instance.get_initial_execution_id())) {
                 outer_network.get_primitive_event(instance.get_initial_execution_id())->wait();
+            }
             memory::ptr first_execution_condition_mem = outer_network.get_primitive(instance.get_initial_execution_id())->output_memory_ptr();
             execution_condition = read_scalar_value(first_execution_condition_mem, stream);
         }
@@ -181,7 +182,8 @@ struct loop_impl : typed_primitive_impl<loop> {
             memory::ptr num_actual_iterations_mem = outer_network.get_primitive(instance.get_num_iterations_id())->output_memory_ptr();
             write_scalar_value(num_actual_iterations_mem, stream, current_iteration_idx);
 
-            instance.update_output_layout();
+            stream.wait_for_events(events);
+            instance.handle_zero_iterations();
             ev->set();
             return ev;
         }
@@ -232,7 +234,7 @@ struct loop_impl : typed_primitive_impl<loop> {
             }
 
             // Collect output events for waiting for all iterations finishing
-            for (auto& out : body_network->get_outputs()) {
+            for (const auto& out : body_network->get_outputs()) {
                 auto output_id = out->id();
                 if (body_network->has_event(output_id)) {
                     auto output_event = body_network->get_primitive_event(output_id);
@@ -278,8 +280,9 @@ struct loop_impl : typed_primitive_impl<loop> {
         GPU_DEBUG_LOG << "current_iteration_idx(" << instance.get_num_iterations_id() << ", "
                         << num_actual_iterations_mem << ")  : " << current_iteration_idx << std::endl;
 
-        if (is_dynamic)
+        if (is_dynamic) {
             instance.update_output_layout();
+        }
         instance.postprocess_output_memory(is_dynamic, current_iteration_idx);
 
         ev->set();
@@ -303,6 +306,11 @@ struct loop_impl : typed_primitive_impl<loop> {
 private:
     std::vector<cldnn::loop::backedge_mapping> _back_edges;
 };
+
+std::unique_ptr<primitive_impl> LoopImplementationManager::create_impl(const program_node& node, const kernel_impl_params& params) const {
+    assert(node.is_type<loop>());
+    return loop_impl::create(static_cast<const loop_node&>(node), params);
+}
 
 namespace detail {
 attach_loop_common::attach_loop_common() {

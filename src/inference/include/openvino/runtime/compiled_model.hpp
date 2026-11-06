@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -52,6 +52,26 @@ public:
      * @brief Default constructor.
      */
     CompiledModel() = default;
+
+    /**
+     * @brief Default copy constructor.
+     */
+    CompiledModel(const CompiledModel&) = default;
+
+    /**
+     * @brief Default copy assignment operator.
+     */
+    CompiledModel& operator=(const CompiledModel&) = default;
+
+    /**
+     * @brief Default move constructor.
+     */
+    CompiledModel(CompiledModel&&) = default;
+
+    /**
+     * @brief Default move assignment operator.
+     */
+    CompiledModel& operator=(CompiledModel&&) = default;
 
     /**
      * @brief Destructor that preserves unloading order of an implementation object and reference to library.

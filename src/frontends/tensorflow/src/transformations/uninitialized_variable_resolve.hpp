@@ -1,21 +1,17 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
-
 #include <memory>
 #include <utility>
 
 #include "openvino/pass/graph_rewrite.hpp"
 #include "openvino/pass/pass.hpp"
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace pass {
+namespace ov::frontend::tensorflow::pass {
 
-// This transformation tries to resolve unitialized variables (like HashTable)
+// This transformation tries to resolve uninitialized variables (like HashTable)
 // it borrows value of Variable that was used for some state (or node) in a graph
 class UninitializedVariableResolver : public ov::pass::MatcherPass {
 public:
@@ -23,7 +19,4 @@ public:
     UninitializedVariableResolver();
 };
 
-}  // namespace pass
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::pass

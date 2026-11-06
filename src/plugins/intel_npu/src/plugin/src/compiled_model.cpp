@@ -1,80 +1,82 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "compiled_model.hpp"
 
+#include <cinttypes>
 #include <fstream>
 #include <string_view>
 
 #include "async_infer_request.hpp"
+#include "compiled_model_property_manager.hpp"
+#include "executor.hpp"
+#include "intel_npu/common/device_helpers.hpp"
 #include "intel_npu/common/itt.hpp"
 #include "intel_npu/config/config.hpp"
 #include "intel_npu/config/options.hpp"
+#include "intel_npu/utils/utils.hpp"
 #include "metadata.hpp"
 #include "openvino/pass/constant_folding.hpp"
-#include "openvino/pass/manager.hpp"
-#include "openvino/runtime/properties.hpp"
-#include "openvino/runtime/system_conf.hpp"
-#include "openvino/runtime/threading/executor_manager.hpp"
 #include "transformations/utils/utils.hpp"
 
-namespace {
-
-const std::vector<size_t> CONSTANT_NODE_DUMMY_SHAPE{1};
-
-}
-
 namespace intel_npu {
-
-using intel_npu::envVarStrToBool;
 
 CompiledModel::CompiledModel(const std::shared_ptr<const ov::Model>& model,
                              const std::shared_ptr<const ov::IPlugin>& plugin,
                              const std::shared_ptr<IDevice>& device,
                              const std::shared_ptr<IGraph>& graph,
-                             const FilteredConfig& config)
-    : ICompiledModel(model, plugin),
-      _config(config),
+                             const Config& config,
+                             const ov::AnyMap& properties,
+                             const std::optional<int64_t>& batchSize)
+    : ICompiledModel(model, plugin, nullptr, nullptr),
       _logger("CompiledModel", config.get<LOG_LEVEL>()),
       _device(device),
-      _graph(graph) {
+      _graph(graph),
+      _batchSize(batchSize),
+      _propertiesManager(
+          std::make_unique<CompiledModelPropertyManager>(config, properties, _device, _graph, _batchSize, _logger)) {
     OV_ITT_SCOPED_TASK(itt::domains::NPUPlugin, "CompiledModel::CompiledModel");
 
-    OV_ITT_TASK_CHAIN(COMPILED_MODEL, itt::domains::NPUPlugin, "CompiledModel::CompiledModel", "initialize_properties");
-    _properties = std::make_unique<Properties>(PropertiesType::COMPILED_MODEL, _config);
-    _properties->registerProperties();
+    OPENVINO_ASSERT(_graph != nullptr, "Invalid graph handle! Failed to initialize compiled model!");
+    _logger.info("The current compiled model is a %s one", to_string(_graph->get_kind()));
 
-    configure_stream_executors();
-
-    OV_ITT_TASK_SKIP(COMPILED_MODEL);
-}
-
-CompiledModel::~CompiledModel() {
-    _logger.debug("~CompiledModel()");
-    std::dynamic_pointer_cast<ov::threading::IStreamsExecutor>(get_task_executor())->cpu_reset();
+    // Immediate-init path: when weights load is not deferred, initialize the graph now.
+    // The deferred path (CREATE_EXECUTOR off or DEFER_WEIGHTS_LOAD on) is handled in create_infer_request().
+    if (config.get<CREATE_EXECUTOR>() && !config.get<DEFER_WEIGHTS_LOAD>()) {
+        _graph->initialize(config);
+    } else {
+        _logger.info("Graph initialize is deferred; weights will be loaded on the first infer request creation.");
+    }
 }
 
 std::shared_ptr<ov::IAsyncInferRequest> CompiledModel::create_infer_request() const {
     OV_ITT_SCOPED_TASK(itt::domains::NPUPlugin, "CompiledModel::create_infer_request");
 
     // sanity check
-    if (_device == nullptr) {
-        OPENVINO_THROW("No available devices. Failed to create infer request!");
+    OPENVINO_ASSERT(_device != nullptr, "No available devices. Failed to create infer request!");
+
+    const auto localConfig = _propertiesManager->getConfig();
+    if (!localConfig.get<CREATE_EXECUTOR>() || localConfig.get<DEFER_WEIGHTS_LOAD>()) {
+        OPENVINO_ASSERT(_graph != nullptr, "Invalid graph handle! Failed to create infer request!");
+        _graph->initialize(localConfig);
     }
 
-    if (!_config.get<CREATE_EXECUTOR>() || _config.get<DEFER_WEIGHTS_LOAD>()) {
-        if (_graph == nullptr) {
-            OPENVINO_THROW("Invalid graph handle! Failed to create infer request!");
-        }
-        _graph->initialize(_config);
-    }
+    OPENVINO_ASSERT(_graph != nullptr && _graph->init_completed(),
+                    "Graph is unavailable or failed to initialize. The driver may be missing or too old to run "
+                    "inference for this blob.");
 
-    const std::shared_ptr<SyncInferRequest>& syncInferRequest =
-        _device->createInferRequest(shared_from_this(), _config);
-    syncInferRequest->initialize_states();
+    const std::shared_ptr<InferRequest>& inferRequest = _device->createInferRequest(shared_from_this(), localConfig);
 
-    return std::make_shared<AsyncInferRequest>(syncInferRequest,
+    std::call_once(_streamExecutorsInitFlag, [this, &localConfig] {
+        const_cast<CompiledModel*>(this)->configure_stream_executors(
+            localConfig.get<NUM_STREAMS>(),
+            localConfig.get<RUN_INFERENCES_SEQUENTIALLY>(),
+            localConfig.get<SHARED_COMMON_QUEUE>(),
+            localConfig.get<SHARED_COMMON_QUEUE>() ? _graph->get_command_queue_desc().key() : 0);
+    });
+
+    return std::make_shared<AsyncInferRequest>(inferRequest,
                                                get_task_executor(),
                                                _resultExecutor,
                                                get_callback_executor());
@@ -88,110 +90,195 @@ std::shared_ptr<ov::ISyncInferRequest> CompiledModel::create_sync_infer_request(
 
 void CompiledModel::export_model(std::ostream& stream) const {
     _logger.debug("CompiledModel::export_model");
-    size_t blobSizeBeforeVersioning = _graph->export_blob(stream);
 
-    auto meta = Metadata<CURRENT_METADATA_VERSION>(blobSizeBeforeVersioning, CURRENT_OPENVINO_VERSION);
-    meta.write(stream);
+    const auto localConfig = _propertiesManager->getConfig();
+
+    const bool rawBlobExportRequested = localConfig.get<EXPORT_RAW_BLOB>();
+    if (rawBlobExportRequested) {
+        OPENVINO_ASSERT(_graph->get_blob_type() == BlobType::ELF && _graph->get_kind() == GraphKind::Weightful,
+                        "Requested raw blob export, but the graph is not a weightful ELF one.");
+    }
+
+    uint64_t blobSizesBeforeVersioning;
+    std::optional<uint64_t> blobSizeAfterEncryption = std::nullopt;
+    std::optional<std::vector<uint64_t>> initBlobSizes;
+
+    if (localConfig.has<CACHE_ENCRYPTION_CALLBACKS>() &&
+        localConfig.get<CACHE_ENCRYPTION_CALLBACKS>().encrypt != nullptr) {
+        std::string encryptedBlobStr;
+        {
+            std::string tmpBlobStr;
+            {
+                std::stringstream tmpStringStream;
+                std::tie(blobSizesBeforeVersioning, initBlobSizes) =
+                    _graph->export_blob(tmpStringStream);  // +1x blob size
+                tmpBlobStr = tmpStringStream.str();        // +2x blob size
+            }  // -1x blob size when deallocating temporary stringstream
+            encryptedBlobStr = localConfig.get<CACHE_ENCRYPTION_CALLBACKS>().encrypt(tmpBlobStr);  // +2x blob size
+            blobSizeAfterEncryption = encryptedBlobStr.size();
+        }  // -1x blob size when deallocating temporary blob string
+        stream.write(encryptedBlobStr.c_str(), encryptedBlobStr.size());
+    }  // -1x blob size when deallocating encrypted blob string
+    else {
+        //  Write blob directly to user's output stream
+        std::tie(blobSizesBeforeVersioning, initBlobSizes) = _graph->export_blob(stream);
+    }
+
+    if (rawBlobExportRequested) {
+        return;
+    }
+
+    std::optional<std::vector<ov::Layout>> inputLayouts = std::vector<ov::Layout>();
+    std::optional<std::vector<ov::Layout>> outputLayouts = std::vector<ov::Layout>();
+
+    for (const ov::Output<const ov::Node>& nodeOutput : inputs()) {
+        inputLayouts->push_back(
+            std::dynamic_pointer_cast<const ov::op::v0::Parameter>(nodeOutput.get_node_shared_ptr())->get_layout());
+    }
+    for (const ov::Output<const ov::Node>& nodeOutput : outputs()) {
+        outputLayouts->push_back(
+            std::dynamic_pointer_cast<const ov::op::v0::Result>(nodeOutput.get_node_shared_ptr())->get_layout());
+    }
+
+    std::optional<uint32_t> compilerVersion = std::nullopt;
+    if (localConfig.has(ov::intel_npu::compiler_version.name())) {
+        compilerVersion = localConfig.get<COMPILER_VERSION>();
+    }
+
+    Metadata<CURRENT_METADATA_VERSION>(blobSizesBeforeVersioning,
+                                       CURRENT_OPENVINO_VERSION,
+                                       initBlobSizes,
+                                       _batchSize,
+                                       inputLayouts,
+                                       outputLayouts,
+                                       compilerVersion,
+                                       blobSizeAfterEncryption,
+                                       _graph->get_compatibility_descriptor(),
+                                       _graph->get_blob_type())
+        .write(stream);
 }
 
 std::shared_ptr<const ov::Model> CompiledModel::get_runtime_model() const {
     ov::ParameterVector parameters;
     ov::ResultVector results;
+    std::shared_ptr<const ov::Model> dummyModel;
 
-    for (const IODescriptor& inputDescriptor : _graph->get_metadata().inputs) {
-        if (inputDescriptor.isStateInput || inputDescriptor.isStateOutput || inputDescriptor.isShapeTensor) {
-            continue;
+    try {
+        for (const ov::Output<const ov::Node>& nodeOutput : inputs()) {
+            std::shared_ptr<ov::Node> clonedParameter =
+                std::dynamic_pointer_cast<const ov::op::v0::Parameter>(nodeOutput.get_node_shared_ptr())
+                    ->clone_with_new_inputs({});
+            parameters.push_back(std::dynamic_pointer_cast<ov::op::v0::Parameter>(clonedParameter));
         }
 
-        std::shared_ptr<ov::op::v0::Parameter> parameter =
-            std::make_shared<ov::op::v0::Parameter>(inputDescriptor.precision, inputDescriptor.shapeFromCompiler);
+        for (const ov::Output<const ov::Node>& nodeOutput : outputs()) {
+            const auto resultOriginal =
+                std::dynamic_pointer_cast<const ov::op::v0::Result>(nodeOutput.get_node_shared_ptr());
 
-        parameter->set_friendly_name(inputDescriptor.nodeFriendlyName);
-        parameter->output(0).get_tensor().set_names(inputDescriptor.outputTensorNames);
-        parameters.push_back(std::move(parameter));
-    }
+            // A dummy node is required for constructing and populating the Result node. A Constant one is perhaps the
+            // most fitting choice here. A dimension without an upper bound has no size to allocate, so it is left
+            // empty.
+            ov::Shape constantShape;
+            const auto& partialShape = nodeOutput.get_partial_shape();
+            if (partialShape.rank().is_static()) {
+                for (const ov::Dimension& dimension : partialShape) {
+                    constantShape.push_back(dimension.get_interval().has_upper_bound() ? dimension.get_max_length()
+                                                                                       : 0);
+                }
+            }
+            std::shared_ptr<ov::Node> constantDummy =
+                std::make_shared<ov::op::v0::Constant>(nodeOutput.get_element_type(), constantShape);
+            // Attached to the Result node as output tensor in order to provide the correct tensor names. Additionally,
+            // the dummy Constant node could use only static shapes. If the shape is dynamic, this construct can provide
+            // the correct shape to the Result node.
+            const std::shared_ptr<ov::descriptor::Tensor>& tensorDummy =
+                std::make_shared<ov::descriptor::Tensor>(nodeOutput.get_element_type(),
+                                                         nodeOutput.get_partial_shape(),
+                                                         nodeOutput.get_names());
 
-    // The "result" nodes require a parent node in order to satisfy the API conventions. Additionally, a dummy shape for
-    // the "Constant" node was required since the specific constructor does not accept "ov::PartialShape" values (a
-    // constant can't have dynamic shape). The dummy tensor was also brought in order to register the correct,
-    // potentially dynamic, output shape.
-    for (const IODescriptor& outputDescriptor : _graph->get_metadata().outputs) {
-        if (outputDescriptor.isStateInput || outputDescriptor.isStateOutput || outputDescriptor.isShapeTensor) {
-            continue;
+            auto& resultCopy = results.emplace_back(std::make_shared<ov::op::v0::Result>(constantDummy));
+            resultCopy->output(0).set_tensor_ptr(tensorDummy);
+            resultCopy->set_friendly_name(resultOriginal->get_friendly_name());
+
+            dummyModel = std::make_shared<ov::Model>(results, parameters);
         }
-
-        std::shared_ptr<ov::Node> constantDummy = std::make_shared<ov::op::v0::Constant>(
-            outputDescriptor.precision,
-            outputDescriptor.shapeFromCompiler.to_shape().empty() ? CONSTANT_NODE_DUMMY_SHAPE
-                                                                  : outputDescriptor.shapeFromCompiler.to_shape());
-
-        const std::shared_ptr<ov::descriptor::Tensor>& tensorDummy =
-            std::make_shared<ov::descriptor::Tensor>(outputDescriptor.precision,
-                                                     outputDescriptor.shapeFromCompiler,
-                                                     outputDescriptor.outputTensorNames);
-
-        auto& result = results.emplace_back(std::make_shared<ov::op::v0::Result>(constantDummy));
-        result->output(0).set_tensor_ptr(tensorDummy);
-        result->set_friendly_name(outputDescriptor.nodeFriendlyName);
+    } catch (const std::exception& e) {
+        OPENVINO_THROW("Failed to construct a dummy ov::Model object as runtime model. ", e.what());
     }
 
     _logger.warning("Returning a dummy ov::Model object that contains only the given parameter and result nodes");
 
-    return std::make_shared<ov::Model>(results, parameters);
+    return dummyModel;
 }
 
 void CompiledModel::set_property(const ov::AnyMap& properties) {
-    // 1. Set the property via Properties interface
-    _properties->set_property(properties);
-
-    // 2. Extra hooks
-    if (properties.count(std::string(WORKLOAD_TYPE::key())) != 0) {
-        if (_graph != nullptr) {
-            const auto workloadType = properties.at(ov::workload_type.name()).as<ov::WorkloadType>();
-            _graph->set_workload_type(workloadType);
-        }
-    }
+    _propertiesManager->setProperty(properties);
 }
 
 ov::Any CompiledModel::get_property(const std::string& name) const {
-    // special cases
-    if (name == ov::model_name.name()) {
-        OPENVINO_ASSERT(_graph != nullptr, "Missing graph");
-        return _graph->get_metadata().name;
-    } else {
-        // default behaviour
-        return _properties->get_property(name);
-    }
+    return _propertiesManager->getProperty(name);
 }
 
 const std::shared_ptr<IGraph>& CompiledModel::get_graph() const {
     return _graph;
 }
 
-const FilteredConfig& CompiledModel::get_config() const {
-    return _config;
+void CompiledModel::release_memory() {
+    if (_graph != nullptr) {
+        _graph->evict_memory();
+    }
 }
 
-void CompiledModel::configure_stream_executors() {
-    std::shared_ptr<ov::threading::ITaskExecutor> task_executor;
-    if (get_plugin()->get_property(ov::internal::exclusive_async_requests.name(), {}).as<bool>()) {
-        task_executor = ov::threading::executor_manager()->get_executor("NPU");
-    } else if (get_property(ov::hint::enable_cpu_pinning.name()).as<bool>()) {
-        auto executor_config = ov::threading::IStreamsExecutor::Config{
-            /* name = */ "Intel NPU plugin executor",
-            /* streams = */ get_plugin()->get_property(ov::num_streams.name(), {}).as<ov::streams::Num>(),
-            /* threads_per_stream = */ 1,
-            /* thread_preferred_core_type = */ ov::hint::SchedulingCoreType::PCORE_ONLY,
-            /* cpu_reservation = */ true};
-        task_executor = std::make_shared<ov::threading::CPUStreamsExecutor>(executor_config);
-    } else {
-        task_executor = std::make_shared<ov::threading::CPUStreamsExecutor>(
-            ov::threading::IStreamsExecutor::Config{"NPUPlugin executor"});
+void CompiledModel::configure_stream_executors(ov::streams::Num numStreams,
+                                               bool runInferencesSequentially,
+                                               bool useSharedExecutors,
+                                               uint64_t sharedExecutorsId) {
+    // In case of sequential execution of async requests for the same compiled model, the compiled model must use
+    // dedicated executors with a single thread to ensure sequential execution of its async requests.
+    if (runInferencesSequentially) {
+        if (useSharedExecutors) {
+            // In case of sequential execution with shared executors, use the global single-threaded executors
+            // provided by the executor manager, so that async requests of all compiled models belonging to the same
+            // shared group are also executed sequentially relative to each other.
+            set_task_executor(ov::threading::executor_manager()->get_executor(
+                std::string("Intel NPU plugin start inferences executor") + " " + std::to_string(sharedExecutorsId)));
+            _resultExecutor = ov::threading::executor_manager()->get_executor(
+                std::string("Intel NPU plugin wait inferences executor") + " " + std::to_string(sharedExecutorsId));
+
+            return;
+        }
+
+        set_task_executor(make_executor("Intel NPU plugin start inferences executor", 1));
+        _resultExecutor = make_executor("Intel NPU plugin wait inferences executor", 1);
+
+        return;
     }
 
-    set_task_executor(std::move(task_executor));
-    const auto executorId = _graph->get_metadata().name + "_NPUResultExecutor";
-    _resultExecutor = ov::threading::executor_manager()->get_executor(executorId);
+    if (numStreams > 0) {
+        // Use a single thread for start executors to reduce contention on the shared task queue, while scaling wait
+        // executor workers with num_streams to improve result fetch throughput. Callbacks intentionally run on wait
+        // threads.
+        const size_t workers = static_cast<size_t>(numStreams);
+
+        set_task_executor(make_executor("Intel NPU plugin start inferences executor", 1));
+        _resultExecutor = make_executor("Intel NPU plugin wait inferences executor", workers);
+    } else if (numStreams == 0) {
+        // For special case when num_streams is explicitly set to 0, start inference will happen in the same thread as
+        // the call to InferRequest::start_async, while wait executor will still be created with a single worker.
+        // Callback execution is intentionally done on that wait thread.
+        set_task_executor(make_executor("Intel NPU plugin start inferences executor", 0));
+        _resultExecutor = make_executor("Intel NPU plugin wait inferences executor", 1);
+    } else {
+        // Auto mode (default): workers are created on demand. The baseline number of workers that stay alive during
+        // idle periods (30 s timeout) is derived from the optimal number of parallel infer requests recommended for
+        // the current platform in THROUGHPUT mode. The pool can then grow dynamically to match runtime workload.
+        const size_t keepWorkers = static_cast<size_t>(
+            utils::getOptimalNumberOfInferRequestsInParallel(_device->getName(),
+                                                             ov::hint::PerformanceMode::THROUGHPUT));
+
+        set_task_executor(make_executor("Intel NPU plugin run inferences executor", keepWorkers, true));
+        _resultExecutor = nullptr;
+    }
 }
 
 }  // namespace intel_npu

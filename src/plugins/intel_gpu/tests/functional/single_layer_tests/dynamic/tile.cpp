@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -22,15 +22,10 @@ using TileLayerTestParamsSet = typename std::tuple<
 class TileLayerGPUTest : public testing::WithParamInterface<TileLayerTestParamsSet>,
                          public ov::test::SubgraphBaseTest {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<TileLayerTestParamsSet> obj) {
+    static std::string getTestCaseName(const testing::TestParamInfo<TileLayerTestParamsSet>& obj) {
         TileLayerTestParamsSet basicParamsSet = obj.param;
 
-        std::vector<ov::test::InputShape> input_shapes;
-        std::vector<int64_t> repeats;
-        ov::element::Type_t model_type;
-        bool is_repeats_const;
-        std::string deviceName;
-        std::tie(input_shapes, repeats, model_type, is_repeats_const, deviceName) = basicParamsSet;
+        const auto& [input_shapes, repeats, model_type, is_repeats_const, deviceName] = basicParamsSet;
 
         std::ostringstream result;
         result << "IS=(";
@@ -55,10 +50,9 @@ protected:
     void SetUp() override {
         TileLayerTestParamsSet basicParamsSet = this->GetParam();
 
-        std::vector<ov::test::InputShape> input_shapes;
-        ov::element::Type_t model_type;
-        bool is_repeats_const;
-        std::tie(input_shapes, repeatsData, model_type, is_repeats_const, targetDevice) = basicParamsSet;
+        const auto& [input_shapes, _repeatsData, model_type, is_repeats_const, _targetDevice] = basicParamsSet;
+        repeatsData = _repeatsData;
+        targetDevice = _targetDevice;
 
         if (input_shapes.front().first.rank() != 0) {
             inputDynamicShapes.push_back(input_shapes.front().first);
@@ -163,6 +157,18 @@ const std::vector<std::vector<ov::test::InputShape>> dynamic_input_shapes4D = {
     }
 };
 
+const std::vector<std::vector<ov::test::InputShape>> dynamic_input_shapes3D = {
+    {
+        {
+            {-1, -1, 2048},
+            {
+                {1, 16, 2048},
+                {2, 7, 2048}
+            }
+        }
+    }
+};
+
 const std::vector<std::vector<ov::test::InputShape>> dynamic_input_shapes5D = {
     {
         { // Origin dynamic shapes
@@ -212,6 +218,15 @@ INSTANTIATE_TEST_SUITE_P(DynamicShape4D, TileLayerGPUTest,
                                         ::testing::Values(true, false),
                                         ::testing::Values(ov::test::utils::DEVICE_GPU)),
                         TileLayerGPUTest::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(DynamicShape3DWith4DRepeats, TileLayerGPUTest,
+                         ::testing::Combine(
+                             ::testing::ValuesIn(dynamic_input_shapes3D),
+                             ::testing::Values(std::vector<int64_t>{4, 1, 1, 1}),
+                             ::testing::ValuesIn(model_types),
+                             ::testing::Values(true, false),
+                             ::testing::Values(ov::test::utils::DEVICE_GPU)),
+                         TileLayerGPUTest::getTestCaseName);
 
 INSTANTIATE_TEST_SUITE_P(DynamicShape5D, TileLayerGPUTest,
                                 ::testing::Combine(

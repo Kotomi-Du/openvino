@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -389,6 +389,13 @@ TEST_P(UnpackTests, i4) {
     ASSERT_TRUE(details::fp16ArraysMatch(output, ref_output, input));
 }
 
+using UnpackTestsU4 = UnpackTestsTmpl<UnpackTestsBase>;
+
+TEST_P(UnpackTestsU4, u4) {
+    ASSERT_NO_THROW_WITH_MESSAGE(ov::npuw::util::unpack(from, to, ov::npuw::util::UnpackOptions{useParallelFor, nPartitions, strictPartitions}));
+    ASSERT_TRUE(details::fp16ArraysMatch(output, ref_output, input));
+}
+
 class UnpackWithScaleTestsBase : public UnpackTestsBase {
 protected:
     bool isNegative() const override {
@@ -443,6 +450,120 @@ TEST_P(UnpackWithScaleTests, i4_scale) {
     }
 }
 
+class UnpackWithScaleTestsI4F16Base : public UnpackTestsBase {
+protected:
+    bool isNegative() const override {
+        if (scale_shape.size() != 3 && scale_shape.size() != 2) return true;
+        if (input_shape.back() % 64) return true;
+        if (toType != ov::element::f16) return true;
+
+        return false;
+    }
+
+    void make_ref_output() override {
+        if (isNegative()) return;
+
+        size_t nElements = from->get_size();
+
+        details::unpack_i4f16(input.data(), ref_output.data(), static_cast<int>(nElements));
+
+        uint16_t * ref = reinterpret_cast<uint16_t*>(ref_output.data());
+        uint16_t * scale_f16 = reinterpret_cast<uint16_t*>(scale->data());
+        float * scale_f32 = reinterpret_cast<float*>(scale->data());
+
+        auto C = input_shape[0];
+        auto H = input_shape[1];
+        auto W = input_shape[2];
+        for (size_t c = 0; c < C; c++) {
+            for (size_t h = 0; h < H; h++) {
+                for (size_t w = 0; w < W; w++) {
+                    size_t ref_index = c * H * W + h * W + w;
+                    float ref_scaled = details::half_to_float(ref[ref_index]);
+                    size_t scale_index = c * W + w;
+                    if (scaleType == ov::element::f32) {
+                        ref_scaled *= scale_f32[scale_index];
+                    } else if (scaleType == ov::element::f16) {
+                        ref_scaled *= details::half_to_float(scale_f16[scale_index]);
+                    }
+                    *(ref + ref_index) = details::float_to_half(ref_scaled);
+                }
+            }
+        }
+    }
+
+};
+
+using UnpackWithScaleTestsI4F16 = UnpackTestsTmpl<UnpackWithScaleTestsI4F16Base>;
+
+TEST_P(UnpackWithScaleTestsI4F16, i4f16_scale) {
+    ASSERT_NO_THROW_IF(!isNegative(),
+                      ov::npuw::util::unpack(from, scale, to, ov::npuw::util::UnpackOptions{useParallelFor, nPartitions, strictPartitions}));
+    if (!isNegative()) {
+        ASSERT_TRUE(details::fp16ArraysMatch(output, ref_output, input));
+    }
+}
+
+class UnpackF8WithScaleTestsBase : public UnpackTestsBase {
+protected:
+    bool isNegative() const override {
+        if (scale_shape.size() != 3 && scale_shape.size() != 2) return true;
+        if (input_shape.back() % 64) return true;
+        if ((from->get_size() / scale->get_size()) % 64) return true;
+        if (toType != ov::element::f16) return true;
+
+        return false;
+    }
+
+    void make_ref_output() override {
+        if (isNegative()) return;
+
+        const size_t nElements = from->get_size();
+
+        const auto& from_shape_local = from->get_shape();
+        ASSERT_GE(from_shape_local.size(), 2u);
+
+        const auto* scale_f32 = reinterpret_cast<const float*>(scale->data());
+        auto* ref_f16_bits = reinterpret_cast<uint16_t*>(ref_output.data());
+
+        const size_t row_stride = from_shape_local[1];
+
+        if (from->get_element_type() == ov::element::f8e4m3) {
+            const auto* src = reinterpret_cast<const ov::float8_e4m3*>(input.data());
+            for (size_t idx = 0; idx < nElements; ++idx) {
+                const float v = static_cast<float>(src[idx]);
+                const float s = scale_f32[idx / row_stride];
+                ref_f16_bits[idx] = details::float_to_half(v * s);
+            }
+        } else if (from->get_element_type() == ov::element::f8e5m2) {
+            const auto* src = reinterpret_cast<const ov::float8_e5m2*>(input.data());
+            for (size_t idx = 0; idx < nElements; ++idx) {
+                const float v = static_cast<float>(src[idx]);
+                const float s = scale_f32[idx / row_stride];
+                ref_f16_bits[idx] = details::float_to_half(v * s);
+            }
+        } else if (from->get_element_type() == ov::element::f8e8m0) {
+            const auto* src = reinterpret_cast<const ov::float8_e8m0*>(input.data());
+            for (size_t idx = 0; idx < nElements; ++idx) {
+                const float v = static_cast<float>(src[idx]);
+                const float s = scale_f32[idx / row_stride];
+                ref_f16_bits[idx] = details::float_to_half(v * s);
+            }
+        } else {
+            FAIL() << "Unexpected from element type in UnpackF8WithScaleTestsBase";
+        }
+    }
+
+};
+
+using UnpackF8WithScaleTests = UnpackTestsTmpl<UnpackF8WithScaleTestsBase>;
+
+TEST_P(UnpackF8WithScaleTests, f8_scale) {
+    ASSERT_NO_THROW_IF(!isNegative(),
+                       ov::npuw::util::unpack(from, scale, to, ov::npuw::util::UnpackOptions{useParallelFor, nPartitions, strictPartitions}));
+    if (!isNegative()) {
+        ASSERT_TRUE(details::fp16ArraysMatch(output, ref_output, input, false));
+    }
+}
 
 class UnpackTestsWithScaleAndZeroPointBase : public UnpackTestsBase {
 protected:
@@ -612,6 +733,69 @@ TEST_P(UnpackTestsWithScaleAndZeroPointTest3, u4) {
                        ov::npuw::util::unpack(from, zerop, scale, to, ov::npuw::util::UnpackOptions{useParallelFor, nPartitions, strictPartitions}));
     if (!isNegative()) {
         ASSERT_TRUE(details::fp16ArraysMatch(output, ref_output, input, false));
+    }
+}
+
+using I8AsymmetricUnpackParams = std::tuple<ov::Shape, ov::element::Type_t, unsigned long, bool, bool>;
+
+class I8AsymmetricUnpackTests : public ::testing::TestWithParam<I8AsymmetricUnpackParams> {
+public:
+    static std::string getTestCaseName(const ::testing::TestParamInfo<I8AsymmetricUnpackParams>& info) {
+        const auto& [shape, scale_type, n_partitions, use_parallel_for, strict_partitions] = info.param;
+        std::ostringstream result;
+        result << shape[0] << "x" << shape[1] << "_scale_" << scale_type << "_p" << n_partitions
+               << (strict_partitions ? "_SP" : "") << (use_parallel_for ? "_parallel" : "_serial");
+        return result.str();
+    }
+};
+
+TEST_P(I8AsymmetricUnpackTests, i8_asymmetric) {
+    const auto& [shape, scale_type, n_partitions, use_parallel_for, strict_partitions] = GetParam();
+    ov::element::Type scale_element_type = scale_type;
+    const auto rows = shape[0];
+    const auto columns = shape[1];
+    const auto element_count = shape_size(shape);
+
+    std::vector<int8_t> weights(element_count);
+    std::vector<int8_t> zero_points(element_count);
+    for (std::size_t index = 0; index < element_count; ++index) {
+        weights[index] = static_cast<int8_t>(index * 13 - 128);
+        zero_points[index] = static_cast<int8_t>(index * 7 - 128);
+    }
+
+    const std::vector<float> scale_values{1.0f, 0.5f, 2.0f, 0.25f};
+    std::vector<int8_t> scale_storage(scale_element_type.bitwidth() * rows / 8);
+    if (scale_element_type == ov::element::f16) {
+        auto* scale_data = reinterpret_cast<uint16_t*>(scale_storage.data());
+        for (std::size_t row = 0; row < rows; ++row) {
+            scale_data[row] = details::float_to_half(scale_values[row % scale_values.size()]);
+        }
+    } else {
+        auto* scale_data = reinterpret_cast<float*>(scale_storage.data());
+        for (std::size_t row = 0; row < rows; ++row) {
+            scale_data[row] = scale_values[row % scale_values.size()];
+        }
+    }
+
+    auto from = ov::make_tensor(ov::element::i8, shape, weights.data());
+    auto zerop = ov::make_tensor(ov::element::i8, shape, zero_points.data());
+    auto scale = ov::make_tensor(scale_element_type, ov::Shape{rows, 1}, scale_storage.data());
+    auto to = ov::make_tensor(ov::element::f16, shape);
+
+    ov::npuw::util::unpack(from,
+                           zerop,
+                           scale,
+                           to,
+                           ov::npuw::util::UnpackOptions{use_parallel_for,
+                                                         static_cast<std::size_t>(n_partitions),
+                                                         strict_partitions});
+
+    const auto* output = to->data<const ov::float16>();
+    for (std::size_t index = 0; index < element_count; ++index) {
+        const auto row = index / columns;
+        const auto expected = (static_cast<float>(weights[index]) - static_cast<float>(zero_points[index])) *
+                              scale_values[row % scale_values.size()];
+        EXPECT_FLOAT_EQ(static_cast<float>(output[index]), expected);
     }
 }
 

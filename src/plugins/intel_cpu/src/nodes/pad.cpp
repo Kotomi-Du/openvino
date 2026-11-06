@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -48,14 +48,19 @@ namespace ov::intel_cpu::node {
 
 bool Pad::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept {
     try {
-        if (!one_of(op->get_type_info(), op::v1::Pad::get_type_info_static(), op::v12::Pad::get_type_info_static())) {
+        if (none_of(op->get_type_info(), op::v1::Pad::get_type_info_static(), op::v12::Pad::get_type_info_static())) {
             errorMessage = "Only Pad operations from opset1 and opset12 are supported";
+            return false;
+        }
+
+        if (op->get_input_element_type(0) == element::string) {
+            errorMessage = "Pad operation with string input is not supported";
             return false;
         }
 
         const auto* pad = ov::as_type<const op::util::PadBase>(op.get());
         const auto pad_mode = pad->get_pad_mode();
-        if (!one_of(pad_mode, op::PadMode::CONSTANT, op::PadMode::EDGE, op::PadMode::REFLECT, op::PadMode::SYMMETRIC)) {
+        if (none_of(pad_mode, op::PadMode::CONSTANT, op::PadMode::EDGE, op::PadMode::REFLECT, op::PadMode::SYMMETRIC)) {
             errorMessage = "Has unsupported pad_mode: " + ov::as_string(pad_mode);
             return false;
         }
@@ -71,23 +76,15 @@ Pad::Pad(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
     if (!isSupportedOperation(op, errorMessage)) {
         OPENVINO_THROW_NOT_IMPLEMENTED(errorMessage);
     }
-    if (inputShapes.size() != 3 && inputShapes.size() != 4) {
-        THROW_CPU_NODE_ERR("has incorrect number of input edges");
-    }
-    if (outputShapes.size() != 1) {
-        THROW_CPU_NODE_ERR("Incorrect number of output edges");
-    }
+    CPU_NODE_ASSERT(any_of(inputShapes.size(), 3U, 4U), "has incorrect number of input edges");
+    CPU_NODE_ASSERT(outputShapes.size() == 1, "Incorrect number of output edges");
 
     const size_t srcDimsRank = inputShapes[DATA_ID].getRank();
     const size_t dstDimsRank = outputShapes[DATA_ID].getRank();
-    if (srcDimsRank != dstDimsRank) {
-        THROW_CPU_NODE_ERR("has incorrect number of input/output dimensions!");
-    }
+    CPU_NODE_ASSERT(srcDimsRank == dstDimsRank, "has incorrect number of input/output dimensions!");
 
     const auto* pad = ov::as_type<const op::util::PadBase>(op.get());
-    if (!pad) {
-        THROW_CPU_NODE_ERR("couldn't be casted to op of opset1");
-    }
+    CPU_NODE_ASSERT(pad, "couldn't be casted to op of opset1");
 
     shapeHasDataDependency = !ov::is_type<op::v0::Constant>(op->get_input_node_shared_ptr(PADS_BEGIN_ID)) ||
                              !ov::is_type<op::v0::Constant>(op->get_input_node_shared_ptr(PADS_END_ID));
@@ -103,9 +100,7 @@ Pad::Pad(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
             for (const auto& value : pad_data) {
                 parameter.push_back(value);
             }
-            if (parameter.size() != srcDimsRank) {
-                THROW_CPU_NODE_ERR("has incorrect number of input/output dimensions!");
-            }
+            CPU_NODE_ASSERT(parameter.size() == srcDimsRank, "has incorrect number of input/output dimensions!");
         }
     };
 
@@ -118,9 +113,7 @@ Pad::Pad(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
         attrs.padMode = CONSTANT;
         if (isPadValueSpecified && op->get_input_node_shared_ptr(PAD_VALUE_ID)->get_type_info() ==
                                        ov::op::v0::Constant::get_type_info_static()) {
-            if (!ov::is_scalar(pad->get_input_shape(PAD_VALUE_ID))) {
-                THROW_CPU_NODE_ERR("has non scalar 'pad_value' input");
-            }
+            CPU_NODE_ASSERT(ov::is_scalar(pad->get_input_shape(PAD_VALUE_ID)), "has non scalar 'pad_value' input");
             attrs.padValue = ov::as_type_ptr<const op::v0::Constant>(pad->get_input_node_shared_ptr(PAD_VALUE_ID))
                                  ->cast_vector<float>()[0];
             attrs.constPadValue = true;
@@ -132,7 +125,7 @@ Pad::Pad(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
     } else if (pad_mode == op::PadMode::SYMMETRIC) {
         attrs.padMode = SYMMETRIC;
     } else {
-        THROW_CPU_NODE_ERR("has unsupported pad_mode: " + ov::as_string(pad_mode));
+        CPU_NODE_THROW("has unsupported pad_mode: " + ov::as_string(pad_mode));
     }
 }
 
@@ -175,7 +168,7 @@ void Pad::initSupportedPrimitiveDescriptors() {
         supportedPrimitiveDescriptors.emplace_back(config, impl_desc_type::ref);
     };
 
-    if (numOfDims == 4 || numOfDims == 5) {
+    if (any_of(numOfDims, 4U, 5U)) {
         pushSupportedPrimitiveDescriptor(LayoutType::nspc);
     }
 
@@ -189,7 +182,7 @@ void Pad::initSupportedPrimitiveDescriptors() {
                 (attrs.padMode != CONSTANT && attrs.padsBegin[1] == 0 && attrs.padsEnd[1] == 0));
     };
 
-    if (numOfDims == 4 || numOfDims == 5) {
+    if (any_of(numOfDims, 4U, 5U)) {
         if (!shapeHasDataDependency) {
             if (canUseBlocked(8)) {
                 pushSupportedPrimitiveDescriptor(LayoutType::nCsp8c);
@@ -247,6 +240,7 @@ bool Pad::isExecutable() const {
 
 void Pad::prepareParams() {
     updateLastInputDims();
+    attrs.cpuParallel = context->getCpuParallel();
     execPtr = std::make_shared<PadExecutor>(attrs, srcMemory, dstMemory);
 }
 
@@ -264,12 +258,8 @@ void Pad::PadExecutor::paramsInitialization(const PadAttrs& attrs,
     params.attrs = attrs;
     const auto& srcMemPtr = srcMemory[DATA_ID];
     const auto& dstMemPtr = dstMemory[DATA_ID];
-    if (!dstMemPtr || !dstMemPtr->isDefined()) {
-        OPENVINO_THROW("Pad executor has undefined source memory.");
-    }
-    if (!srcMemPtr || !srcMemPtr->isDefined()) {
-        OPENVINO_THROW("Pad executor has undefined destination memory.");
-    }
+    OPENVINO_ASSERT(dstMemPtr && dstMemPtr->isDefined(), "Pad executor has undefined source memory.");
+    OPENVINO_ASSERT(srcMemPtr && srcMemPtr->isDefined(), "Pad executor has undefined destination memory.");
     const auto srcBlockMemDesc = srcMemPtr->getDescWithType<BlockedMemoryDesc>();
     const auto dstBlockMemDesc = dstMemPtr->getDescWithType<BlockedMemoryDesc>();
     const auto& srcDims = srcBlockMemDesc->getBlockDims();
@@ -308,8 +298,8 @@ void Pad::PadExecutor::paramsInitialization(const PadAttrs& attrs,
     }
 
     if (blockSize > 1) {
-        params.attrs.padsBegin[1] /= blockSize;
-        params.attrs.padsEnd[1] /= blockSize;
+        params.attrs.padsBegin[1] /= static_cast<int>(blockSize);
+        params.attrs.padsEnd[1] /= static_cast<int>(blockSize);
         params.attrs.padsBegin.push_back(0);
         params.attrs.padsEnd.push_back(0);
     } else {
@@ -324,18 +314,19 @@ void Pad::PadExecutor::paramsInitialization(const PadAttrs& attrs,
         params.attrs.padsEnd = newPadsEnd;
     }
     params.attrs.beginPadIdx = 0;
-    params.attrs.endPadIdx = params.attrs.padsBegin.size() - 1;
+    params.attrs.endPadIdx = static_cast<int>(params.attrs.padsBegin.size()) - 1;
 
     for (size_t i = 0; i < params.attrs.padsBegin.size(); ++i) {
         if (params.attrs.padsBegin[i] != 0 || params.attrs.padsEnd[i] != 0) {
-            params.attrs.beginPadIdx = i - 1;
+            params.attrs.beginPadIdx = static_cast<int>(i) - 1;
             break;
         }
     }
 
-    for (int i = params.attrs.padsBegin.size() - 1; i >= 0; --i) {
-        if (params.attrs.padsBegin[i] != 0 || params.attrs.padsEnd[i] != 0) {
-            params.attrs.endPadIdx = i;
+    for (int64_t i = static_cast<int64_t>(params.attrs.padsBegin.size()) - 1; i >= 0; --i) {
+        const auto index = static_cast<size_t>(i);
+        if (params.attrs.padsBegin[index] != 0 || params.attrs.padsEnd[index] != 0) {
+            params.attrs.endPadIdx = static_cast<int>(index);
             break;
         }
     }
@@ -364,9 +355,12 @@ void Pad::PadExecutor::workPartition() {
     size_t nDims = params.srcDims.size();
     params.srcStrides.resize(nDims, 1);
     params.dstStrides.resize(nDims, 1);
-    for (int i = nDims - 2; i >= 0; i--) {
-        params.srcStrides[i] = params.srcStrides[i + 1] * params.srcDims[i + 1];
-        params.dstStrides[i] = params.dstStrides[i + 1] * params.dstDims[i + 1];
+    if (nDims > 1) {
+        for (int64_t i = static_cast<int64_t>(nDims) - 2; i >= 0; --i) {
+            const auto index = static_cast<size_t>(i);
+            params.srcStrides[index] = params.srcStrides[index + 1] * params.srcDims[index + 1];
+            params.dstStrides[index] = params.dstStrides[index + 1] * params.dstDims[index + 1];
+        }
     }
     params.lastDstDim = params.dstStrides[std::max(params.attrs.endPadIdx - 1, 0)];
     params.nDimsForWork = params.attrs.endPadIdx - std::max(params.attrs.beginPadIdx, 0);
@@ -401,7 +395,7 @@ void Pad::PadExecutor::workPartition() {
     }
 
     params.srcDimsForReflectOrSymmetric.clear();
-    if (params.attrs.padMode == REFLECT || params.attrs.padMode == SYMMETRIC) {
+    if (any_of(params.attrs.padMode, REFLECT, SYMMETRIC)) {
         int shift = params.attrs.padMode == SYMMETRIC ? 1 : 0;
         for (size_t i = 0; i < params.srcDims.size(); ++i) {
             params.srcDimsForReflectOrSymmetric.push_back(params.srcDims[i] + params.srcODims[i] - 2 + shift);
@@ -443,10 +437,7 @@ void Pad::PadExecutor::exec(const MemoryPtr& srcMemPtr, const MemoryPtr& dstMemP
 }
 
 void Pad::execute([[maybe_unused]] const dnnl::stream& strm) {
-    if (!execPtr) {
-        THROW_CPU_NODE_ERR("has not compiled executor.");
-    }
-
+    CPU_NODE_ASSERT(execPtr, "has not compiled executor.");
     execPtr->exec(getSrcMemoryAtPort(0), getDstMemoryAtPort(0));
 }
 
@@ -455,20 +446,22 @@ void Pad::executeDynamicImpl(const dnnl::stream& strm) {
 }
 
 static inline size_t parallel_init(size_t start, size_t nDims, const VectorDims& dims, std::vector<int32_t>& indexes) {
-    for (int j = nDims - 1; j >= 0; j--) {
-        indexes[j] = start % dims[j];
-        start = start / dims[j];
+    for (int64_t j = static_cast<int64_t>(nDims) - 1; j >= 0; --j) {
+        const auto index = static_cast<size_t>(j);
+        indexes[index] = static_cast<int>(start % dims[index]);
+        start = start / dims[index];
     }
     return start;
 }
 
 static inline void parallel_step(size_t nDims, const VectorDims& dims, std::vector<int32_t>& indexes) {
-    for (int j = nDims - 1; j >= 0; --j) {
-        ++indexes[j];
-        if (static_cast<size_t>(indexes[j]) < dims[j]) {
+    for (int64_t j = static_cast<int64_t>(nDims) - 1; j >= 0; --j) {
+        const auto index = static_cast<size_t>(j);
+        ++indexes[index];
+        if (static_cast<size_t>(indexes[index]) < dims[index]) {
             break;
         }
-        indexes[j] = 0;
+        indexes[index] = 0;
     }
 }
 
@@ -497,7 +490,7 @@ void Pad::PadExecutor::padConstantCommon(const MemoryPtr& srcMemPtr, const Memor
     const T value = static_cast<T>(params.attrs.padValue);
     if (zeroInputDimsCase) {
         const auto workAmount = dstMemPtr->getDescWithType<BlockedMemoryDesc>()->getPaddedElementsCount();
-        parallel_for(workAmount, [&](size_t i) {
+        params.attrs.cpuParallel->parallel_for(workAmount, [&](size_t i) {
             dstData[i] = value;
         });
 
@@ -612,7 +605,7 @@ void Pad::PadExecutor::padEdge(const MemoryPtr& srcMemPtr, const MemoryPtr& dstM
             for (size_t idx = 0; idx < params.nDimsForWork; ++idx) {
                 size_t shift = [&]() {
                     if (indexes[idx] < params.attrs.padsBegin[idx]) {
-                        return size_t(0);
+                        return static_cast<size_t>(0);
                     }
                     if (static_cast<size_t>(indexes[idx]) >= params.srcODims[idx]) {
                         return params.srcDims[idx] - 1;

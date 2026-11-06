@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -38,9 +38,8 @@ DeviceFeaturesKey ConvolutionKernel_yxfb_yxio_b16::get_required_device_features_
 std::string ConvolutionKernel_yxfb_yxio_b16::GetKernelName(const convolution_params& params) const {
     if (params.inputs[0].GetDType() == Datatype::F32) {
         return kernelName + "_fp32";
-    } else {
-        return kernelName + "_fp16";
     }
+    return kernelName + "_fp16";
 }
 
 namespace {
@@ -52,19 +51,19 @@ size_t GetBatchesPerWorkItem(size_t batch_size, Datatype dataType) {
 
         if (batch_size % (4 * min_batches_per_wi * min_lws) == 0) {
             return 4 * min_batches_per_wi;  // USE_BLOCK_READ_2 + as_half4
-        } else if (batch_size % (2 * min_batches_per_wi * min_lws) == 0) {
-            return 2 * min_batches_per_wi;  // USE_BLOCK_READ_1 + as_half2
-        } else {
-            return min_batches_per_wi;
         }
-    } else {
-        return 2;
+        if (batch_size % (2 * min_batches_per_wi * min_lws) == 0) {
+            return 2 * min_batches_per_wi;  // USE_BLOCK_READ_1 + as_half2
+        }
+        return min_batches_per_wi;
     }
+    return 2;
 }
 
 size_t GetOfmPerWorkitem(Datatype dataType) {
-    if (dataType == Datatype::F16)
+    if (dataType == Datatype::F16) {
         return 16;
+    }
     return 8;
 }
 }  // namespace
@@ -99,7 +98,7 @@ KernelsPriority ConvolutionKernel_yxfb_yxio_b16::GetKernelsPriority(const Params
 
 bool ConvolutionKernel_yxfb_yxio_b16::Validate(const Params& p) const {
     if (!ConvolutionKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
     const convolution_params& params = static_cast<const convolution_params&>(p);
 
@@ -112,7 +111,7 @@ bool ConvolutionKernel_yxfb_yxio_b16::Validate(const Params& p) const {
         (filter_ofm_num > 0) && (batch_size > 0) && (params.outputs[0].Feature().v == filter_ofm_num * filter_groups_num);
 
     if (!bInputValidated) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     if (params.inputs[0].GetDType() == Datatype::F16) {
@@ -127,11 +126,11 @@ bool ConvolutionKernel_yxfb_yxio_b16::Validate(const Params& p) const {
             0;  // Batch size dividable by minimum number of batches processed when smallest local work size is used.
 
         if (!bFilterOK || !bBatchOK) {
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     } else {
         if ((filter_ofm_num * batch_size) % min_lws != 0 || batch_size < 32) {  // TODO: check why it's not supported
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 

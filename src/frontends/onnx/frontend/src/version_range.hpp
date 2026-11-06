@@ -1,12 +1,10 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 
 constexpr int LATEST_SUPPORTED_ONNX_OPSET_VERSION = ONNX_OPSET_VERSION;
 struct VersionRange {
@@ -20,10 +18,8 @@ struct VersionRange {
     static constexpr VersionRange in(int version) {
         return VersionRange{version, version};
     }
-    // -1 means that that a left/right boundary of the range was not specified
+    // -1 means that a left/right boundary of the range was not specified
     const int m_since = -1, m_until = -1;
 };
 
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

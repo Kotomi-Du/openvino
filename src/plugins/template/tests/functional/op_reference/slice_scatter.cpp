@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -100,12 +100,8 @@ public:
         result << "updates_shape=" << param.m_updates.shape << "_";
         result << "ind_type=" << param.m_start.type << "_";
         if (param.m_default_axes) {
-            result << "axes_shape="
-                   << "default"
-                   << "_";
-            result << "axes_type="
-                   << "default"
-                   << "_";
+            result << "axes_shape=" << "default" << "_";
+            result << "axes_type=" << "default" << "_";
         } else {
             result << "axes_shape=" << param.m_axes.shape << "_";
             result << "axes_type=" << param.m_axes.type << "_";

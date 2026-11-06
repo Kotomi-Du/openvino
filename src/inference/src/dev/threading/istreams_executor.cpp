@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -53,18 +53,18 @@ void IStreamsExecutor::Config::set_property(const ov::AnyMap& property) {
             } catch (const std::exception&) {
                 OPENVINO_THROW("Wrong value for property key ",
                                ov::inference_num_threads.name(),
-                               ". Expected only positive numbers (#threads)");
+                               ". Expected only non negative integer numbers.");
             }
-            if (val_i < 0) {
-                OPENVINO_THROW("Wrong value for property key ",
-                               ov::inference_num_threads.name(),
-                               ". Expected only positive numbers (#threads)");
-            }
+            OPENVINO_ASSERT(val_i >= 0,
+                            "Wrong value for property key ",
+                            ov::inference_num_threads.name(),
+                            ". Expected only non negative integer numbers. Got: ",
+                            val_i);
             _threads = val_i;
         } else if (key == ov::internal::threads_per_stream) {
             _threads_per_stream = static_cast<int>(value.as<size_t>());
         } else {
-            OPENVINO_THROW("Wrong value for property key ", key);
+            OPENVINO_THROW("Not recognized property key ", key);
         }
     }
 }
@@ -161,7 +161,9 @@ void IStreamsExecutor::Config::update_executor_config() {
 
     if (proc_type_table.empty() || proc_type_table[0][ALL_PROC] == 0) {
         if (_cpu_reservation) {
-            OPENVINO_THROW("[ Config ] proc_type_table is empty. No CPU resources available!");
+            OPENVINO_THROW("No CPU resources available for reservation. All available CPUs may already be reserved "
+                           "by previously compiled models. Release those models or recompile them with a lower "
+                           "INFERENCE_NUM_THREADS value to reserve fewer CPUs, then retry.");
         } else {
             return;
         }

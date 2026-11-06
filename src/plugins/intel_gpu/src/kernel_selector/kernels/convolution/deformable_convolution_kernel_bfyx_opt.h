@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ namespace kernel_selector {
 class DeformableConvolutionKernel_bfyx_opt : public ConvolutionKernelBase {
 public:
     DeformableConvolutionKernel_bfyx_opt() : ConvolutionKernelBase("deformable_convolution_gpu_bfyx_opt") {}
-    virtual ~DeformableConvolutionKernel_bfyx_opt() {}
+    ~DeformableConvolutionKernel_bfyx_opt() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

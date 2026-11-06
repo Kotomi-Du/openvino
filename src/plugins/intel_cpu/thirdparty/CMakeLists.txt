@@ -4,6 +4,10 @@
 
 project(intel_cpu_thirdparty)
 
+if(OV_COMPILER_IS_INTEL_LLVM AND WIN32)
+    ov_add_compiler_flags("/Wno-microsoft-include")
+endif()
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND MSVC_TOOLSET_VERSION GREATER_EQUAL 141)
     # Visual Studio 2017 (v141 toolset)
     # This flag is needed for enabling SIMD vectorization with command '#pragma omp simd'.
@@ -22,7 +26,9 @@ function(ov_create_acl_version_file)
     string(REGEX MATCH "v([0-9]+\\.[0-9]+\\.?[0-9]*)" ACL_VERSION "${ACL_SCONSCRIPT_FILE_CONTENT}")
     set(ACL_VERSION "${CMAKE_MATCH_1}")
 
-    set(ACL_VERSION_FILE_PATH "${ACL_ROOT_DIR}/build/${OV_CPU_ARM_TARGET_ARCH}/src/core/arm_compute_version.embed")
+    # Create version file in build subdirectory where oneDNN expects it (glob pattern */arm_compute_version.embed)
+    file(MAKE_DIRECTORY "${ACL_ROOT_DIR}/build")
+    set(ACL_VERSION_FILE_PATH "${ACL_ROOT_DIR}/build/arm_compute_version.embed")
     file(WRITE ${ACL_VERSION_FILE_PATH} "\"arm_compute_version=v${ACL_VERSION}\"")
 endfunction()
 
@@ -47,7 +53,11 @@ function(ov_add_onednn)
     set(DNNL_LIBRARY_TYPE "STATIC" CACHE STRING "" FORCE)
     set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(DNNL_CPU_RUNTIME "${THREADING}" CACHE STRING "" FORCE)
+    if("${THREADING}" STREQUAL "TBB_ADAPTIVE")
+        set(DNNL_CPU_RUNTIME "THREADPOOL" CACHE STRING "" FORCE)
+    else()
+        set(DNNL_CPU_RUNTIME "${THREADING}" CACHE STRING "" FORCE)
+    endif()
     set(DNNL_GPU_RUNTIME "NONE" CACHE STRING "" FORCE)
     set(DNNL_BLAS_VENDOR "NONE" CACHE STRING "" FORCE)
     set(ONEDNN_ENABLE_GEMM_KERNELS_ISA "SSE41" CACHE STRING "" FORCE)
@@ -69,6 +79,7 @@ function(ov_add_onednn)
         set(DNNL_TARGET_ARCH "X86" CACHE STRING "" FORCE)
     elseif(RISCV64)
         set(DNNL_TARGET_ARCH "RV64" CACHE STRING "" FORCE)
+        include_directories(BEFORE "${intel_cpu_thirdparty_SOURCE_DIR}/xbyak_riscv")
     elseif(ARM)
         set(DNNL_TARGET_ARCH "ARM" CACHE STRING "" FORCE)
     elseif(AARCH64)
@@ -116,16 +127,6 @@ function(ov_add_onednn)
             ov_add_compiler_flags(-Wno-deprecated-this-capture)
             ov_add_compiler_flags(-Wno-deprecated-enum-enum-conversion)
         endif()
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        # C4849 OpenMP 'reduction' clause ignored in 'simd' directive
-        ov_add_compiler_flags(/wd4849)
-        # C4661 no suitable definition provided for explicit template instantiation request
-        ov_add_compiler_flags(/wd4661)
-        # C4267, 4244 conversion from 'XXX' to 'YYY', possible loss of data
-        ov_add_compiler_flags(/wd4267)
-        ov_add_compiler_flags(/wd4244)
-        # C4334 '<<': result of 32-bit shift implicitly converted to 64 bits
-        ov_add_compiler_flags(/wd4334)
     endif()
 
     if(SUGGEST_OVERRIDE_SUPPORTED)
@@ -141,6 +142,13 @@ function(ov_add_onednn)
         ov_create_acl_version_file()
     endif()
 
+    # Workaround for ARM compiler flag conflicts: oneDNN sets -mcpu=generic which conflicts
+    # with OpenVINO's -march=armv8.2-a+fp16 flags. Override oneDNN's arch optimization flags
+    # to prevent the conflicting -mcpu=generic flag on ARM architectures.
+    if(AARCH64 OR ARM)
+        set(DNNL_ARCH_OPT_FLAGS "" CACHE STRING "Disable oneDNN's automatic -mcpu=generic to avoid conflicts with OpenVINO ARM flags" FORCE)
+    endif()
+
     add_subdirectory(onednn EXCLUDE_FROM_ALL)
 
     # install static libraries
@@ -150,7 +158,7 @@ function(ov_add_onednn)
         # use ACLConfig.cmake in OpenVINOConfig.cmake in case of static build
         # we cannot use 'ov_install_static_lib' for imported targets,
         # but for this we need to install library files
-        install(FILES $<TARGET_PROPERTY:arm_compute::arm_compute,IMPORTED_LOCATION>
+        install(FILES $<TARGET_FILE:arm_compute::arm_compute>
                 DESTINATION ${OV_CPACK_ARCHIVEDIR}
                 COMPONENT ${OV_CPACK_COMP_CORE}
                 ${OV_CPACK_COMP_CORE_EXCLUDE_ALL})
@@ -165,18 +173,17 @@ if (ENABLE_SNIPPETS_LIBXSMM_TPP)
     # This flag is to suppress "warning as error" in libxsmm compilation, such as
     # "generator_common_aarch64.c:60:6: error: no previous declaration for ‘libxsmm_generator_vcvt_f32i8_aarch64_sve’ [-Werror=missing-declarations]"
     ov_add_compiler_flags(-Wno-missing-declarations)
-    add_subdirectory(libxsmm)
+    add_subdirectory(libxsmm EXCLUDE_FROM_ALL)
     ov_install_static_lib(libxsmm ${OV_CPACK_COMP_CORE})
 endif()
 
 if(ENABLE_MLAS_FOR_CPU)
-    add_subdirectory(mlas)
+    add_subdirectory(mlas EXCLUDE_FROM_ALL)
+    # 3rd-party code (Windows): don't fail the build on its warnings, but don't hide them either
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR (OV_COMPILER_IS_INTEL_LLVM AND WIN32))
+        target_compile_options(mlas PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:/WX->)
+    endif()
     ov_install_static_lib(mlas ${OV_CPACK_COMP_CORE})
-endif()
-
-if(ENABLE_SHL_FOR_CPU)
-    add_subdirectory(shl)
-    ov_install_static_lib(shl ${OV_CPACK_COMP_CORE})
 endif()
 
 if(ENABLE_KLEIDIAI_FOR_CPU)
@@ -186,7 +193,7 @@ endif()
 
 if(RISCV64)
     set(XBYAK_RISCV_V ON)
-    add_subdirectory(xbyak_riscv)
+    add_subdirectory(xbyak_riscv EXCLUDE_FROM_ALL)
     ov_install_static_lib(xbyak_riscv ${OV_CPACK_COMP_CORE})
 endif()
 

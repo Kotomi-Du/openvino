@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -550,14 +550,14 @@ bool ov::Node::match_node(ov::pass::pattern::Matcher* matcher, const Output<Node
     // patterns
     // with sub-graph of descent nodes types.
     if (graph_value.get_node_shared_ptr()->get_type_info().is_castable(get_type_info())) {
-        OPENVINO_LOG_NODE2(matcher);
+        OPENVINO_LOG_NODE2(matcher, get_input_size());
         if (matcher->match_arguments(this, graph_value.get_node_shared_ptr())) {
             auto& pattern_map = matcher->get_pattern_value_map();
             pattern_map[shared_from_this()] = graph_value;
             OPENVINO_LOG_NODE3(matcher);
             return true;
         }
-        OPENVINO_LOG_NODE4(matcher);
+        OPENVINO_LOG_NODE4(matcher, get_input_size());
     } else {
         OPENVINO_LOG_NODE5(matcher, shared_from_this(), graph_value);
     }
@@ -596,21 +596,23 @@ ov::Input<const ov::Node> ov::Node::input(size_t input_index) const {
     return {this, input_index};
 }
 
-ov::Output<ov::Node> ov::Node::output(size_t output_index) {
+void ov::Node::on_output_access(size_t output_index) {}
+
+void ov::Node::validate_output_index(size_t output_index) const {
     // All nodes will have at least 1 output
     if (output_index > 0 && output_index >= m_outputs.size()) {
         OPENVINO_THROW(node_idx_out_of_range_txt);
     }
+}
 
+ov::Output<ov::Node> ov::Node::output(size_t output_index) {
+    on_output_access(output_index);
+    validate_output_index(output_index);
     return {this, output_index};
 }
 
 ov::Output<const ov::Node> ov::Node::output(size_t output_index) const {
-    // All nodes will have at least 1 output
-    if (output_index > 0 && output_index >= m_outputs.size()) {
-        OPENVINO_THROW(node_idx_out_of_range_txt);
-    }
-
+    validate_output_index(output_index);
     return Output<const Node>(this, output_index);
 }
 
@@ -700,7 +702,7 @@ bool ov::Node::evaluate_symbol(TensorSymbolVector& output_symbols) const {
 }
 
 bool ov::Node::can_constant_fold(const OutputVector& input_values) const {
-    OV_ITT_SCOPED_TASK(ov::itt::domains::core, "Node::can_constant_fold");
+    OV_ITT_SCOPED_TASK(ov::itt::domains::ov_core, "Node::can_constant_fold");
 
     if (is_const_fold_disabled()) {
         return false;
@@ -715,7 +717,7 @@ bool ov::Node::can_constant_fold(const OutputVector& input_values) const {
 }
 
 bool ov::Node::constant_fold(OutputVector& output_values, const OutputVector& input_values) {
-    OV_ITT_SCOPED_TASK(ov::itt::domains::core, "Node::constant_fold");
+    OV_ITT_SCOPED_TASK(ov::itt::domains::ov_core, "Node::constant_fold");
 
     if (!Node::can_constant_fold(input_values)) {
         return false;

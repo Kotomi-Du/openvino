@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,6 +16,10 @@ using PaddleFuzzyOpTest = FrontEndFuzzyOpTest;
 static const std::vector<std::string> models{
     std::string("argmax/argmax.pdmodel"),
     std::string("argmax1/argmax1.pdmodel"),
+    std::string("argmax_keepdim/argmax_keepdim.pdmodel"),
+    std::string("argmax_keepdim_flatten/argmax_keepdim_flatten.pdmodel"),
+    std::string("argmin_keepdim/argmin_keepdim.pdmodel"),
+    std::string("argmin_keepdim_flatten/argmin_keepdim_flatten.pdmodel"),
     std::string("assign_none/assign_none.pdmodel"),
     std::string("assign_output/assign_output.pdmodel"),
     std::string("assign_value_boolean/assign_value_boolean.pdmodel"),
@@ -148,6 +152,7 @@ static const std::vector<std::string> models{
     std::string("depthwise_conv2d_convolution/depthwise_conv2d_convolution.pdmodel"),
     std::string("depthwise_conv2d_transpose_convolution/depthwise_conv2d_transpose_convolution.pdmodel"),
     std::string("dropout/dropout.pdmodel"),
+    std::string("dropout_float64/dropout_float64.pdmodel"),
     std::string("dropout_upscale_in_train/dropout_upscale_in_train.pdmodel"),
     std::string("elementwise_add1/elementwise_add1.pdmodel"),
     std::string("elementwise_div1/elementwise_div1.pdmodel"),
@@ -201,6 +206,7 @@ static const std::vector<std::string> models{
     std::string("expand_v2_tensor/expand_v2_tensor.pdmodel"),
     std::string("expand_v2_tensor_list/expand_v2_tensor_list.pdmodel"),
     std::string("expand_v2_tensor_list2/expand_v2_tensor_list2.pdmodel"),
+    std::string("expand_v2_conditional/expand_v2_conditional.pdmodel"),
     std::string("expand_as_v2_1/expand_as_v2_1.pdmodel"),
     std::string("expand_as_v2_2/expand_as_v2_2.pdmodel"),
     std::string("exp_test_float32/exp_test_float32.pdmodel"),
@@ -502,24 +508,31 @@ static const std::vector<std::string> models{
     std::string("reduce_prod_test_3/reduce_prod_test_3.pdmodel"),
     std::string("reduce_prod_test_4/reduce_prod_test_4.pdmodel"),
     std::string("reduce_prod_test_5/reduce_prod_test_5.pdmodel"),
+    std::string("reduce_prod_i32/reduce_prod_i32.pdmodel"),
     std::string("reduce_sum_test_0/reduce_sum_test_0.pdmodel"),
     std::string("reduce_sum_test_1/reduce_sum_test_1.pdmodel"),
     std::string("reduce_sum_test_2/reduce_sum_test_2.pdmodel"),
     std::string("reduce_sum_test_3/reduce_sum_test_3.pdmodel"),
     std::string("reduce_sum_test_4/reduce_sum_test_4.pdmodel"),
     std::string("reduce_sum_test_5/reduce_sum_test_5.pdmodel"),
+    std::string("reduce_sum_i32/reduce_sum_i32.pdmodel"),
+    std::string("reduce_sum_i32_dtype_i32/reduce_sum_i32_dtype_i32.pdmodel"),
+    std::string("reduce_sum_dtype_i64/reduce_sum_dtype_i64.pdmodel"),
+    std::string("reduce_sum_bool_in/reduce_sum_bool_in.pdmodel"),
+    std::string("reduce_sum_bool_dtype_i64/reduce_sum_bool_dtype_i64.pdmodel"),
     std::string("relu/relu.pdmodel"),
     std::string("relu6/relu6.pdmodel"),
     std::string("relu6_1/relu6_1.pdmodel"),
     std::string("reshape/reshape.pdmodel"),
     std::string("reshape_tensor/reshape_tensor.pdmodel"),
     std::string("reshape_tensor_list/reshape_tensor_list.pdmodel"),
-    std::string("rnn_lstm_layer_1_bidirectional/rnn_lstm_layer_1_bidirectional.pdmodel"),
-    std::string("rnn_lstm_layer_1_forward/rnn_lstm_layer_1_forward.pdmodel"),
-    std::string("rnn_lstm_layer_2_bidirectional/rnn_lstm_layer_2_bidirectional.pdmodel"),
-    std::string("rnn_lstm_layer_2_forward/rnn_lstm_layer_2_forward.pdmodel"),
-    std::string("rnn_lstm_layer_1_forward_seq_len_4/rnn_lstm_layer_1_forward_seq_len_4.pdmodel"),
-    std::string("rnn_lstm_layer_2_bidirectional_seq_len_4/rnn_lstm_layer_2_bidirectional_seq_len_4.pdmodel"),
+    // CVS-184334 Temporarily disable Paddle RNN/LSTM frontend models.
+    // std::string("rnn_lstm_layer_1_bidirectional/rnn_lstm_layer_1_bidirectional.pdmodel"),
+    // std::string("rnn_lstm_layer_1_forward/rnn_lstm_layer_1_forward.pdmodel"),
+    // std::string("rnn_lstm_layer_2_bidirectional/rnn_lstm_layer_2_bidirectional.pdmodel"),
+    // std::string("rnn_lstm_layer_2_forward/rnn_lstm_layer_2_forward.pdmodel"),
+    // std::string("rnn_lstm_layer_1_forward_seq_len_4/rnn_lstm_layer_1_forward_seq_len_4.pdmodel"),
+    // std::string("rnn_lstm_layer_2_bidirectional_seq_len_4/rnn_lstm_layer_2_bidirectional_seq_len_4.pdmodel"),
     std::string("roi_align_test/roi_align_test.pdmodel"),
     std::string("roi_align_test2/roi_align_test2.pdmodel"),
     std::string("roll_test_0/roll_test_0.pdmodel"),
@@ -678,8 +691,9 @@ static const std::vector<std::string> models{
     std::string("reduce_any_test_4/reduce_any_test_4.pdmodel"),
     std::string("scatter_test_1/scatter_test_1.pdmodel"),
     std::string("scatter_test_2/scatter_test_2.pdmodel"),
+    std::string("scatter_test_3/scatter_test_3.pdmodel"),
     std::string("scatter_nd_add_test_1/scatter_nd_add_test_1.pdmodel"),
-    // Temporily disable them until root caused to secure CI stable.
+    // Temporarily disable them until root caused to secure CI stable.
     // CVS-66703 to track this.
     // std::string("yolo_box_clip_box/yolo_box_clip_box.pdmodel"),
     // std::string("yolo_box_default/yolo_box_default.pdmodel"),

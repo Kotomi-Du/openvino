@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -23,7 +23,7 @@ struct gather_nd_params : public base_params {
 class GatherNDKernelRef : public KernelBaseOpenCL {
 public:
     GatherNDKernelRef() : KernelBaseOpenCL("gather_nd_ref") {}
-    virtual ~GatherNDKernelRef() {}
+    ~GatherNDKernelRef() override = default;
     virtual JitConstants GetJitConstants(const gather_nd_params& params) const;
     virtual CommonDispatchData SetDefault(const gather_nd_params& params) const;
     KernelsData GetKernelsData(const Params& params) const override;

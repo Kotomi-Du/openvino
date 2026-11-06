@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,18 +11,6 @@ using namespace cldnn;
 using namespace tests;
 
 namespace {
-
-template <typename vecElementType>
-std::string vec2str(const std::vector<vecElementType>& vec) {
-    if (!vec.empty()) {
-        std::ostringstream result;
-        result << "(";
-        std::copy(vec.begin(), vec.end() - 1, std::ostream_iterator<vecElementType>(result, "."));
-        result << vec.back() << ")";
-        return result.str();
-    }
-    return "()";
-}
 
 template <class ElemT, class IndexT, class CountT>
 struct unique_test_inputs {
@@ -44,9 +32,7 @@ template <class ElemT, class IndexT, class CountT>
 struct unique_gpu_test : public testing::TestWithParam<unique_test_params<ElemT, IndexT, CountT>> {
 public:
     void test() {
-        format::type fmt;
-        unique_test_inputs<ElemT, IndexT, CountT> p;
-        std::tie(p, fmt) = testing::TestWithParam<unique_test_params<ElemT, IndexT, CountT>>::GetParam();
+        const auto& [p, fmt] = testing::TestWithParam<unique_test_params<ElemT, IndexT, CountT>>::GetParam();
 
         auto& engine = get_test_engine();
         const auto elem_data_type = ov::element::from<ElemT>();
@@ -83,28 +69,28 @@ public:
         const auto outputs = network.execute();
 
         const auto expected_unique_values = outputs.at("expected_unique_values").get_memory();
-        cldnn::mem_lock<ElemT> expected_unique_values_ptr(expected_unique_values, get_test_stream());
+        cldnn::mem_lock<ElemT, mem_lock_type::read> expected_unique_values_ptr(expected_unique_values, get_test_stream());
         ASSERT_EQ(expected_unique_values_ptr.size(), p.expected_unique_values.size());
         for (auto i = 0U; i < expected_unique_values_ptr.size(); ++i) {
             ASSERT_EQ(expected_unique_values_ptr[i], p.expected_unique_values[i]);
         }
 
         const auto expected_indices = outputs.at("expected_indices").get_memory();
-        cldnn::mem_lock<IndexT> expected_indices_ptr(expected_indices, get_test_stream());
+        cldnn::mem_lock<IndexT, mem_lock_type::read> expected_indices_ptr(expected_indices, get_test_stream());
         ASSERT_EQ(expected_indices_ptr.size(), p.expected_indices.size());
         for (auto i = 0U; i < expected_indices_ptr.size(); ++i) {
             ASSERT_EQ(expected_indices_ptr[i], p.expected_indices[i]);
         }
 
         const auto expected_rev_indices = outputs.at("expected_rev_indices").get_memory();
-        cldnn::mem_lock<IndexT> expected_rev_indices_ptr(expected_rev_indices, get_test_stream());
+        cldnn::mem_lock<IndexT, mem_lock_type::read> expected_rev_indices_ptr(expected_rev_indices, get_test_stream());
         ASSERT_EQ(expected_rev_indices_ptr.size(), p.expected_rev_indices.size());
         for (auto i = 0U; i < expected_rev_indices_ptr.size(); ++i) {
             ASSERT_EQ(expected_rev_indices_ptr[i], p.expected_rev_indices[i]);
         }
 
         const auto expected_counts = outputs.at("expected_counts").get_memory();
-        cldnn::mem_lock<CountT> expected_counts_ptr(expected_counts, get_test_stream());
+        cldnn::mem_lock<CountT, mem_lock_type::read> expected_counts_ptr(expected_counts, get_test_stream());
         ASSERT_EQ(expected_counts_ptr.size(), p.expected_counts.size());
         for (auto i = 0U; i < expected_counts_ptr.size(); ++i) {
             ASSERT_EQ(expected_counts_ptr[i], p.expected_counts[i]);
@@ -113,9 +99,7 @@ public:
 
     static std::string PrintToStringParamName(
         const testing::TestParamInfo<unique_test_params<ElemT, IndexT, CountT>>& info) {
-        format::type fmt;
-        unique_test_inputs<ElemT, IndexT, CountT> p;
-        std::tie(p, fmt) = info.param;
+        const auto& [p, fmt] = info.param;
 
         std::ostringstream result;
         result << "data_shape=" << vec2str(p.data_shape) << "; ";

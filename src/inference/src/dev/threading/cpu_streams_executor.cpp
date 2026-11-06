@@ -1,9 +1,10 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/runtime/threading/cpu_streams_executor.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -26,7 +27,7 @@ namespace ov {
 namespace threading {
 struct CPUStreamsExecutor::Impl {
     struct Stream {
-#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO
+#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
         struct Observer : public custom::task_scheduler_observer {
             CpuSet _mask;
             int _ncpus = 0;
@@ -66,7 +67,7 @@ struct CPUStreamsExecutor::Impl {
                                                ((_impl->_config.get_streams() + _impl->_usedNumaNodes.size() - 1) /
                                                 _impl->_usedNumaNodes.size()))
                     : _impl->_usedNumaNodes.at(_streamId % _impl->_usedNumaNodes.size());
-#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO
+#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
             if (_impl->_config.get_streams_info_table().size() > 0) {
                 init_stream();
             }
@@ -91,56 +92,133 @@ struct CPUStreamsExecutor::Impl {
                 std::lock_guard<std::mutex> lock{_impl->_streamIdMutex};
                 _impl->_streamIdQueue.push(_streamId);
             }
-#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO
+#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
             if (nullptr != _observer) {
                 _observer->observe(false);
             }
 #endif
         }
 
-#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO
+#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
+        custom::core_type_id map_proc_kind_to_tbb_core_type(const std::vector<custom::core_type_id>& sys_core_types,
+                                                            const int proc_kind) {
+            if (sys_core_types.empty()) {
+                return custom::task_arena::automatic;
+            }
+
+            switch (proc_kind) {
+            case MAIN_CORE_PROC:
+            case HYPER_THREADING_PROC:
+                return sys_core_types.back();
+            case EFFICIENT_CORE_PROC:
+                return sys_core_types.size() >= 2 ? *(sys_core_types.end() - 2) : sys_core_types.back();
+            case LP_EFFICIENT_CORE_PROC:
+                return sys_core_types.front();
+            default:
+                return sys_core_types.back();
+            }
+        }
+
+        std::vector<custom::core_type_id> map_proc_kinds_to_tbb_core_types(
+            const std::vector<custom::core_type_id>& sys_core_types,
+            const std::vector<int>& proc_kinds) {
+            std::vector<custom::core_type_id> mapped_core_types;
+            mapped_core_types.reserve(proc_kinds.size());
+
+            for (const auto proc_kind : proc_kinds) {
+                const auto core_type = map_proc_kind_to_tbb_core_type(sys_core_types, proc_kind);
+                if (core_type != custom::task_arena::automatic &&
+                    std::find(mapped_core_types.begin(), mapped_core_types.end(), core_type) ==
+                        mapped_core_types.end()) {
+                    mapped_core_types.push_back(core_type);
+                }
+            }
+
+            return mapped_core_types;
+        }
+
         void create_tbb_task_arena(const int stream_id,
                                    const StreamCreateType stream_type,
                                    const int concurrency,
-                                   const int core_type,
+                                   const std::vector<int>& core_types,
                                    const int numa_node_id,
                                    const int socket_id,
                                    const int max_threads_per_core) {
             auto stream_processors = _impl->_config.get_stream_processor_ids();
             _numaNodeId = numa_node_id;
             _socketId = socket_id;
-            if (stream_type == STREAM_WITHOUT_PARAM) {
-                _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
-                                                            .set_max_concurrency(concurrency)
-                                                            .set_max_threads_per_core(max_threads_per_core)});
-            } else if (stream_type == STREAM_WITH_NUMA_ID) {
+            auto _stream_type = stream_type;
+#    if (TBB_INTERFACE_VERSION < 12000)
+            const auto tbb_version = tbb::TBB_runtime_interface_version();
+#    else
+            const auto tbb_version = TBB_runtime_interface_version();
+#    endif
+            if (_stream_type == STREAM_WITH_CORE_TYPE) {
+                int version_major = tbb_version / 10;
+                int version_patch = tbb_version % 10;
+                bool support_core_types = false;
+                if ((version_major == TBB_VERSION_MAJOR_CORE_TYPES_WINDOWS &&
+                     version_patch >= TBB_VERSION_PATCH_CORE_TYPES_WINDOWS) ||
+                    (version_major == TBB_VERSION_MAJOR_CORE_TYPES_LINUX &&
+                     version_patch >= TBB_VERSION_PATCH_CORE_TYPES_LINUX)) {
+                    support_core_types = true;
+                }
+                if (core_types.size() == 1 || (core_types.size() > 1 && support_core_types)) {
+                    _stream_type = STREAM_WITH_CORE_TYPE;
+                } else {
+                    _stream_type = STREAM_WITHOUT_PARAM;
+                }
+            }
+            const int group_base = get_num_processor_groups() > 1 ? stream_id : -1;
+            if (_stream_type == STREAM_WITHOUT_PARAM) {
+                // On multi-group Windows (group_base >= 0) distribute the arena's threads across processor
+                // groups; max_threads_per_core is dropped so tbbbind does not confine it to one group.
+                if (group_base >= 0) {
+                    _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
+                                                                .set_max_concurrency(concurrency)
+                                                                .set_processor_group_base(group_base)});
+                } else {
+                    _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
+                                                                .set_max_concurrency(concurrency)
+                                                                .set_max_threads_per_core(max_threads_per_core)});
+                }
+            } else if (_stream_type == STREAM_WITH_NUMA_ID) {
                 // Numa node id has used different mapping methods in TBBBind since oneTBB 2021.4.0
 #    if USE_TBBBIND_2_5
                 auto real_numa_node_id = _numaNodeId;
 #    else
                 auto real_numa_node_id = get_org_numa_id(_numaNodeId);
-                int tbb_version;
-#        if (TBB_INTERFACE_VERSION < 12000)
-                tbb_version = tbb::TBB_runtime_interface_version();
-#        else
-                tbb_version = TBB_runtime_interface_version();
-#        endif
                 if (tbb_version >= 12040) {
                     real_numa_node_id = _numaNodeId;
                 }
 #    endif
-                _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
-                                                            .set_numa_id(real_numa_node_id)
-                                                            .set_max_concurrency(concurrency)
-                                                            .set_max_threads_per_core(max_threads_per_core)});
-            } else if (stream_type == STREAM_WITH_CORE_TYPE) {
-                const auto real_core_type = (core_type == MAIN_CORE_PROC || core_type == HYPER_THREADING_PROC)
-                                                ? custom::info::core_types().back()
-                                                : custom::info::core_types().front();
-                _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
-                                                            .set_core_type(real_core_type)
-                                                            .set_max_concurrency(concurrency)
-                                                            .set_max_threads_per_core(max_threads_per_core)});
+                // On multi-group Windows (group_base >= 0) distribute the arena's threads across processor
+                // groups; max_threads_per_core is dropped so tbbbind does not confine it to one group.
+                if (group_base >= 0) {
+                    _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
+                                                                .set_max_concurrency(concurrency)
+                                                                .set_processor_group_base(group_base)});
+                } else {
+                    _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
+                                                                .set_numa_id(real_numa_node_id)
+                                                                .set_max_concurrency(concurrency)
+                                                                .set_max_threads_per_core(max_threads_per_core)});
+                }
+            } else if (_stream_type == STREAM_WITH_CORE_TYPE) {
+                // sys_core_types = [LPECore, Ecore, Pcore]
+                const auto sys_core_types = custom::info::core_types();
+                const auto mapped_core_types = map_proc_kinds_to_tbb_core_types(sys_core_types, core_types);
+                auto constraints = custom::task_arena::constraints{}
+                                       .set_max_concurrency(concurrency)
+                                       .set_max_threads_per_core(max_threads_per_core);
+
+                if (mapped_core_types.empty()) {
+                    _taskArena.reset(new custom::task_arena{constraints});
+                } else if (mapped_core_types.size() == 1) {
+                    _taskArena.reset(new custom::task_arena{constraints.set_core_type(mapped_core_types.front())});
+                } else {
+                    _taskArena.reset(new custom::task_arena{constraints.set_core_types(mapped_core_types)});
+                }
             } else {
                 _taskArena.reset(new custom::task_arena{concurrency});
                 _cpu_ids =
@@ -158,7 +236,7 @@ struct CPUStreamsExecutor::Impl {
         }
         void init_stream() {
             int concurrency;
-            int cpu_core_type;
+            std::vector<int> cpu_core_types;
             int numa_node_id;
             int socket_id;
             int max_threads_per_core;
@@ -173,7 +251,7 @@ struct CPUStreamsExecutor::Impl {
                                 _impl->_config.get_streams_info_table(),
                                 stream_type,
                                 concurrency,
-                                cpu_core_type,
+                                cpu_core_types,
                                 numa_node_id,
                                 socket_id,
                                 max_threads_per_core);
@@ -183,7 +261,7 @@ struct CPUStreamsExecutor::Impl {
             create_tbb_task_arena(stream_id,
                                   stream_type,
                                   concurrency,
-                                  cpu_core_type,
+                                  cpu_core_types,
                                   numa_node_id,
                                   socket_id,
                                   max_threads_per_core);
@@ -197,13 +275,10 @@ struct CPUStreamsExecutor::Impl {
         bool _execute = false;
         std::vector<int> _rank;
         std::queue<Task> _taskQueue;
-#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO
+#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
         std::unique_ptr<custom::task_arena> _taskArena;
         std::unique_ptr<Observer> _observer;
         std::vector<int> _cpu_ids;
-#elif OV_THREAD == OV_THREAD_SEQ
-        CpuSet _mask = nullptr;
-        int _ncpus = 0;
 #endif
     };
     // if the thread is created by CPUStreamsExecutor, the Impl::Stream of the thread is stored by tbb Class
@@ -216,129 +291,110 @@ struct CPUStreamsExecutor::Impl {
     // it's only a workaround for ticket CVS-111490, please be carefully when need to modify
     // CustomeThreadLocal::local(), especially like operations that will affect the count of
     // CustomThreadLocal::ThreadId
-    class CustomThreadLocal : public ThreadLocal<std::shared_ptr<Stream>> {
-        class ThreadTracker {
-        public:
-            explicit ThreadTracker(const std::thread::id& id)
-                : _id(id),
-                  _count_ptr(std::make_shared<std::atomic_int>(1)) {}
-            ~ThreadTracker() {
-                _count_ptr->fetch_sub(1);
-            }
-            std::shared_ptr<ThreadTracker> fetch() {
-                auto new_ptr = std::shared_ptr<ThreadTracker>(new ThreadTracker(*this));
-                auto pre_valule = new_ptr.get()->_count_ptr->fetch_add(1);
-                OPENVINO_ASSERT(pre_valule == 1, "this value must be 1, please check code CustomThreadLocal::local()");
-                return new_ptr;
-            }
-            const std::thread::id& get_id() const {
-                return _id;
-            }
-            int count() const {
-                return *(_count_ptr.get());
-            }
-
-        private:
-            // disable all copy and move semantics, user only can use fetch()
-            // to create a new instance with a shared count num;
-            ThreadTracker(const ThreadTracker&) = default;
-            ThreadTracker(ThreadTracker&&) = delete;
-            ThreadTracker& operator=(const ThreadTracker&) = delete;
-            ThreadTracker& operator=(ThreadTracker&&) = delete;
-            std::thread::id _id;
-            std::shared_ptr<std::atomic_int> _count_ptr;
-        };
-
+    class CustomThreadLocal : public ThreadLocal<std::shared_ptr<Stream>>,
+                              public std::enable_shared_from_this<CustomThreadLocal> {
     public:
         CustomThreadLocal(std::function<std::shared_ptr<Stream>()> callback_construct, Impl* impl)
             : ThreadLocal<std::shared_ptr<Stream>>(std::move(callback_construct)),
-              _impl(impl) {}
-        std::shared_ptr<Stream> local() {
-            // maybe there are two CPUStreamsExecutors in the same thread.
-            static thread_local std::map<void*, std::shared_ptr<CustomThreadLocal::ThreadTracker>> t_stream_count_map;
-            // fix the memory leak issue that CPUStreamsExecutor is already released,
-            // but still exists CustomThreadLocal::ThreadTracker in t_stream_count_map
-            for (auto it = t_stream_count_map.begin(); it != t_stream_count_map.end();) {
-                if (this != it->first && it->second->count() == 1) {
-                    t_stream_count_map.erase(it++);
-                } else {
-                    it++;
+              _impl(impl) {
+            _executor_thread_id = std::this_thread::get_id();
+        }
+        void cleanup(std::thread::id thread_id) {
+            std::lock_guard<std::mutex> guard(_stream_map_mutex);
+            auto item = _stream_map.find(thread_id);
+            if (item != _stream_map.end()) {
+                _stream_map.erase(item);
+            }
+        }
+        struct ThreadCleaner {
+            struct ResourceKeeper {
+                // The crt call the atexit released the global variable before thread exit
+                // Need to call the map's clear to set the size to 0
+                // Or the thread exit callback will double free the map's content
+                ~ResourceKeeper() {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    _mapdata.clear();
+                }
+                std::mutex _mutex;
+                std::multimap<std::thread::id, std::weak_ptr<CustomThreadLocal>> _mapdata;
+            };
+            static ResourceKeeper global_resource_holder;
+
+            ThreadCleaner(std::thread::id thread_id) : _thread_id(thread_id) {}
+            void add(std::weak_ptr<CustomThreadLocal> parent) {
+                std::lock_guard<std::mutex> lock(global_resource_holder._mutex);
+                global_resource_holder._mapdata.insert({_thread_id, parent});
+            }
+            ~ThreadCleaner() {
+                std::vector<std::shared_ptr<CustomThreadLocal>> parent_ptr;
+                {
+                    // Releaese the global lock as soon as possible
+                    std::lock_guard<std::mutex> lock(global_resource_holder._mutex);
+                    auto range = global_resource_holder._mapdata.equal_range(_thread_id);
+                    for (auto it = range.first; it != range.second; ++it) {
+                        parent_ptr.push_back(it->second.lock());
+                    }
+                    if (!parent_ptr.empty()) {
+                        global_resource_holder._mapdata.erase(range.first, range.second);
+                    }
+                }
+                for (auto& parent : parent_ptr) {
+                    if (parent) {
+                        parent->cleanup(_thread_id);
+                    }
                 }
             }
+
+        private:
+            std::thread::id _thread_id;
+        };
+        std::shared_ptr<Stream> local() {
             auto id = std::this_thread::get_id();
-            auto search = _thread_ids.find(id);
-            if (search != _thread_ids.end()) {
+            if (id == _executor_thread_id) {
                 return ThreadLocal<std::shared_ptr<Stream>>::local();
             }
-            std::lock_guard<std::mutex> guard(_stream_map_mutex);
-            for (auto& item : _stream_map) {
-                if (item.first->get_id() == id) {
-                    // check if the ThreadTracker of this stream is already in t_stream_count_map
-                    // if not, then create ThreadTracker for it
-                    auto iter = t_stream_count_map.find((void*)this);
-                    if (iter == t_stream_count_map.end()) {
-                        t_stream_count_map[(void*)this] = item.first->fetch();
-                    }
-                    return item.second;
-                }
-            }
-            std::shared_ptr<Impl::Stream> stream = nullptr;
-            for (auto it = _stream_map.begin(); it != _stream_map.end();) {
-                if (it->first->count() == 1) {
-                    if (stream == nullptr) {
-                        stream = it->second;
-                    }
-                    _stream_map.erase(it++);
-                } else {
-                    it++;
-                }
-            }
-            if (stream == nullptr) {
-                stream = std::make_shared<Impl::Stream>(_impl);
-            }
-            auto tracker_ptr = std::make_shared<CustomThreadLocal::ThreadTracker>(id);
-            t_stream_count_map[(void*)this] = tracker_ptr;
-            auto new_tracker_ptr = tracker_ptr->fetch();
-            _stream_map[new_tracker_ptr] = stream;
-            return stream;
-        }
 
-        void set_thread_ids_map(std::vector<std::thread>& threads) {
-            for (auto& thread : threads) {
-                _thread_ids.insert(thread.get_id());
+            // ensure ThreadCleaner is created only once per thread exit
+            thread_local ThreadCleaner t_cleaner(id);
+            {
+                std::lock_guard<std::mutex> guard(_stream_map_mutex);
+                auto search = _stream_map.find(id);
+                if (search != _stream_map.end()) {
+                    return search->second;
+                }
             }
+            std::shared_ptr<Impl::Stream> stream = std::make_shared<Impl::Stream>(_impl);
+            t_cleaner.add(this->shared_from_this());
+            {
+                std::lock_guard<std::mutex> guard(_stream_map_mutex);
+                _stream_map[id] = stream;
+            }
+            return stream;
         }
 
         bool find_thread_id() {
             auto id = std::this_thread::get_id();
-            auto search = _thread_ids.find(id);
-            if (search != _thread_ids.end()) {
+            if (id == _executor_thread_id) {
                 return true;
             }
             std::lock_guard<std::mutex> guard(_stream_map_mutex);
-            for (auto& item : _stream_map) {
-                if (item.first->get_id() == id) {
-                    return true;
-                }
-            }
-            return false;
+            auto item = _stream_map.find(id);
+            return item != _stream_map.end();
         }
 
     private:
-        std::set<std::thread::id> _thread_ids;
         Impl* _impl;
-        std::map<std::shared_ptr<CustomThreadLocal::ThreadTracker>, std::shared_ptr<Impl::Stream>> _stream_map;
+        std::map<std::thread::id, std::shared_ptr<Impl::Stream>> _stream_map;
         std::mutex _stream_map_mutex;
+        std::thread::id _executor_thread_id;
     };
 
-    explicit Impl(const Config& config)
-        : _config{config},
-          _streams(
-              [this] {
-                  return std::make_shared<Impl::Stream>(this);
-              },
-              this) {
-        _exectorMgr = executor_manager();
+    explicit Impl(const Config& config) : _config{config} {
+        _streams = std::make_shared<CustomThreadLocal>(
+            [this] {
+                return std::make_shared<Impl::Stream>(this);
+            },
+            this);
         auto numaNodes = get_available_numa_nodes();
         int streams_num = _config.get_streams();
         auto processor_ids = _config.get_stream_processor_ids();
@@ -369,12 +425,11 @@ struct CPUStreamsExecutor::Impl {
                         }
                     }
                     if (task) {
-                        Execute(task, *(_streams.local()));
+                        Execute(task, *(_streams->local()));
                     }
                 }
             });
         }
-        _streams.set_thread_ids_map(_threads);
     }
 
     void Enqueue(Task task) {
@@ -386,51 +441,48 @@ struct CPUStreamsExecutor::Impl {
     }
 
     void Execute(const Task& task, Stream& stream) {
-#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO
+#if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
         auto& arena = stream._taskArena;
         if (nullptr != arena) {
-            arena->execute(std::move(task));
+            arena->execute(task);
+        } else {
+            task();
+        }
+#elif OV_THREAD == OV_THREAD_SEQ
+        if (_config.get_cpu_pinning()) {
+            ScopedThreadAffinity affinity_guard;
+            pin_stream_to_cpus(stream);
+            task();
         } else {
             task();
         }
 #else
-        pin_stream_to_cpus();
         task();
-        unpin_stream_to_cpus();
 #endif
     }
 
-    void pin_stream_to_cpus() {
+    void pin_stream_to_cpus(Stream& stream) {
 #if OV_THREAD == OV_THREAD_SEQ
-        if (_config.get_cpu_pinning()) {
-            auto stream = _streams.local();
-            auto proc_type_table = get_org_proc_type_table();
-            std::tie(stream->_mask, stream->_ncpus) = get_process_mask();
-            if (get_num_numa_nodes() > 1) {
-                pin_current_thread_to_socket(stream->_numaNodeId);
-            } else if (proc_type_table.size() == 1 && proc_type_table[0][EFFICIENT_CORE_PROC] == 0) {
-                if (nullptr != stream->_mask) {
-                    pin_thread_to_vacant_core(stream->_streamId + _config.get_thread_binding_offset(),
-                                              _config.get_thread_binding_step(),
-                                              stream->_ncpus,
-                                              stream->_mask);
-                }
+        auto proc_type_table = get_org_proc_type_table();
+        // Use the process baseline mask for choosing a vacant core to pin to.
+        CpuSet process_mask;
+        int process_ncpus = 0;
+        std::tie(process_mask, process_ncpus) = get_process_mask();
+        if (get_num_numa_nodes() > 1) {
+            pin_current_thread_to_socket(stream._numaNodeId);
+        } else if (proc_type_table.size() == 1 && proc_type_table[0][EFFICIENT_CORE_PROC] == 0) {
+            if (nullptr != process_mask) {
+                pin_thread_to_vacant_core(stream._streamId + _config.get_thread_binding_offset(),
+                                          _config.get_thread_binding_step(),
+                                          process_ncpus,
+                                          process_mask);
             }
         }
 #endif
     }
 
-    void unpin_stream_to_cpus() {
-#if OV_THREAD == OV_THREAD_SEQ
-        auto stream = _streams.local();
-        if (stream->_mask) {
-            pin_current_thread_by_mask(stream->_ncpus, stream->_mask);
-        }
-#endif
-    }
-
     void Defer(Task task) {
-        auto& stream = *(_streams.local());
+        auto& stream = *(_streams->local());
         stream._taskQueue.push(std::move(task));
         if (!stream._execute) {
             stream._execute = true;
@@ -455,18 +507,20 @@ struct CPUStreamsExecutor::Impl {
     std::queue<Task> _taskQueue;
     bool _isStopped = false;
     std::vector<int> _usedNumaNodes;
-    CustomThreadLocal _streams;
-    std::shared_ptr<ExecutorManager> _exectorMgr;
+    std::shared_ptr<CustomThreadLocal> _streams;
     bool _isExit = false;
     std::vector<int> _cpu_ids_all;
     std::mutex _cpu_ids_mutex;
 };
 
+CPUStreamsExecutor::Impl::CustomThreadLocal::ThreadCleaner::ResourceKeeper
+    CPUStreamsExecutor::Impl::CustomThreadLocal::ThreadCleaner::global_resource_holder;
+
 int CPUStreamsExecutor::get_stream_id() {
-    if (!_impl->_streams.find_thread_id()) {
+    if (!_impl->_streams->find_thread_id()) {
         return 0;
     }
-    auto stream = _impl->_streams.local();
+    auto stream = _impl->_streams->local();
     return stream->_streamId;
 }
 
@@ -475,23 +529,23 @@ int CPUStreamsExecutor::get_streams_num() {
 }
 
 int CPUStreamsExecutor::get_numa_node_id() {
-    if (!_impl->_streams.find_thread_id()) {
+    if (!_impl->_streams->find_thread_id()) {
         return 0;
     }
-    auto stream = _impl->_streams.local();
+    auto stream = _impl->_streams->local();
     return stream->_numaNodeId;
 }
 
 int CPUStreamsExecutor::get_socket_id() {
-    if (!_impl->_streams.find_thread_id()) {
+    if (!_impl->_streams->find_thread_id()) {
         return 0;
     }
-    auto stream = _impl->_streams.local();
+    auto stream = _impl->_streams->local();
     return stream->_socketId;
 }
 
 std::vector<int> CPUStreamsExecutor::get_rank() {
-    auto stream = _impl->_streams.local();
+    auto stream = _impl->_streams->local();
     return stream->_rank;
 }
 

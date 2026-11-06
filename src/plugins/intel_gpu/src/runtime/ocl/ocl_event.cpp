@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,13 +25,28 @@ bool is_event_profiled(const cl::Event& event) {
     return false;
 }
 
-instrumentation::profiling_interval get_profiling_interval(instrumentation::profiling_stage stage, cl_ulong start,  cl_ulong end) {
+instrumentation::profiling_interval get_profiling_interval(instrumentation::profiling_stage stage, cl_ulong start, cl_ulong end) {
     auto diff = std::chrono::nanoseconds(end - start);
     auto period = std::make_shared<instrumentation::profiling_period_basic>(diff);
-    return { stage, period };
+    return { stage, period, std::chrono::nanoseconds(start), true };
 }
 
 }  // namespace
+
+namespace cldnn::ocl::utils {
+std::vector<cl::Event> get_cl_events(const std::vector<event::ptr>& events) {
+    std::vector<cl::Event> cl_events;
+    for (const auto& ev : events) {
+        if (auto* ocl_base_ev = dynamic_cast<ocl_base_event*>(ev.get())) {
+            if (ocl_base_ev->get().get() != nullptr) {
+                cl_events.push_back(ocl_base_ev->get());
+            }
+        }
+    }
+
+    return cl_events;
+}
+}  // namespace cldnn::ocl::utils
 
 void CL_CALLBACK ocl_event::ocl_event_completion_callback(cl_event, cl_int, void* me) {
     reinterpret_cast<ocl_event*>(me)->_set = true;
@@ -39,8 +54,9 @@ void CL_CALLBACK ocl_event::ocl_event_completion_callback(cl_event, cl_int, void
 }
 
 void ocl_event::set_ocl_callback() {
-    if (_callback_set)
+    if (_callback_set) {
         return;
+    }
 
     if (_event.get() != nullptr) {
         _event.setCallback(CL_COMPLETE, ocl_event_completion_callback, this);
@@ -85,20 +101,11 @@ static const std::vector<profiling_period_ocl_start_stop> profiling_periods{
 };
 
 bool ocl_event::get_profiling_info_impl(std::list<instrumentation::profiling_interval>& info) {
-    if (duration_nsec.has_value()) {
-        auto stage = instrumentation::profiling_stage::executing;
-        auto duration = std::chrono::nanoseconds(duration_nsec.value());
-        auto period = std::make_shared<instrumentation::profiling_period_basic>(duration);
-
-        info.push_back({ stage, period });
-
+    if (!is_event_profiled(_event)) {
         return true;
     }
 
-    if (!is_event_profiled(_event))
-        return true;
-
-    for (auto& period : profiling_periods) {
+    for (const auto& period : profiling_periods) {
         cl_ulong start;
         cl_ulong end;
 
@@ -156,10 +163,11 @@ bool ocl_events::get_profiling_info_impl(std::list<instrumentation::profiling_in
             continue;
         }
 
-        if (!is_event_profiled(be->_event))
+        if (!is_event_profiled(be->_event)) {
             continue;
+        }
 
-        for (auto& period : profiling_periods) {
+        for (const auto& period : profiling_periods) {
             cl_ulong ev_start;
             cl_ulong ev_end;
             try {
@@ -182,9 +190,9 @@ bool ocl_events::get_profiling_info_impl(std::list<instrumentation::profiling_in
                         if (!ev_duration_merged) {
                             ev_duration_merged = true;
                             break;
-                        } else {
-                            it = durations.erase(it);
                         }
+                        it = durations.erase(it);
+
                     } else {
                         if (!ev_duration_merged) {
                             duration.first = std::min(duration.first, ev_duration.first);
@@ -213,13 +221,26 @@ bool ocl_events::get_profiling_info_impl(std::list<instrumentation::profiling_in
         }
     }
 
-    for (auto& period : profiling_periods) {
+    for (const auto& period : profiling_periods) {
+        auto& durations = all_durations[period.stage];
+        if (durations.empty()) {
+            auto zero_period = std::make_shared<instrumentation::profiling_period_basic>(std::chrono::nanoseconds(0));
+            info.push_back({period.stage, zero_period});
+            continue;
+        }
+
+        // Find min start across all merged (non-overlapping) intervals for this stage.
+        // The OCL timestamps are absolute nanoseconds from the device profiling clock.
+        unsigned long long min_start = durations.front().first;
         unsigned long long sum = 0;
-        for (auto& duration : all_durations[period.stage]) {
+        for (auto& duration : durations) {
+            if (duration.first < min_start) {
+                min_start = duration.first;
+            }
             sum += (duration.second - duration.first);
         }
 
-        info.push_back(get_profiling_interval(period.stage, 0, sum));
+        info.push_back(get_profiling_interval(period.stage, min_start, min_start + sum));
     }
 
     return true;

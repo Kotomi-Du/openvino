@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,7 +25,7 @@ struct rms_impl : typed_primitive_impl_ocl<rms> {
 
     void load(BinaryInputBuffer& ib) override {
         parent::load(ib);
-        if (is_dynamic() && _kernel_data.kernelName.length() != 0) {
+        if (is_dynamic() && !_kernel_data.kernelName.empty()) {
             auto& kernel_selector = kernel_selector_t::Instance();
             auto kernel_impl = kernel_selector.GetImplementation(_kernel_data.kernelName);
             kernel_impl->GetUpdateDispatchDataFunc(_kernel_data);
@@ -36,9 +36,13 @@ struct rms_impl : typed_primitive_impl_ocl<rms> {
         const auto& primitive = impl_param.typed_desc<rms>();
         auto params = get_default_params<kernel_selector::rms_params>(impl_param, is_shape_agnostic);
 
-        params.inputs.push_back(convert_data_tensor(impl_param.get_input_layout(1)));
+        if (primitive->elementwise_affine) {
+            params.inputs.push_back(convert_data_tensor(impl_param.get_input_layout(1)));
+        }
         params.epsilon = primitive->epsilon;
         params.ov_input_rank = static_cast<int32_t>(impl_param.get_input_layout().get_partial_shape().size());
+        params.elementwise_affine = primitive->elementwise_affine;
+        params.axis = primitive->axis;
         return params;
     }
 
@@ -67,7 +71,10 @@ attach_rms_impl::attach_rms_impl() {
     auto types = {
         data_types::f32,
         data_types::f16,
-        data_types::i32
+        data_types::bf16,
+        data_types::i32,
+        data_types::f8e4m3,
+        data_types::f8e5m2
     };
 
     auto formats = {

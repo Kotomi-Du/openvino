@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -83,6 +83,8 @@ std::string toString(ActivationFunction activation) {
         case ActivationFunction::GELU_TANH:                 method = "GELU_TANH"; break;
         case ActivationFunction::ROUND_HALF_TO_EVEN:        method = "ROUND_HALF_TO_EVEN"; break;
         case ActivationFunction::ROUND_HALF_AWAY_FROM_ZERO: method = "ROUND_HALF_AWAY_FROM_ZERO"; break;
+        case ActivationFunction::ERFINV:                    method = "ERFINV"; break;
+        case ActivationFunction::SWOOSH:                    method = "SWOOSH"; break;
         default: break;
     }
     return method;
@@ -145,6 +147,8 @@ std::string toString(DataLayout l) {
 
 std::string toString(Datatype dType) {
     switch (dType) {
+        case Datatype::UINT2:  return "UINT2";
+        case Datatype::UINT3:  return "UINT3";
         case Datatype::UINT4:  return "UINT4";
         case Datatype::INT4:   return "INT4";
         case Datatype::INT8:   return "INT8";
@@ -156,6 +160,10 @@ std::string toString(Datatype dType) {
         case Datatype::INT64:  return "INT64";
         case Datatype::F16:    return "F16";
         case Datatype::F32:    return "F32";
+        case Datatype::F4E2M1: return "F4E2M1";
+        case Datatype::F8E4M3: return "F8E4M3";
+        case Datatype::F8E5M2: return "F8E5M2";
+        case Datatype::F8E8M0: return "F8E8M0";
         default: return "";
     }
 }
@@ -164,6 +172,8 @@ std::string toString(WeightsType wType) {
     switch (wType) {
         case WeightsType::F16:    return "F16";
         case WeightsType::F32:    return "F32";
+        case WeightsType::UINT2:  return "UINT2";
+        case WeightsType::UINT3:  return "UINT3";
         case WeightsType::UINT4:  return "UINT4";
         case WeightsType::INT4:   return "INT4";
         case WeightsType::INT8:   return "INT8";
@@ -208,6 +218,7 @@ std::string toString(EltwiseMode b_mode) {
         case EltwiseMode::SQRT:   return "SQRT";
         case EltwiseMode::RSQRT:  return "RSQRT";
         case EltwiseMode::ASSIGN: return "ASSIGN";
+        case EltwiseMode::ATAN2:  return "ATAN2";
         default: return "";
     }
 }
@@ -347,6 +358,8 @@ std::string toString(WeightsLayout layout) {
         case WeightsLayout::os_is_zyx_isa8_osv16_isv4:                   return "OS_IS_ZYX_ISA8_OSV16_ISV4";
         case WeightsLayout::os_is_yx_osa4_isa8_osv8_isv4_swizzled_by_4:  return "OS_IS_YX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4";
         case WeightsLayout::os_is_zyx_osa4_isa8_osv8_isv4_swizzled_by_4: return "OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4";
+        case WeightsLayout::os_is_yx_osa2_isa8_osv16_isv4_swizzled_by_2: return "OS_IS_YX_OSA2_ISA8_OSV16_ISV4_SWIZZLED_BY_2";
+        case WeightsLayout::os_is_zyx_osa2_isa8_osv16_isv4_swizzled_by_2: return "OS_IS_ZYX_OSA2_ISA8_OSV16_ISV4_SWIZZLED_BY_2";
         case WeightsLayout::os_is_yx_osv16_isv4:                         return "OS_IS_YX_OSV16_ISV4";
         case WeightsLayout::os_is_yx_osv32_isv4_swizzled_by_2:           return "OS_IS_YX_OSV32_ISV4_SWIZZLED_BY_2";
         case WeightsLayout::os_is_yx_osv32_isv4:                         return "OS_IS_YX_OSV32_ISV4";
@@ -406,6 +419,8 @@ std::string toString(ConcatAxis a) {
         case ConcatAxis::Y:       return "Y";
         case ConcatAxis::Z:       return "Z";
         case ConcatAxis::W:       return "W";
+        case ConcatAxis::U:       return "U";
+        case ConcatAxis::V:       return "V";
         case ConcatAxis::FEATURE: return "FEATURE";
         case ConcatAxis::BATCH:   return "BATCH";
         default: return "";
@@ -514,15 +529,21 @@ std::string toString(const DataTensor& tensor) {
     if (tensor.GetLayout() != DataLayout::b_fs_yx_fsv16 &&
         tensor.GetLayout() != DataLayout::b_fs_zyx_fsv16) {
         return toStringTensor(tensor);
-    } else {
-        std::stringstream s;
-        s << toString(tensor.GetDType()) << "_";
-        std::string layoutStr;
-        switch (tensor.GetLayout()) {
-            case DataLayout::b_fs_yx_fsv16: layoutStr = "BFYX_F16"; break;
-            case DataLayout::b_fs_zyx_fsv16: layoutStr = "BFZYX_F16"; break;
-            default: layoutStr = toString(tensor.GetLayout()); break;
-        }
+    }
+    std::stringstream s;
+    s << toString(tensor.GetDType()) << "_";
+    std::string layoutStr;
+    switch (tensor.GetLayout()) {
+    case DataLayout::b_fs_yx_fsv16:
+        layoutStr = "BFYX_F16";
+        break;
+    case DataLayout::b_fs_zyx_fsv16:
+        layoutStr = "BFZYX_F16";
+        break;
+    default:
+        layoutStr = toString(tensor.GetLayout());
+        break;
+    }
         s << layoutStr << "_";
         int i = 0;
         for (auto dim : tensor.GetDims()) {
@@ -530,7 +551,6 @@ std::string toString(const DataTensor& tensor) {
             i++;
         }
         return s.str();
-    }
 }
 
 std::string toString(const WeightsTensor& tensor) {
@@ -580,14 +600,22 @@ std::string toString(ReduceMode mode) {
 
 void clKernelData::save(cldnn::BinaryOutputBuffer& ob) const {
     ob(params.workGroups.global, params.workGroups.local);
+
     ob << params.arguments.size();
     for (const auto& arg : params.arguments) {
         ob << make_data(&arg.t, sizeof(cldnn::argument_desc::Types)) << arg.index;
     }
+
     ob << params.scalars.size();
     for (const auto& scalar : params.scalars) {
         ob << make_data(&scalar.t, sizeof(cldnn::scalar_desc::Types)) << make_data(&scalar.v, sizeof(cldnn::scalar_desc::ValueT));
     }
+
+    ob << params.local_memory_args.size();
+    for (const auto& arg : params.local_memory_args) {
+        ob << cldnn::make_data(&arg, sizeof(arg));
+    }
+
     ob << params.layerID;
 #ifdef ENABLE_ONEDNN_FOR_GPU
     ob << micro_kernels.size();
@@ -612,6 +640,13 @@ void clKernelData::load(cldnn::BinaryInputBuffer& ib) {
     params.scalars.resize(scalars_desc_size);
     for (auto& scalar : params.scalars) {
         ib >> make_data(&scalar.t, sizeof(cldnn::scalar_desc::Types)) >> make_data(&scalar.v, sizeof(cldnn::scalar_desc::ValueT));
+    }
+
+    typename cldnn::local_memory_args_desc::size_type local_memory_args_size = 0UL;
+    ib >> local_memory_args_size;
+    params.local_memory_args.resize(local_memory_args_size);
+    for (auto& arg : params.local_memory_args) {
+        ib >> cldnn::make_data(&arg, sizeof(arg));
     }
 
     ib >> params.layerID;

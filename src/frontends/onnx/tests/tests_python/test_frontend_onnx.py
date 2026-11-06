@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import io
@@ -15,6 +15,21 @@ import shutil
 
 from openvino.frontend import FrontEndManager
 from tests.runtime import get_runtime
+
+
+def _is_graph_iterator_enabled():
+    env_value = os.environ.get("ONNX_ITERATOR")
+    if env_value is None:
+        return True
+    value = env_value.strip().lower()
+    return value not in {"", "0", "false", "off", "disable"}
+
+
+DECODE_AND_CONVERT_XFAIL = pytest.mark.xfail(
+    condition=_is_graph_iterator_enabled(),
+    reason="Decoding via GraphIterator is not supported yet",
+    strict=True,
+)
 
 
 def create_onnx_model():
@@ -90,7 +105,9 @@ def create_onnx_model_with_custom_attributes():
         attribute_list_str=np.array(["a", "b", "c"], dtype=str),
         attribute_list_f32=np.array([1, 2, 3], dtype=float),
         attribute_list_f64=np.array([1, 2, 3], dtype=np.float64),
-        attribute_list_bool=[True, False, True],
+        # ONNX >= 1.22 make_attribute rejects Python bools in an INTS field; store as ints
+        # explicitly (ONNX represents bool attributes as ints on the wire regardless).
+        attribute_list_bool=[1, 0, 1],
         attribute_list_type=np.array([onnx.TensorProto.INT32, onnx.TensorProto.FLOAT]),
     )
     const_tensor = onnx.helper.make_tensor(
@@ -255,6 +272,7 @@ def test_convert():
     run_model(converted_model, input_1, input_2, expected=[expected])
 
 
+@DECODE_AND_CONVERT_XFAIL
 @pytest.mark.parametrize(
     ("model_filename", "inputs", "expected"),
     [
@@ -337,7 +355,7 @@ def test_onnx_conversion_extension_check_attributes():
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import ConversionExtension
     from openvino.frontend import NodeContext
-    import openvino.runtime.opset8 as ops
+    import openvino.opset8 as ops
 
     # use the model with attributes
     fe = fem.load_by_model(onnx_model_with_custom_attributes_filename)
@@ -391,7 +409,7 @@ def test_onnx_conversion_extension_attribute_with_default_value():
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import ConversionExtension
     from openvino.frontend import NodeContext
-    import openvino.runtime.opset8 as ops
+    import openvino.opset8 as ops
 
     # use the model without attributes
     fe = fem.load_by_model(onnx_model_filename)
@@ -458,8 +476,8 @@ def test_onnx_conversion_extension_cast_attributes():
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import ConversionExtension
     from openvino.frontend import NodeContext
-    from openvino.runtime import Type
-    import openvino.runtime.opset8 as ops
+    from openvino import Type
+    import openvino.opset8 as ops
 
     # use the model without attributes
     fe = fem.load_by_model(onnx_model_with_custom_attributes_filename)
@@ -515,7 +533,7 @@ def test_onnx_conversion_extension_common():
     # use common (openvino.frontend) import here
     from openvino.frontend import ConversionExtension
     from openvino.frontend import NodeContext
-    import openvino.runtime.opset8 as ops
+    import openvino.opset8 as ops
 
     fe = fem.load_by_model(onnx_model_filename)
     assert fe
@@ -545,7 +563,7 @@ def test_onnx_conversion_extension():
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import ConversionExtension
     from openvino.frontend import NodeContext
-    import openvino.runtime.opset8 as ops
+    import openvino.opset8 as ops
 
     fe = fem.load_by_model(onnx_model_filename)
     assert fe
@@ -575,7 +593,7 @@ def test_onnx_conversion_extension_with_custom_domain():
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import ConversionExtension
     from openvino.frontend import NodeContext
-    import openvino.runtime.opset8 as ops
+    import openvino.opset8 as ops
 
     fe = fem.load_by_model(onnx_model_extension_with_custom_domain)
     assert fe
@@ -630,7 +648,7 @@ def test_op_extension_specify_opset(opset_prefix):
 
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import OpExtension
-    from openvino.runtime import Core
+    from openvino import Core
 
     core = Core()
 
@@ -655,7 +673,7 @@ def test_op_extension_specify_wrong_opset(opset_prefix):
 
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import OpExtension
-    from openvino.runtime import Core
+    from openvino import Core
 
     core = Core()
 
@@ -672,7 +690,7 @@ def test_op_extension_via_onnx_extension_set_attrs_values():
 
     # use specific (openvino.frontend.onnx) import here
     from openvino.frontend.onnx import OpExtension
-    from openvino.runtime import Core
+    from openvino import Core
 
     core = Core()
 
@@ -699,6 +717,7 @@ def test_op_extension_via_onnx_extension_set_attrs_values():
                 "exclude-pad": True,
                 "auto_pad": "same_upper",
                 "rounding_type": "floor",
+                "dilations": [1, 1],
             },
         )
     )
@@ -712,7 +731,7 @@ def test_op_extension_via_frontend_extension_set_attrs_values():
 
     # use common (openvino.frontend) import here
     from openvino.frontend import OpExtension
-    from openvino.runtime import Core
+    from openvino import Core
 
     core = Core()
     # check the model is valid
@@ -738,6 +757,7 @@ def test_op_extension_via_frontend_extension_set_attrs_values():
                 "exclude-pad": True,
                 "auto_pad": "same_upper",
                 "rounding_type": "floor",
+                "dilations": [1, 1],
             },
         )
     )
@@ -751,7 +771,7 @@ def test_op_extension_via_frontend_extension_map_attributes():
 
     # use common (openvino.frontend) import here
     from openvino.frontend import OpExtension
-    from openvino.runtime import Core
+    from openvino import Core
 
     core = Core()
     # check the model is valid
@@ -772,6 +792,7 @@ def test_op_extension_via_frontend_extension_map_attributes():
                 "pads_end": [1, 1],
                 "exclude-pad": True,
                 "rounding_type": "floor",
+                "dilations": [1, 1],
             },
         )
     )
@@ -855,13 +876,14 @@ def test_add_extension_unicode_paths():
 
 
 def test_load_bytesio_model():
-    from openvino.runtime import Core
+    from openvino import Core
 
     fe = fem.load_by_framework(framework=ONNX_FRONTEND_NAME)
     model_from_fe = fe.load(model_stream)
     assert model_from_fe
     converted_model = fe.convert(model_from_fe)
-    assert converted_model.friendly_name == "graph"
+    expected_name = "onnx_Frontend_IR" if _is_graph_iterator_enabled() else "graph"
+    assert converted_model.friendly_name == expected_name
 
     core = Core()
     model = core.read_model(model_stream)

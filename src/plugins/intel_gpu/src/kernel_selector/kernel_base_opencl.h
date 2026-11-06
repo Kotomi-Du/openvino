@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,7 +15,7 @@ namespace kernel_selector {
 class KernelBaseOpenCL : public KernelBase {
 public:
     using KernelBase::KernelBase;
-    virtual ~KernelBaseOpenCL() {}
+    ~KernelBaseOpenCL() override = default;
 
 protected:
     virtual bool Validate(const Params&) const { return true; }

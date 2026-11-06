@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 ARG REGISTRY="docker.io"
 FROM ${REGISTRY}/library/ubuntu:22.04
 
@@ -18,26 +21,26 @@ RUN apt-get update && \
     add-apt-repository --yes --no-update ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install \
-        curl \
-        git \
-        ca-certificates \
-        gpg-agent \
-        tzdata \
-        libtbb2 \
-        # parallel gzip
-        pigz \
-        # Pythons
-        python3.8-dev \
-        python3.8-venv \
-        python3.8-distutils \
-        python3.11-dev \
-        python3.11-venv \
-        python3.11-distutils \
-        # For Java API
-        default-jdk \
-        # Compiler \
-        clang \
-        && \
+    curl \
+    git \
+    ca-certificates \
+    gpg-agent \
+    tzdata \
+    libtbb2 \
+    # parallel gzip
+    pigz \
+    # Pythons
+    python3.8-dev \
+    python3.8-venv \
+    python3.8-distutils \
+    python3.11-dev \
+    python3.11-venv \
+    python3.11-distutils \
+    # For Java API
+    default-jdk \
+    # Compiler \
+    clang \
+    && \
     rm -rf /var/lib/apt/lists/*
 
 # Install build dependencies
@@ -51,7 +54,7 @@ RUN update-alternatives --install /usr/bin/cc cc /usr/bin/clang 100 && \
     update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++ 100
 
 # Install sscache
-ARG SCCACHE_VERSION="v0.7.5"
+ARG SCCACHE_VERSION="v0.18.0"
 ENV SCCACHE_HOME="/opt/sccache" \
     SCCACHE_PATH="/opt/sccache/sccache"
 
@@ -73,4 +76,6 @@ RUN curl https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip-3.8.py && \
 RUN python3.11 -m venv venv
 ENV PATH="/venv/bin:$SCCACHE_HOME:$PATH"
 
-ENV PIP_CACHE_DIR=/mount/caches/pip/linux/${PIP_VERSION}
+# Install newer ninja (apt ships 1.10.1 on 22.04 which lacks --quiet)
+RUN python3 -m pip install --no-cache-dir ninja==1.13.0
+

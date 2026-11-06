@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -19,10 +19,7 @@ using namespace std;
 using namespace ov;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 Output<Node> normalize_selected_indices(const Output<Node>& ov_selected_indices,
                                         const Output<Node>& max_output_size,
                                         bool pad_to_max_output_size) {
@@ -91,7 +88,7 @@ NamedOutputVector translate_non_max_suppression_op(const NodeContext& node) {
         // NonMaxSuppressionV2 has four inputs and one output, selected indices
         // iou_threshold comes as input
         default_op_checks(node, 4, {"NonMaxSuppressionV2"});
-        auto iou_threshold = node.get_input(3);
+        iou_threshold = node.get_input(3);
     } else if (op_type == "NonMaxSuppressionV3") {
         // NonMaxSuppressionV3 has five inputs and one output, selected indices
         // score_threshold is a new input
@@ -164,7 +161,4 @@ NamedOutputVector translate_non_max_suppression_op(const NodeContext& node) {
 
     return named_results;
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

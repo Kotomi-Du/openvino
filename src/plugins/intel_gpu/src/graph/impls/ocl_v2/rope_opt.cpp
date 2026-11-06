@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "rope_opt.hpp"
@@ -7,6 +7,7 @@
 #include "common_utils/jitter.hpp"
 #include "intel_gpu/primitives/rope.hpp"
 #include "primitive_ocl_base.hpp"
+#include "utils/jitter.hpp"
 #include "utils/kernel_generator.hpp"
 
 namespace ov::intel_gpu::ocl {
@@ -14,10 +15,12 @@ namespace {
 
 size_t get_vec_size(const RuntimeParams& params) {
     const auto& input = params.get_input_layout(0);
+    const auto& input1 = params.get_input_layout(1);
     auto desc = params.typed_desc<rope>();
     size_t vec_size = 1;
     switch (input.data_type) {
     case ov::element::f16:
+    case ov::element::bf16:
         vec_size = 16;
         break;
     case ov::element::f32:
@@ -31,6 +34,12 @@ size_t get_vec_size(const RuntimeParams& params) {
         vec_size = 1;
     }
 
+    // Some models use f32 precision for input1 (cos) and input2 (sin) for better accuracy.
+    // If input0 is not f32, we set vec_size as 1 for simple type conversion.
+    if (input1.data_type == ov::element::f32 && input.data_type != input1.data_type) {
+        vec_size = 1;
+    }
+
     if (desc->config.is_qwen) {
         auto count = desc->config.head_cnt * std::max(desc->config.rotary_ndims / 2ul, desc->config.head_size - desc->config.rotary_ndims);
         if (count % vec_size != 0) {
@@ -39,6 +48,14 @@ size_t get_vec_size(const RuntimeParams& params) {
     }
 
     return vec_size;
+}
+
+// The fused RMSNorm reduction relies on the non-reversed GWS layout, which is only used when VEC_SIZE > 1.
+bool fused_rms_enabled(const RuntimeParams& params) {
+    if (!params.typed_desc<rope>()->fuse_rms_norm)
+        return false;
+    OPENVINO_ASSERT(get_vec_size(params) > 1, "[GPU] rope: a fused RMSNorm needs the vectorized RoPE kernel");
+    return true;
 }
 
 class RopeGenerator : public KernelGenerator {
@@ -54,6 +71,7 @@ protected:
         jit.make("HEAD_SIZE", desc->config.head_size);
         jit.make("ROTARY_NDIMS", desc->config.rotary_ndims);
         jit.make("HALF_ROTARY_NDIMS", desc->config.rotary_ndims / 2);
+        jit.make("COS_SIN_TABLE_OFFSET", (desc->config.cos_sin_ndims == (desc->config.rotary_ndims / 2)) ? 0 : desc->config.rotary_ndims / 2);
         jit.make("HEAD_COUNT", desc->config.head_cnt);
 
         if (desc->config.head_size > desc->config.rotary_ndims) {
@@ -84,13 +102,38 @@ protected:
             if (desc->config.support_2d_rope) {
                 jit.make("SUPPORT_2D_ROPE", true);
             }
+            if (desc->config.use_rope_cache) {
+                jit.make("USE_ROPE_CACHE", true);
+            }
             jit.make("CHATGLM", true);
+        } else if (desc->config.is_ltx_video) {
+            jit.make("LTX_VIDEO", true);
         } else if (desc->config.is_interleaved) {
             jit.make("RotateInterleaved", true);
         } else {
             jit.make("RotateHalf", true);
+            if (desc->config.input_interleaved) {
+                jit.make("INPUT_INTERLEAVED", true);
+            }
+            if (get_vec_size(params) == 1) {
+                jit.make("REVERSED_GWS", true);
+            }
         }
         jit.make("VEC_SIZE", get_vec_size(params));
+        if (fused_rms_enabled(params)) {
+            // One workgroup owns a whole head along gws[2], so the RMS reduction is workgroup-local.
+            jit.make("FUSE_RMS_NORM", true);
+            jit.make("RMS_EPSILON", desc->rms_epsilon);
+            jit.make("RMS_WORKERS", desc->config.rotary_ndims / (2 * get_vec_size(params)));
+        }
+        if (in_l.data_type == ov::element::bf16) {
+            jit.add(make_type_jit_constants("ACCUMULATOR", ov::element::f32));
+        } else if (params.get_input_layout(0).data_type != params.get_input_layout(1).data_type) {
+            jit.add(make_type_jit_constants("ACCUMULATOR", params.get_input_layout(1).data_type));
+        } else {
+            jit.add(make_type_jit_constants("ACCUMULATOR", params.get_input_layout(0).data_type));
+        }
+
         return jit;
     }
 
@@ -101,7 +144,8 @@ protected:
         }
 
         auto desc = params.typed_desc<rope>();
-        uint32_t num_of_inputs = desc->config.is_chatglm || (desc->config.output_trans0213 && desc->config.is_interleaved) ? 2 : 3;
+        uint32_t num_of_inputs =
+            (desc->config.is_chatglm && desc->config.use_rope_cache) || (desc->config.output_trans0213 && desc->config.is_interleaved) ? 2 : 3;
 
         if (desc->gather_rank > 0) {
             num_of_inputs++;
@@ -109,6 +153,10 @@ protected:
 
         for (uint32_t i = 0; i < num_of_inputs; i++) {
             args.push_back({ArgumentDescriptor::Types::INPUT, i});
+        }
+
+        if (fused_rms_enabled(params)) {
+            args.push_back({ArgumentDescriptor::Types::INPUT, num_of_inputs});
         }
 
         args.push_back({ArgumentDescriptor::Types::OUTPUT, 0});
@@ -143,16 +191,54 @@ protected:
                     } else {
                         wgs.global = {b, f, cfg.head_cnt * (cfg.rotary_ndims / 2ul) / vec_size};
                     }
-
+                } else if (cfg.is_ltx_video) {
+                    auto b = extract_channel(ChannelName::BATCH, in_l);
+                    auto f = extract_channel(ChannelName::FEATURE, in_l);
+                    wgs.global = {b, f, cfg.rotary_ndims / 2ul / vec_size};
                 } else {
                     auto b = extract_channel(ChannelName::BATCH, out_l);
                     auto f = extract_channel(ChannelName::FEATURE, out_l);
                     auto y = extract_channel(ChannelName::Y, out_l);
-
                     wgs.global = {b, f, y * cfg.rotary_ndims / 2ul / vec_size};
+                    if (cfg.support_3d_rope) {
+                        wgs.global = {b, f, cfg.rotary_ndims / 2ul / vec_size};
+                    }
+                    // reverse gws when RotateHalf and vec_size is one
+                    if (!desc->config.is_interleaved && vec_size == 1) {
+                        size_t tmp = wgs.global[0];
+                        wgs.global[0] = wgs.global[2];
+                        wgs.global[2] = tmp;
+                    }
                 }
 
-                wgs.local = ov::intel_gpu::get_optimal_lws(wgs.global, params.get_device_info(), in_l.format, out_l.format, dims_by_gws);
+                // We need to set the 1st local workgroup size as large as possible for better performance.
+                if (fused_rms_enabled(params)) {
+                    // Keep every work item of one head in a single workgroup for the RMS reduction.
+                    wgs.local = {1, 1, cfg.rotary_ndims / (2 * vec_size)};
+                } else if (vec_size == 1) {
+                    auto get_max_lws = [](size_t gws, size_t max_workgroup_size) -> size_t {
+                        size_t val = 1;
+                        size_t lws = 1;
+                        while (((val + 1) <= max_workgroup_size) && (gws >= (val + 1))) {
+                            val += 1;
+                            if (gws % val == 0) {
+                                lws = val;
+                            }
+                        }
+                        return lws;
+                    };
+
+                    size_t max_workgroup_size = static_cast<size_t>(params.get_device_info().max_work_group_size);
+
+                    wgs.local = {1, 1, 1};
+                    wgs.local[0] = get_max_lws(wgs.global[0], max_workgroup_size);
+                    max_workgroup_size /= wgs.local[0];
+                    wgs.local[1] = get_max_lws(wgs.global[1], max_workgroup_size);
+                    max_workgroup_size /= wgs.local[1];
+                    wgs.local[2] = get_max_lws(wgs.global[2], max_workgroup_size);
+                } else {
+                    wgs.local = ov::intel_gpu::get_optimal_lws(wgs.global, params.get_device_info(), in_l.format, out_l.format, dims_by_gws);
+                }
             }
         }};
     }

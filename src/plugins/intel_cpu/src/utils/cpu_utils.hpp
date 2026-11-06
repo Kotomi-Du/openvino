@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,8 +16,18 @@
 #include "openvino/core/except.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "precision_support.h"
+#include "utils/cpp/bit_cast.hpp"
 
 namespace ov::intel_cpu {
+
+// Helper function to safely cast JIT kernel bytecode to function pointers
+// Note: const_cast is unavoidable here because JIT compilers typically return const void*
+// to compiled bytecode, but function pointers cannot be const-qualified. This is a common
+// pattern in JIT compilation where the bytecode is immutable but needs to be executed.
+template <typename FuncPtr>
+FuncPtr jit_kernel_cast(const void* ptr) {
+    return reinterpret_cast<FuncPtr>(const_cast<void*>(ptr));  // NOLINT(bugprone-casting-through-void)
+}
 
 // helper struct to tell wheter type T is any of given types U...
 // termination case when U... is empty -> return std::false_type
@@ -86,8 +96,8 @@ inline bool isPerTensorOrPerChannelBroadcastable(const VectorDims& firstInputDim
             }
         }
     } else {
-        for (size_t i = 0; i < normalizedSecondInputDims.size(); i++) {
-            if (normalizedSecondInputDims[i] != 1) {
+        for (uint64_t normalizedSecondInputDim : normalizedSecondInputDims) {
+            if (normalizedSecondInputDim != 1) {
                 return false;
             }
         }
@@ -151,13 +161,11 @@ inline ov::element::Type normalizeToSupportedPrecision(ov::element::Type precisi
  * alignment for targetSize
  * @return aligned buffer
  */
-inline std::vector<float> makeAlignedBuffer(size_t targetSize, const std::vector<float>& buffer, int align = -1) {
-    if (buffer.empty()) {
-        OPENVINO_THROW("Can't align buffer, because buffer is empty");
-    }
+inline std::vector<float> makeAlignedBuffer(size_t targetSize, const std::vector<float>& buffer, size_t align = 0) {
+    OPENVINO_ASSERT(!buffer.empty(), "Can't align buffer, because buffer is empty");
 
     auto alignedBuffer = buffer;
-    if (align == -1) {
+    if (align == 0) {
         align = targetSize;
     }
     const size_t bufferSizeAligned = rnd_up(targetSize, align);
@@ -185,7 +193,7 @@ std::vector<T> reshapeDownToRank(const std::vector<T>& dims, size_t rank) {
     }
 
     const auto accEnd = dims.begin() + (dims.size() - rank + 1);
-    const auto acc = std::accumulate(dims.begin(), accEnd, (T)1, std::multiplies<>());
+    const auto acc = std::accumulate(dims.begin(), accEnd, static_cast<T>(1), std::multiplies<>());
 
     std::vector<T> result{acc};
     result.insert(result.end(), accEnd, dims.end());

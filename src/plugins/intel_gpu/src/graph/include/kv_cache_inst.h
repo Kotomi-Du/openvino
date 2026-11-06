@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,6 +9,8 @@
 #include "openvino/core/partial_shape.hpp"
 #include "primitive_inst.h"
 #include "variable.hpp"
+
+#include <optional>
 
 namespace cldnn {
 
@@ -22,7 +24,14 @@ public:
 
     program_node& input() const { return get_dependency(0); }
 
-    std::vector<size_t> get_shape_infer_dependencies() const override { return {}; }
+    std::vector<size_t> get_shape_infer_dependencies() const override { 
+        std::vector<size_t> vec;
+        const auto desc = get_primitive();
+        if (desc->trim) {
+            vec.push_back(desc->indirect ? 3 : 2); // past_seq_len
+        }
+        return vec;
+     }
 
     std::vector<layout> get_shape_info_input_layouts() const override {
         std::vector<layout> res;
@@ -42,7 +51,7 @@ public:
 using kv_cache_node = typed_program_node<kv_cache>;
 
 template<>
-class typed_primitive_inst<kv_cache> : public typed_primitive_inst_base<kv_cache>, public memory_state::variable {
+class typed_primitive_inst<kv_cache> : public typed_primitive_inst_base<kv_cache>, public memory_state::releasable_variable {
     using parent = typed_primitive_inst_base<kv_cache>;
 
 public:
@@ -68,14 +77,15 @@ public:
     }
 
     static int64_t get_max_pad(const layout& target_layout, size_t buffer_size, int64_t sequence_axis, std::string target_name = "") {
-        if (buffer_size == 0)
+        if (buffer_size == 0) {
             return 0;
+        }
         const size_t total_elements = target_layout.count();
         const int64_t concat_axis_size = target_layout.get_shape()[sequence_axis];
         const int64_t sequence_element_size = total_elements / concat_axis_size;
         const int64_t max_sequence_elements = buffer_size / sequence_element_size;
         auto max_pad = std::max<int64_t>(max_sequence_elements - concat_axis_size, 0);
-        auto target_layout_name = (target_name != "") ? target_name : "target_layout";
+        auto target_layout_name = (!target_name.empty()) ? target_name : "target_layout";
         GPU_DEBUG_TRACE_DETAIL << "[get_max_pad] " << target_name  << " : " << target_layout.to_string() << std::endl;
         GPU_DEBUG_TRACE_DETAIL << "[get_max_pad] buffer size " << buffer_size << std::endl;
         GPU_DEBUG_TRACE_DETAIL << "[get_max_pad] total_elements " << total_elements << std::endl;
@@ -86,12 +96,20 @@ public:
         return max_pad;
     }
     void update_shape_info_tensor(const kernel_impl_params& params) override;
+    void release_variable() override;
+
+    // KV cache trim length - set during shape inference, may be non-zero only when trim enabled
+    void set_trim_length(int64_t trim_length) { m_trim_length = trim_length; }
+    int64_t get_trim_length() const { return m_trim_length; }
+    // Compute if any length need to be trimmed
+    static int64_t compute_trim_length(const kernel_impl_params& impl_param, const kv_cache& desc);
 
     typed_primitive_inst(network& network, const kv_cache_node& desc);
-    typed_primitive_inst(network& network) : parent(network), memory_state::variable("") {}
+    typed_primitive_inst(network& network) : parent(network), memory_state::releasable_variable("") {}
 
 private:
     size_t kv_cache_id = 0;
+    int64_t m_trim_length = 0;
 };
 
 using kv_cache_inst = typed_primitive_inst<kv_cache>;

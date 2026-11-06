@@ -1,15 +1,15 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
 
-from pytorch_layer_test_class import PytorchLayerTest, skip_if_export
+from pytorch_layer_test_class import PytorchLayerTest
 
 
 class TestFlip(PytorchLayerTest):
     def _prepare_input(self, out=False, dtype="float32"):
         import numpy as np
-        x = np.random.randn(2, 3, 4, 5).astype(dtype)
+        x = self.random.randn(2, 3, 4, 5, dtype=dtype)
         if not out:
             return (x,)
         return (x, np.zeros_like(x).astype(dtype))
@@ -19,26 +19,26 @@ class TestFlip(PytorchLayerTest):
         import torch
         class aten_flip(torch.nn.Module):
             def __init__(self, dim, out):
-                super(aten_flip, self).__init__()
+                super().__init__()
                 self.dim = dim
                 if out:
                     self.forward = self.forward_out
+                    self.out_op = PytorchLayerTest.out_variant(torch.flip, torch.ops.aten.flip.out)
 
             def forward(self, x):
                 return torch.flip(x, self.dim)
-            
+
             def forward_out(self, x, y):
-                return torch.flip(x, self.dim, out=y), y
+                return self.out_op(x, self.dim, out=y), y
 
-        ref_net = None
 
-        return aten_flip(axis, out), ref_net, "aten::flip"
+        return aten_flip(axis, out), "aten::flip"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
     @pytest.mark.precommit_torch_export
     @pytest.mark.parametrize("axis", [[0], [1], [-1], [1, 2], [2, 3], [1, 2, 3]])
-    @pytest.mark.parametrize("out", [skip_if_export(True), False])
+    @pytest.mark.parametrize("out", [True, False])
     @pytest.mark.parametrize("dtype", ["float32", "float64", "int32", "int64", "uint8"])
     def test_flip(self, axis, out, dtype, ie_device, precision, ir_version):
         self._test(*self.create_model(axis, out), ie_device, precision, ir_version, kwargs_to_prepare_input={"out": out, "dtype": dtype})

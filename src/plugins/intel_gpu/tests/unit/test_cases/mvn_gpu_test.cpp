@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,9 +8,15 @@
 #include <intel_gpu/primitives/input_layout.hpp>
 #include <intel_gpu/primitives/mvn.hpp>
 #include <intel_gpu/primitives/reorder.hpp>
+#include <intel_gpu/primitives/crop.hpp>
 #include <intel_gpu/runtime/debug_configuration.hpp>
 
 #include <iostream>
+#include <cmath>
+#include <memory>
+#include <vector>
+#include <sstream>
+#include <type_traits>
 
 #include "mvn_inst.h"
 
@@ -19,8 +25,17 @@ using namespace ::tests;
 
 class mvn_gpu_test : public ::testing::TestWithParam<cldnn::format> {};
 
+// Element-wise validation against an independent CPU reference (defined below),
+// templated over the element type (f16/bf16).
 template <typename T>
-void mvn_compute_mean_across_channels(cldnn::memory::ptr output, bool normalize_variance) {
+void mvn_check_cpu_reference(cldnn::memory::ptr input, cldnn::memory::ptr output,
+                             const std::vector<int64_t>& axes, bool normalize_variance,
+                             float eps, bool eps_inside_sqrt,
+                             cldnn::memory::ptr scale = nullptr,
+                             cldnn::memory::ptr shift = nullptr);
+
+template <typename T>
+void mvn_compute_mean_across_channels(cldnn::memory::ptr output, bool normalize_variance, float err_margin_override = 0.f) {
     auto l = output->get_layout();
 
     uint32_t batch_size = l.batch();
@@ -31,7 +46,13 @@ void mvn_compute_mean_across_channels(cldnn::memory::ptr output, bool normalize_
 
     cldnn::mem_lock<T> buff(output, get_test_stream());
 
-    float err_margin = output->get_layout().data_type == data_types::f32 ? 1e-03F : 1e-02F;
+    // normalize_variance=false outputs are x - mean rounded to bf16; the rounding fraction of
+    // (x - mean) is constant per magnitude bin (mean mod ulp), so the output mean carries a
+    // structural bf16 quantization bias of up to ~1/2 ulp regardless of dataset size. The
+    // default bf16 margin (1e-2) cannot absorb it; the affected tests pass an override.
+    float err_margin = err_margin_override > 0.f ? err_margin_override :
+                       (output->get_layout().data_type == data_types::f32 ? 1e-03F :
+                        output->get_layout().data_type == data_types::bf16 ? 1e-02F : 1e-02F);
 
     for (uint32_t b = 0; b < batch_size; ++b) {
         float sum = 0.f;
@@ -63,7 +84,7 @@ void mvn_compute_mean_across_channels(cldnn::memory::ptr output, bool normalize_
 }
 
 template <typename T>
-void mvn_compute_mean_within_channels(cldnn::memory::ptr output, bool normalize_variance) {
+void mvn_compute_mean_within_channels(cldnn::memory::ptr output, bool normalize_variance, float err_margin_override = 0.f) {
     auto l = output->get_layout();
 
     uint32_t batch_size = l.batch();
@@ -74,7 +95,9 @@ void mvn_compute_mean_within_channels(cldnn::memory::ptr output, bool normalize_
 
     cldnn::mem_lock<T> buff(output, get_test_stream());
 
-    float err_margin = output->get_layout().data_type == data_types::f32 ? 1e-03F : 2e-02F;
+    float err_margin = err_margin_override > 0.f ? err_margin_override :
+                       output->get_layout().data_type == data_types::f32 ? 1e-03F :
+                       output->get_layout().data_type == data_types::bf16 ? 1e-02F : 2e-02F;
 
     for (uint32_t b = 0; b < batch_size; ++b) {
         for (uint32_t f = 0; f < feature_size; ++f) {
@@ -103,6 +126,141 @@ void mvn_compute_mean_within_channels(cldnn::memory::ptr output, bool normalize_
             }
         }
     }
+}
+
+// Element-wise validation against an independent CPU reference. Mean/variance invariants
+// alone cannot catch a kernel that mis-decodes bf16 bit patterns (such a kernel still
+// produces zero-mean / unit-variance output), so the f16/bf16 tests also compare every
+// element against a reference computed from the original inputs (decoded to f32).
+// scale/shift are optional fused-op operands (LayerNorm pattern) applied after MVN.
+template <typename T>
+void mvn_check_cpu_reference(cldnn::memory::ptr input, cldnn::memory::ptr output,
+                             const std::vector<int64_t>& axes, bool normalize_variance,
+                             float eps, bool eps_inside_sqrt,
+                             cldnn::memory::ptr scale,
+                             cldnn::memory::ptr shift) {
+    using namespace cldnn;
+    auto in_l = input->get_layout();
+    auto out_l = output->get_layout();
+
+    const size_t B = in_l.batch();
+    const size_t C = in_l.feature();
+    const size_t X = in_l.spatial(0);
+    const size_t Y = in_l.spatial(1);
+    const size_t Z = in_l.spatial(2);
+    const size_t S = X * Y * Z;
+    // cldnn/OpenVINO MVN semantics: the reduction is per batch item. Across channels
+    // (axes {1,2,3}) reduces over all (feature, spatial) elements of each batch; within
+    // channels (axes {2,3}) reduces over spatial per (batch, feature).
+    const bool across = axes.size() == 3;
+
+    mem_lock<T> in_ptr(input, get_test_stream());
+    mem_lock<T> out_ptr(output, get_test_stream());
+    auto s_lock = scale ? std::make_unique<mem_lock<T>>(scale, get_test_stream()) : nullptr;
+    auto sh_lock = shift ? std::make_unique<mem_lock<T>>(shift, get_test_stream()) : nullptr;
+
+    auto in_off = [&](size_t b, size_t f, size_t x, size_t y, size_t z) {
+        return in_l.get_linear_offset(tensor(batch(b), feature(f), spatial(x, y, z, 0)));
+    };
+    auto out_off = [&](size_t b, size_t f, size_t x, size_t y, size_t z) {
+        return out_l.get_linear_offset(tensor(batch(b), feature(f), spatial(x, y, z, 0)));
+    };
+    auto f_off = [&](const layout& l, size_t f) {
+        return l.get_linear_offset(tensor(batch(0), feature(f), spatial(0, 0, 0, 0)));
+    };
+    auto group_idx = [&](size_t b, size_t f, size_t s) {
+        return across ? b : b * C + f;
+    };
+
+    // Two-pass reference (matches the two-pass kernel structure): sums, then variances.
+    std::vector<float> group_sum(across ? B : B * C, 0.f);
+    for (size_t b = 0; b < B; ++b)
+        for (size_t f = 0; f < C; ++f)
+            for (size_t s = 0; s < S; ++s) {
+                const size_t x = s % X;
+                const size_t y = (s / X) % Y;
+                const size_t z = s / (X * Y);
+                group_sum[group_idx(b, f, s)] += static_cast<float>(in_ptr[in_off(b, f, x, y, z)]);
+            }
+    const float divisor = static_cast<float>(across ? C * S : S);
+    for (auto& g : group_sum)
+        g /= divisor;
+
+    std::vector<float> group_var(group_sum.size(), 0.f);
+    for (size_t b = 0; b < B; ++b)
+        for (size_t f = 0; f < C; ++f)
+            for (size_t s = 0; s < S; ++s) {
+                const size_t x = s % X;
+                const size_t y = (s / X) % Y;
+                const size_t z = s / (X * Y);
+                const float d = static_cast<float>(in_ptr[in_off(b, f, x, y, z)]) - group_sum[group_idx(b, f, s)];
+                group_var[group_idx(b, f, s)] += d * d;
+            }
+    for (auto& g : group_var)
+        g /= divisor;
+
+    size_t mismatches = 0;
+    // One output-type ulp at the binade of v (f16: 10, bf16: 7 explicit mantissa bits).
+    constexpr int explicit_bits = std::is_same_v<T, ov::float16> ? 10 : 7;
+    auto ulp = [&](float v) {
+        v = std::fabs(v);
+        if (v == 0.f) return 0.f;
+        int e = 0;
+        std::frexp(v, &e);
+        return std::ldexp(1.f, e - explicit_bits - 1);
+    };
+    for (size_t b = 0; b < B; ++b)
+        for (size_t f = 0; f < C; ++f)
+            for (size_t s = 0; s < S; ++s) {
+                const size_t x = s % X;
+                const size_t y = (s / X) % Y;
+                const size_t z = s / (X * Y);
+                const size_t gi = group_idx(b, f, s);
+
+                float ref = static_cast<float>(in_ptr[in_off(b, f, x, y, z)]) - group_sum[gi];
+                if (normalize_variance) {
+                    const float inv = eps_inside_sqrt ? 1.f / std::sqrt(group_var[gi] + eps)
+                                                     : 1.f / (std::sqrt(group_var[gi]) + eps);
+                    ref *= inv;
+                }
+
+                // Tolerance components:
+                //  - 0.01 absolute floor for small magnitudes,
+                //  - 2% relative,
+                //  - half an output-type ulp for the final store rounding,
+                //  - when a fused scale is applied: one intermediate-product output-type ulp.
+                //    Fused eltwise nodes declare the output precision: the kernel rounds
+                //    each op's result to the output type before feeding the next op
+                //    (exactly what an unfused execution would produce); that rounding is
+                //    modeled below. An f32 micro-divergence between this reference and the
+                //    kernel (summation order, native_rsqrt) can flip which side of an
+                //    output-type rounding boundary the product lands on, changing the
+                //    rounded result by one full output-type step of the pre-rounding magnitude.
+                float extra_tol = 0.f;
+
+                if (scale) {
+                    ref *= static_cast<float>((*s_lock)[f_off(scale->get_layout(), f)]);
+                    if (out_l.data_type != data_types::f32) {
+                        extra_tol = ulp(ref);
+                        ref = static_cast<float>(T(ref));
+                    }
+                }
+                if (shift)
+                    ref += static_cast<float>((*sh_lock)[f_off(shift->get_layout(), f)]);
+
+                const float gpu = static_cast<float>(out_ptr[out_off(b, f, x, y, z)]);
+                const float diff = std::abs(gpu - ref);
+                float tol = std::max(0.01f, 0.02f * std::abs(ref));
+                tol = std::max(tol, 0.5f * ulp(ref));
+                tol = std::max(tol, extra_tol);
+                if (diff > tol) {
+                    if (mismatches < 5)
+                        ADD_FAILURE() << "Element mismatch at b=" << b << " f=" << f << " s=" << s
+                                      << " gpu=" << gpu << " ref=" << ref << " diff=" << diff;
+                    ++mismatches;
+                }
+            }
+    ASSERT_LT(mismatches, 10u) << mismatches << " of " << B * C * S << " elements outside bf16 tolerance (across=" << across << ")";
 }
 
 template <typename T>
@@ -322,6 +480,280 @@ TEST(mvn_gpu_test, dynamic_across_channels_inside_sqrt_bfyx_normalize_variance_f
 
     auto output = outputs.begin()->second.get_memory();
     mvn_compute_mean_across_channels<ov::float16>(output, true);
+}
+
+typedef std::tuple<cldnn::data_types, bool, bool, bool, bool>  // (input_dt, across, nv, eps_inside, small)
+    mvn_bfyx_precision_test_params;
+
+class mvn_bfyx_precision_test : public ::testing::TestWithParam<mvn_bfyx_precision_test_params> {};
+
+static std::string mvn_bfyx_precision_test_name(const ::testing::TestParamInfo<mvn_bfyx_precision_test_params>& info) {
+    const auto& [input_dt, across_channels, normalize_variance, eps_inside_sqrt, small_shape] = info.param;
+    std::ostringstream name;
+    name << (input_dt == cldnn::data_types::bf16 ? "bf16" : "f16")
+         << "_across=" << (across_channels ? 1 : 0)
+         << "_nv=" << (normalize_variance ? 1 : 0)
+         << "_epsInSqrt=" << (eps_inside_sqrt ? 1 : 0)
+         << (small_shape ? "_small" : "");
+    return name.str();
+}
+
+static std::vector<int64_t> mvn_test_axes(bool across_channels) {
+    return across_channels ? std::vector<int64_t>{1, 2, 3} : std::vector<int64_t>{2, 3};
+}
+
+static void mvn_fill_random(cldnn::memory::ptr mem, cldnn::data_types dt) {
+    if (dt == cldnn::data_types::bf16)
+        ::tests::set_random_values<ov::bfloat16>(mem, true, 7, 100);
+    else
+        ::tests::set_random_values<ov::float16>(mem, true, 8, 100);
+}
+
+static void mvn_check_output(cldnn::memory::ptr input, cldnn::memory::ptr output,
+                             cldnn::data_types dt, bool across, bool normalize_variance, bool eps_inside) {
+    using namespace cldnn;
+    if (dt == data_types::bf16) {
+        // normalize_variance=false outputs x - mean rounded to bf16: the output mean carries
+        // a structural bf16 quantization bias regardless of dataset size (each stored value
+        // rounds by at most 1/2 ulp of |x - mean|), so the mean invariants need wider
+        // margins (mvn_check_cpu_reference covers the per-element accuracy).
+        // across: the mean over all elements of a batch item; within: the mean per channel
+        // (fewer elements, so the residual bias is less cancelled). With |x|, |mean| <= 100,
+        // |x - mean| < 256 => ulp <= 1 => per-element rounding residual is bounded by 0.5.
+        const float margin_across = normalize_variance ? 0.f : 1e-1f;
+        const float margin_within = normalize_variance ? 0.f : 5e-1f;
+        if (across)
+            mvn_compute_mean_across_channels<ov::bfloat16>(output, normalize_variance, margin_across);
+        else
+            mvn_compute_mean_within_channels<ov::bfloat16>(output, normalize_variance, margin_within);
+        mvn_check_cpu_reference<ov::bfloat16>(input, output, mvn_test_axes(across), normalize_variance, 1e-10f, eps_inside);
+    } else {
+        if (across)
+            mvn_compute_mean_across_channels<ov::float16>(output, normalize_variance);
+        else
+            mvn_compute_mean_within_channels<ov::float16>(output, normalize_variance);
+        mvn_check_cpu_reference<ov::float16>(input, output, mvn_test_axes(across), normalize_variance, 1e-10f, eps_inside);
+    }
+}
+
+TEST_P(mvn_bfyx_precision_test, run) {
+    using namespace cldnn;
+    const auto& [dt, across, normalize_variance, eps_inside, small_shape] = GetParam();
+
+    auto& engine = get_test_engine();
+    auto input_size = small_shape ? tensor{batch(7), feature(10), spatial(17, 13)}
+                                  : tensor{batch(3), feature(1024), spatial(1, 1152)};
+    auto input = engine.allocate_memory({dt, format::bfyx, input_size});
+    mvn_fill_random(input, dt);
+
+    topology topo;
+    topo.add(input_layout("input", input->get_layout()));
+    topo.add(mvn("mvn", input_info("input"), normalize_variance, 1e-10f, eps_inside, mvn_test_axes(across)));
+
+    network net(engine, topo, get_test_default_config(engine));
+    net.set_input_data("input", input);
+
+    auto outputs = net.execute();
+    ASSERT_EQ(outputs.size(), size_t(1));
+    ASSERT_EQ(outputs.begin()->first, "mvn");
+
+    auto output = outputs.begin()->second.get_memory();
+    mvn_check_output(input, output, dt, across, normalize_variance, eps_inside);
+}
+
+INSTANTIATE_TEST_SUITE_P(mvn_bfyx_precision, mvn_bfyx_precision_test,
+                         ::testing::Combine(::testing::Values(cldnn::data_types::f16, cldnn::data_types::bf16),
+                                            ::testing::Values(true, false),  // across_channels
+                                            ::testing::Values(true, false),  // normalize_variance
+                                            ::testing::Values(true, false),  // eps_inside_sqrt
+                                            ::testing::Values(true, false)),  // small_shape
+                         mvn_bfyx_precision_test_name);
+
+typedef std::tuple<cldnn::data_types, cldnn::format, std::string, bool>  // (input_dt, format, kernel, across)
+    mvn_forced_kernel_test_params;
+
+class mvn_forced_kernel_test : public ::testing::TestWithParam<mvn_forced_kernel_test_params> {};
+
+static std::string mvn_forced_kernel_test_name(const ::testing::TestParamInfo<mvn_forced_kernel_test_params>& info) {
+    const auto& [input_dt, fmt, kernel, across_channels] = info.param;
+    std::ostringstream name;
+    name << (input_dt == cldnn::data_types::bf16 ? "bf16" : "f16")
+         << "_" << kernel
+         << "_across=" << (across_channels ? 1 : 0);
+    return name.str();
+}
+
+TEST_P(mvn_forced_kernel_test, run) {
+    using namespace cldnn;
+    const auto& [dt, fmt, kernel, across] = GetParam();
+
+    auto& engine = get_test_engine();
+    auto input = engine.allocate_memory({dt, fmt, tensor{batch(2), feature(64), spatial(17, 13)}});
+    mvn_fill_random(input, dt);
+
+    topology topo;
+    topo.add(input_layout("input", input->get_layout()));
+    topo.add(mvn("mvn", input_info("input"), true, 1e-10f, true, mvn_test_axes(across)));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::force_implementations(
+        ov::intel_gpu::ImplForcingMap{{"mvn", {fmt, kernel}}}));
+
+    network net(engine, topo, config);
+    net.set_input_data("input", input);
+
+    auto output = net.execute().at("mvn").get_memory();
+    mvn_check_output(input, output, dt, across, true, true);
+}
+
+INSTANTIATE_TEST_SUITE_P(mvn_forced_kernel, mvn_forced_kernel_test,
+                         ::testing::Values(
+                             mvn_forced_kernel_test_params{cldnn::data_types::f16, cldnn::format::bfyx, "mvn_gpu_bfyx_opt", true},
+                             mvn_forced_kernel_test_params{cldnn::data_types::f16, cldnn::format::bfyx, "mvn_gpu_bfyx_opt", false},
+                             mvn_forced_kernel_test_params{cldnn::data_types::f16, cldnn::format::bfyx, "mvn_gpu_ref", true},
+                             mvn_forced_kernel_test_params{cldnn::data_types::f16, cldnn::format::bfyx, "mvn_gpu_ref", false},
+                             mvn_forced_kernel_test_params{cldnn::data_types::f16, cldnn::format::b_fs_yx_fsv16, "mvn_gpu_b_fs_yx_fsv16", false},
+                             mvn_forced_kernel_test_params{cldnn::data_types::f16, cldnn::format::bs_fs_yx_bsv32_fsv16, "mvn_gpu_b_fs_yx_bsv32", false},
+                             mvn_forced_kernel_test_params{data_types::bf16, format::bfyx, "mvn_gpu_bfyx_opt", true},
+                             mvn_forced_kernel_test_params{data_types::bf16, format::bfyx, "mvn_gpu_ref", true}),
+                         mvn_forced_kernel_test_name);
+
+TEST(mvn_gpu_test, mvn_bf16_bfyx_opt_layernorm_fusion) {
+    using namespace cldnn;
+    using namespace ::tests;
+
+    auto& engine = get_test_engine();
+    auto input_size = tensor{batch(3), feature(1024), spatial(1, 1152)};
+    auto input = engine.allocate_memory({data_types::bf16, format::bfyx, input_size});
+    tests::set_random_values<ov::bfloat16>(input, true, 7, 100);
+
+    // Scale (gamma) and shift (beta) for layer norm — shape [1,1024,1,1].
+    // set_random_values(mem, sign, significand_bits, scale): value = scale * 2^-bits * k;
+    // unsigned 8-bit mantissa gives [0, 4) and [0, 3) respectively.
+    auto scale = engine.allocate_memory({data_types::bf16, format::bfyx, tensor{batch(1), feature(1024), spatial(1, 1)}});
+    tests::set_random_values<ov::bfloat16>(scale, false, 7, 4);
+    auto shift = engine.allocate_memory({data_types::bf16, format::bfyx, tensor{batch(1), feature(1024), spatial(1, 1)}});
+    tests::set_random_values<ov::bfloat16>(shift, false, 7, 3);
+
+    // Topology: MVN with Multiply + Add (graph optimizer fuses them automatically)
+    topology topo;
+    topo.add(input_layout("input", input->get_layout()));
+    topo.add(data("scale_data", scale));
+    topo.add(data("shift_data", shift));
+    topo.add(mvn("mvn_opt", input_info("input"), true, 1e-10f, true, {1, 2, 3}));
+    topo.add(eltwise("scale", {input_info("mvn_opt"), input_info("scale_data")}, eltwise_mode::prod, data_types::bf16));
+    topo.add(eltwise("shift", {input_info("scale"), input_info("shift_data")}, eltwise_mode::sum, data_types::bf16));
+    // Terminal output after shift: shift must not be a network output, otherwise the
+    // fusing pass skips output eltwise nodes and the full scale+shift fused JIT
+    // path would not be exercised.
+    topo.add(reorder("shift_out", input_info("shift"), {data_types::bf16, format::bfyx, input_size},
+                     std::vector<float>{}, reorder_mean_mode::none));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::force_implementations(
+        ov::intel_gpu::ImplForcingMap{{"mvn_opt", {format::bfyx, "mvn_gpu_bfyx_opt"}}}));
+    config.set_property(ov::intel_gpu::custom_outputs(std::vector<std::string>{"mvn_opt", "shift_out"}));
+
+    network net(engine, topo, config);
+    net.set_input_data("input", input);
+    auto outputs = net.execute();
+
+    // Both eltwise ops must be fused into the mvn JIT (see comment above).
+    auto executed_primitives = net.get_executed_primitives();
+    ASSERT_TRUE(executed_primitives.count("scale") == 0) << "scale should be fused into mvn";
+    ASSERT_TRUE(executed_primitives.count("shift") == 0) << "shift should be fused into mvn";
+
+    auto out_gpu = outputs.at("shift_out").get_memory();
+
+    mvn_check_cpu_reference<ov::bfloat16>(input, out_gpu, {1, 2, 3}, true, 1e-10f, true, scale, shift);
+}
+
+TEST(mvn_gpu_test, mvn_bf16_fsv32_fsv16_layernorm_fusion) {
+    using namespace cldnn;
+    using namespace ::tests;
+
+    auto& engine = get_test_engine();
+    auto input_size = tensor{batch(3), feature(1024), spatial(1, 1152)};
+    // fsv32 input layout forces the fsv16 kernel onto the cross-layout per-spatial branch
+    auto input = engine.allocate_memory({data_types::bf16, format::b_fs_yx_fsv32, input_size});
+    tests::set_random_values<ov::bfloat16>(input, true, 7, 100);
+
+    auto scale = engine.allocate_memory({data_types::bf16, format::b_fs_yx_fsv32, tensor{batch(1), feature(1024), spatial(1, 1)}});
+    tests::set_random_values<ov::bfloat16>(scale, false, 7, 4);
+    auto shift = engine.allocate_memory({data_types::bf16, format::b_fs_yx_fsv32, tensor{batch(1), feature(1024), spatial(1, 1)}});
+    tests::set_random_values<ov::bfloat16>(shift, false, 7, 3);
+
+    // Within-channels MVN (the fsv16 kernel only supports within channels)
+    topology topo;
+    topo.add(input_layout("input", input->get_layout()));
+    topo.add(data("scale_data", scale));
+    topo.add(data("shift_data", shift));
+    topo.add(mvn("mvn_opt", input_info("input"), true, 1e-10f, true, {2, 3}));
+    topo.add(eltwise("scale", {input_info("mvn_opt"), input_info("scale_data")}, eltwise_mode::prod, data_types::bf16));
+    topo.add(eltwise("shift", {input_info("scale"), input_info("shift_data")}, eltwise_mode::sum, data_types::bf16));
+    // Terminal output after shift so that shift itself is not a network output
+    // (the fusing pass skips output eltwise nodes) and both ops are fused into the mvn JIT.
+    topo.add(reorder("shift_out", input_info("shift"), {data_types::bf16, format::bfyx, input_size},
+                     std::vector<float>{}, reorder_mean_mode::none));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::force_implementations(
+        ov::intel_gpu::ImplForcingMap{{"mvn_opt", {format::b_fs_yx_fsv32, "mvn_gpu_b_fs_yx_fsv16"}}}));
+    config.set_property(ov::intel_gpu::custom_outputs(std::vector<std::string>{"mvn_opt", "shift_out"}));
+
+    network net(engine, topo, config);
+    net.set_input_data("input", input);
+    auto outputs = net.execute();
+
+    auto executed_primitives = net.get_executed_primitives();
+    ASSERT_TRUE(executed_primitives.count("scale") == 0) << "scale should be fused into mvn";
+    ASSERT_TRUE(executed_primitives.count("shift") == 0) << "shift should be fused into mvn";
+
+    auto out_gpu = outputs.at("shift_out").get_memory();
+    mvn_check_cpu_reference<ov::bfloat16>(input, out_gpu, {2, 3}, true, 1e-10f, true, scale, shift);
+}
+
+TEST(mvn_gpu_test, mvn_bf16_bsv32_fsv16_layernorm_fusion) {
+    using namespace cldnn;
+    using namespace ::tests;
+
+    auto& engine = get_test_engine();
+    auto input_size = tensor{batch(32), feature(64), spatial(17, 13)};
+    auto input = engine.allocate_memory({data_types::bf16, format::bs_fs_yx_bsv32_fsv16, input_size});
+    tests::set_random_values<ov::bfloat16>(input, true, 7, 100);
+
+    auto scale = engine.allocate_memory({data_types::bf16, format::bs_fs_yx_bsv32_fsv16,
+                                        tensor{batch(1), feature(64), spatial(1, 1)}});
+    tests::set_random_values<ov::bfloat16>(scale, false, 7, 4);
+    auto shift = engine.allocate_memory({data_types::bf16, format::bs_fs_yx_bsv32_fsv16,
+                                        tensor{batch(1), feature(64), spatial(1, 1)}});
+    tests::set_random_values<ov::bfloat16>(shift, false, 7, 3);
+
+    topology topo;
+    topo.add(input_layout("input", input->get_layout()));
+    topo.add(data("scale_data", scale));
+    topo.add(data("shift_data", shift));
+    topo.add(mvn("mvn_opt", input_info("input"), true, 1e-10f, true, {2, 3}));
+    topo.add(eltwise("scale", {input_info("mvn_opt"), input_info("scale_data")}, eltwise_mode::prod, data_types::bf16));
+    topo.add(eltwise("shift", {input_info("scale"), input_info("shift_data")}, eltwise_mode::sum, data_types::bf16));
+    topo.add(reorder("shift_out", input_info("shift"), {data_types::bf16, format::bfyx, input_size},
+                     std::vector<float>{}, reorder_mean_mode::none));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::force_implementations(
+        ov::intel_gpu::ImplForcingMap{{"mvn_opt", {format::bs_fs_yx_bsv32_fsv16, "mvn_gpu_b_fs_yx_bsv32"}}}));
+    config.set_property(ov::intel_gpu::custom_outputs(std::vector<std::string>{"mvn_opt", "shift_out"}));
+
+    network net(engine, topo, config);
+    net.set_input_data("input", input);
+    auto outputs = net.execute();
+
+    auto executed_primitives = net.get_executed_primitives();
+    ASSERT_TRUE(executed_primitives.count("scale") == 0) << "scale should be fused into mvn";
+    ASSERT_TRUE(executed_primitives.count("shift") == 0) << "shift should be fused into mvn";
+
+    auto out_gpu = outputs.at("shift_out").get_memory();
+    mvn_check_cpu_reference<ov::bfloat16>(input, out_gpu, {2, 3}, true, 1e-10f, true, scale, shift);
 }
 
 TEST(mvn_gpu_test, mvn_test_within_channels_outside_sqrt_bfyx) {
@@ -638,6 +1070,12 @@ struct mvn_random_test : ::testing::TestWithParam<mvn_basic_test_params> {
             } else {
                 mvn_compute_mean_within_channels<ov::float16>(output, normalize_variance);
             }
+        } else if (output->get_layout().data_type == data_types::bf16) {
+            if (across_channels) {
+                mvn_compute_mean_across_channels<ov::bfloat16>(output, normalize_variance);
+            } else {
+                mvn_compute_mean_within_channels<ov::bfloat16>(output, normalize_variance);
+            }
         }
     }
 
@@ -653,6 +1091,9 @@ struct mvn_random_test : ::testing::TestWithParam<mvn_basic_test_params> {
                 break;
             case data_types::f16:
                 fill_random_data<ov::float16>(input, -127, 127);
+                break;
+            case data_types::bf16:
+                fill_random_data<ov::bfloat16>(input, -127, 127);
                 break;
             case data_types::i8:
                 fill_random_data<int8_t>(input, -127, 127);
@@ -799,14 +1240,6 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
         fill_data(mem, input_data);
     }
 
-    size_t get_x_pitch(layout& layout) {
-        auto tensor_x0 = tensor(batch(0), feature(0), spatial(0, 0, 0, 0));
-        auto tensor_x1 = tensor(batch(0), feature(0), spatial(1, 0, 0, 0));
-        auto x0 = layout.get_linear_offset(tensor_x0);
-        auto x1 = layout.get_linear_offset(tensor_x1);
-        return (x1 - x0);
-    }
-
     template <typename T>
     void compare_outputs(const cldnn::memory::ptr out_ref, const cldnn::memory::ptr out_opt) {
         auto output_lay = out_ref->get_layout();
@@ -816,22 +1249,38 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
         size_t f = output_lay.feature();
         size_t x = output_lay.spatial(0);
         size_t y = output_lay.spatial(1);
+        size_t z = output_lay.spatial(2);
         cldnn::mem_lock<T> ref_ptr(out_ref, get_test_stream());
         cldnn::mem_lock<T> opt_ptr(out_opt, get_test_stream());
 
-        auto ref_x_pitch = get_x_pitch(output_lay);
-        auto opt_x_pitch = get_x_pitch(opt_output_lay);
+        float tolerance = (output_lay.data_type == data_types::f16) ? 5.e-2f :
+                          (output_lay.data_type == data_types::bf16) ? 1.e-2f : 1.e-2f;
 
+        size_t err_count = 0;
         for (size_t bi = 0; bi < b; ++bi) {
             for (size_t fi = 0; fi < f; ++fi) {
-                for (size_t yi = 0; yi < y; ++yi) {
-                    auto ref_out_coords = tensor(batch(bi), feature(fi), spatial(0, yi, 0, 0));
-                    auto ref_out_offset = output_lay.get_linear_offset(ref_out_coords);
-                    auto opt_out_offset = opt_output_lay.get_linear_offset(ref_out_coords);
-                    for (size_t xi = 0; xi < x; ++xi) {
-                        auto ref_out_val = ref_ptr[ref_out_offset + xi * ref_x_pitch];
-                        auto opt_out_val = opt_ptr[opt_out_offset + xi * opt_x_pitch];
-                        ASSERT_NEAR(static_cast<float>(opt_out_val), static_cast<float>(ref_out_val), 1.e-1f);
+                for (size_t zi = 0; zi < z; ++zi) {
+                    for (size_t yi = 0; yi < y; ++yi) {
+                        for (size_t xi = 0; xi < x; ++xi) {
+                            auto coords = tensor(batch(bi), feature(fi), spatial(xi, yi, zi, 0));
+                            auto ref_out_offset = output_lay.get_linear_offset(coords);
+                            auto opt_out_offset = opt_output_lay.get_linear_offset(coords);
+                            auto ref_out_val = ref_ptr[ref_out_offset];
+                            auto opt_out_val = opt_ptr[opt_out_offset];
+                            float diff = std::abs(static_cast<float>(opt_out_val) - static_cast<float>(ref_out_val));
+                            if (diff > tolerance && err_count < 5) {
+                                std::cerr << "MISMATCH at b=" << bi << " f=" << fi << " z=" << zi
+                                          << " y=" << yi << " x=" << xi
+                                          << " ref=" << static_cast<float>(ref_out_val)
+                                          << " opt=" << static_cast<float>(opt_out_val)
+                                          << " diff=" << diff
+                                          << " ref_off=" << ref_out_offset
+                                          << " opt_off=" << opt_out_offset
+                                          << std::endl;
+                                err_count++;
+                            }
+                            ASSERT_NEAR(static_cast<float>(opt_out_val), static_cast<float>(ref_out_val), tolerance);
+                        }
                     }
                 }
             }
@@ -842,13 +1291,18 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
         auto& size = params.input_size;
         auto& output_pad = params.output_pad;
         auto& engine = get_test_engine();
-        auto input = engine.allocate_memory({params.input_type, format::bfyx, params.input_size});
+        bool is_5d = size.spatial[2] > 1;
+        auto ref_fmt = is_5d ? format::bfzyx : format::bfyx;
+        auto input = engine.allocate_memory({params.input_type, ref_fmt, params.input_size});
         switch (params.input_type) {
             case data_types::f32:
                 fill_random_data<float>(input, -127, 127);
                 break;
             case data_types::f16:
-                fill_random_data<ov::float16>(input, -127, 127, 1);
+                fill_random_data<ov::float16>(input, -10, 10, 1);
+                break;
+            case data_types::bf16:
+                fill_random_data<ov::bfloat16>(input, -10, 10, 1);
                 break;
             case data_types::i8:
                 fill_random_data<int8_t>(input, -127, 127, 1);
@@ -860,7 +1314,9 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
                 break;
         }
 
-        auto axes = params.across_channels ? std::vector<int64_t>{1, 2, 3} : std::vector<int64_t>{2, 3};
+        auto axes = params.across_channels
+            ? (is_5d ? std::vector<int64_t>{1, 2, 3, 4} : std::vector<int64_t>{1, 2, 3})
+            : (is_5d ? std::vector<int64_t>{2, 3, 4} : std::vector<int64_t>{2, 3});
         topology topo;
         topo.add(input_layout("input", input->get_layout()));
         auto prim = mvn("mvn", input_info("input"), params.normalize_variance, 1e-10f, false, axes);
@@ -868,7 +1324,7 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
         topo.add(prim);
         ExecutionConfig config = get_test_default_config(engine);
         config.set_property(ov::intel_gpu::custom_outputs(std::vector<std::string>{"mvn"}));
-        config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"mvn", {format::type::bfyx, "mvn_gpu_bfyx_opt"}} }));
+        config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"mvn", {ref_fmt, "mvn_gpu_bfyx_opt"}} }));
 
         cldnn::network::ptr net = get_network(engine, topo, config, get_test_stream_ptr(), is_caching_test);
 
@@ -885,7 +1341,13 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
         topo_opt.add(prim_opt);
         ExecutionConfig config_opt = get_test_default_config(engine);
         config_opt.set_property(ov::intel_gpu::custom_outputs(std::vector<std::string>{"mvn_opt", "input_to_target_layout"}));
-        config_opt.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"mvn_opt", {params.input_format, "mvn_gpu_b_fs_yx_fsv16_imad"}} }));
+          const auto opt_kernel = (params.input_format == format::bs_fs_yx_bsv32_fsv16 ||
+                                 params.input_format == format::bs_fs_yx_bsv32_fsv32)
+                                    ? "mvn_gpu_b_fs_yx_bsv32"
+                                    : params.input_format == format::bs_fs_zyx_bsv16_fsv16
+                                        ? "mvn_gpu_ref"
+                                        : "mvn_gpu_b_fs_yx_fsv16";
+        config_opt.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"mvn_opt", {params.input_format, opt_kernel}} }));
 
         cldnn::network::ptr net_opt = get_network(engine, topo_opt, config_opt, get_test_stream_ptr(), is_caching_test);
 
@@ -894,6 +1356,10 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
         auto outputs_opt = net_opt->execute();
         auto output_opt = outputs_opt.at("mvn_opt").get_memory();
 
+        ASSERT_EQ(output_opt->get_layout().format, params.input_format)
+            << "mvn_opt output was reordered away from the requested format "
+            << fmt_to_str(params.input_format);
+
         auto output_dtype = output->get_layout().data_type;
         auto output_opt_dtype = output_opt->get_layout().data_type;
         if (output_dtype == output_opt_dtype) {
@@ -901,6 +1367,8 @@ struct mvn_random_test_bsv32 : ::testing::TestWithParam<mvn_basic_test_params> {
                 compare_outputs<float>(output, output_opt);
             } else if (output_dtype == data_types::f16) {
                 compare_outputs<ov::float16>(output, output_opt);
+            } else if (output_dtype == data_types::bf16) {
+                compare_outputs<ov::bfloat16>(output, output_opt);
             } else if (output_dtype == data_types::i8) {
                 compare_outputs<int8_t>(output, output_opt);
             } else if (output_dtype == data_types::u8) {
@@ -931,6 +1399,35 @@ struct mvn_test_case_generator_bsv32 : std::vector<mvn_basic_test_params> {
         push_back(mvn_basic_test_params{fmt, in_dt, {32, 32, 10, 10}, false, false, false, padding()});
         return *this;
     }
+
+    mvn_test_case_generator_bsv32& fsv_tests(format::type fmt, data_types in_dt) {
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 17, 13}, false, false, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 17, 13}, true, false, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 17, 13}, false, true, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 17, 13}, true, true, false, padding()});
+        return *this;
+    }
+
+    mvn_test_case_generator_bsv32& fsv_large_spatial_tests(format::type fmt, data_types in_dt) {
+        push_back(mvn_basic_test_params{fmt, in_dt, {1, 16, 257, 256}, true, false, false, padding()});
+        return *this;
+    }
+
+    mvn_test_case_generator_bsv32& fsv_zyx_tests(format::type fmt, data_types in_dt) {
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 5, 13, 7}, false, false, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 5, 13, 7}, true, false, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 5, 13, 7}, false, true, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {2, 32, 5, 13, 7}, true, true, false, padding()});
+        return *this;
+    }
+
+    mvn_test_case_generator_bsv32& bsv16_zyx_tests(format::type fmt, data_types in_dt) {
+        push_back(mvn_basic_test_params{fmt, in_dt, {16, 16, 3, 13, 7}, false, false, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {16, 16, 3, 13, 7}, true, false, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {16, 16, 3, 13, 7}, false, true, false, padding()});
+        push_back(mvn_basic_test_params{fmt, in_dt, {16, 16, 3, 13, 7}, true, true, false, padding()});
+        return *this;
+    }
 };
 
 INSTANTIATE_TEST_SUITE_P(mvn_bsv32_fsv32,
@@ -944,10 +1441,96 @@ INSTANTIATE_TEST_SUITE_P(mvn_bsv32_fsv16,
                         testing::ValuesIn(mvn_test_case_generator_bsv32()
                                               .bsv32_tests(format::bs_fs_yx_bsv32_fsv16, data_types::f16)));
 
+// BF16 bsv32 (validates mvn_gpu_b_fs_yx_bsv32 bf16 decode/accumulate/final paths)
+INSTANTIATE_TEST_SUITE_P(mvn_bsv32_fsv16_bf16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .bsv32_tests(format::bs_fs_yx_bsv32_fsv16, data_types::bf16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_bsv32_fsv32_bf16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .bsv32_tests(format::bs_fs_yx_bsv32_fsv32, data_types::bf16)));
+
+// BF16 5D bsv16: validates OCL implementation registration for bs_fs_zyx_bsv16_fsv16.
+INSTANTIATE_TEST_SUITE_P(mvn_bsv16_zyx_bf16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .bsv16_zyx_tests(format::bs_fs_zyx_bsv16_fsv16, data_types::bf16)));
+
 INSTANTIATE_TEST_SUITE_P(mvn_fsv16,
                         mvn_random_test_bsv32,
                         testing::ValuesIn(mvn_test_case_generator_bsv32()
                                               .bsv32_tests(format::b_fs_yx_fsv16, data_types::i8)));
+
+// 4D fsv16 with float types (new: covers F16/F32 + mvn_gpu_b_fs_yx_fsv16 kernel path)
+INSTANTIATE_TEST_SUITE_P(mvn_fsv16_f16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv16, data_types::f16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv16_f16_large_spatial,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_large_spatial_tests(format::b_fs_yx_fsv16, data_types::f16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv16_f32,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv16, data_types::f32)));
+
+// 4D fsv32 (new: covers INPUT_SLICE_PITCH=32 kernel path)
+INSTANTIATE_TEST_SUITE_P(mvn_fsv32_f16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv32, data_types::f16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv32_f32,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv32, data_types::f32)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv32_i8,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv32, data_types::i8)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv16_bf16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv16, data_types::bf16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv16_bf16_large_spatial,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_large_spatial_tests(format::b_fs_yx_fsv16, data_types::bf16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_fsv32_bf16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_tests(format::b_fs_yx_fsv32, data_types::bf16)));
+
+// 5D zyx fsv16 (new: covers b_fs_zyx_fsv16 kernel path with float types)
+INSTANTIATE_TEST_SUITE_P(mvn_zyx_fsv16_f16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_zyx_tests(format::b_fs_zyx_fsv16, data_types::f16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_zyx_fsv16_f32,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_zyx_tests(format::b_fs_zyx_fsv16, data_types::f32)));
+
+// 5D zyx fsv32 (new: covers b_fs_zyx_fsv32 + INPUT_SLICE_PITCH=32 kernel path)
+INSTANTIATE_TEST_SUITE_P(mvn_zyx_fsv32_f16,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_zyx_tests(format::b_fs_zyx_fsv32, data_types::f16)));
+
+INSTANTIATE_TEST_SUITE_P(mvn_zyx_fsv32_f32,
+                        mvn_random_test_bsv32,
+                        testing::ValuesIn(mvn_test_case_generator_bsv32()
+                                              .fsv_zyx_tests(format::b_fs_zyx_fsv32, data_types::f32)));
 
 TEST(mvn_gpu_test, mvn_test_across_channels_outside_sqrt_bfyx_cached) {
     test_mvn_test_across_channels_outside_sqrt_bfyx<float>(true);
@@ -973,4 +1556,153 @@ TEST_P(mvn_random_test, random_cached) {
 TEST_P(mvn_random_test_bsv32, random_cached) {
     this->execute(GetParam(), true);
 }
+
+TEST(mvn_bfyx_opt_fused_ops, basic_fused) {
+    tests::random_generator rg(GET_SUITE_NAME);
+    auto& engine = get_test_engine();
+
+    auto input_dyn_layout = layout{ov::PartialShape{-1,-1,2048}, data_types::f16, format::bfyx};
+    auto input0_layout = layout{ov::PartialShape{2,990,2048}, data_types::f16, format::bfyx};
+    auto input1_layout = layout{ov::PartialShape{2,1,2048}, data_types::f16, format::bfyx};
+
+    topology topo;
+    topo.add(input_layout("input0", input_dyn_layout));
+    topo.add(input_layout("input1", input_dyn_layout));
+    topo.add(input_layout("input2", input_dyn_layout));
+    topo.add(mvn("mvn", input_info("input0"), true, 1e-10f, true, {2}));
+    topo.add(eltwise("mul", { input_info("mvn"), input_info("input1") }, eltwise_mode::prod, data_types::f16));
+    topo.add(eltwise("add", { input_info("mul"), input_info("input2") }, eltwise_mode::sum, data_types::f16));
+    topo.add(reorder("reorder", input_info("add"), format::bfyx, data_types::f16));
+
+    auto input0 = engine.allocate_memory(input0_layout);
+    auto input1 = engine.allocate_memory(input1_layout);
+    auto input2 = engine.allocate_memory(input1_layout);
+
+    std::vector<ov::float16> input0_data = rg.generate_random_1d<ov::float16>(input0->get_layout().count(), -1, 1, 128);
+    std::vector<ov::float16> input1_data = rg.generate_random_1d<ov::float16>(input1->get_layout().count(), -1, 1, 128);
+    std::vector<ov::float16> input2_data = rg.generate_random_1d<ov::float16>(input2->get_layout().count(), -1, 1, 128);
+    set_values(input0, input0_data);
+    set_values(input1, input1_data);
+    set_values(input2, input2_data);
+
+    ExecutionConfig config_fused = get_test_default_config(engine);
+    config_fused.set_property(ov::intel_gpu::optimize_data(true));
+    config_fused.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config_fused.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"mvn", {format::type::bfyx, "mvn_gpu_bfyx_opt"}} }));
+
+    network network_fused(engine, topo, config_fused);
+    network_fused.set_input_data("input0", input0);
+    network_fused.set_input_data("input1", input1);
+    network_fused.set_input_data("input2", input2);
+
+    auto outputs_fused = network_fused.execute();
+    ASSERT_EQ(outputs_fused.size(), size_t(1));
+    ASSERT_EQ(outputs_fused.begin()->first, "reorder");
+    auto output_fused = outputs_fused.begin()->second.get_memory();
+
+    ExecutionConfig config_unfused = get_test_default_config(engine);
+    config_unfused.set_property(ov::intel_gpu::optimize_data(false));
+    config_unfused.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+
+    network network_unfused(engine, topo, config_unfused);
+    network_unfused.set_input_data("input0", input0);
+    network_unfused.set_input_data("input1", input1);
+    network_unfused.set_input_data("input2", input2);
+
+    auto outputs_unfused = network_unfused.execute();
+    ASSERT_EQ(outputs_unfused.size(), size_t(1));
+    ASSERT_EQ(outputs_unfused.begin()->first, "reorder");
+    auto output_unfused = outputs_unfused.begin()->second.get_memory();
+
+    ASSERT_NE(network_fused.get_executed_primitive_ids().size(), network_unfused.get_executed_primitive_ids().size());
+    ASSERT_EQ(output_fused->get_layout(), output_unfused->get_layout());
+
+    cldnn::mem_lock<ov::float16, mem_lock_type::read> buff_fused(output_fused, get_test_stream());
+    cldnn::mem_lock<ov::float16, mem_lock_type::read> buff_unfused(output_unfused, get_test_stream());
+    float tolerance = 0.002f;
+    for (size_t i = 0; i < output_fused->get_layout().count(); ++i) {
+        ASSERT_NEAR(buff_fused[i], buff_unfused[i], tolerance) << " at index: " << i
+            << " fused: " << static_cast<float>(buff_fused[i])
+            << " unfused: " << static_cast<float>(buff_unfused[i]);
+    }
+}
+
 #endif
+
+// In-place crop feeding an MVN that requires alignment must materialize a contiguous
+// buffer: MVN canonicalizes the shape and reads with contiguous pitches, so a strided
+// sub-view from in-place crop would be read incorrectly (only row 0 was correct).
+TEST(mvn_gpu_test, crop_then_mvn_last_axis_contiguous_input) {
+    auto& engine = get_test_engine();
+
+    // [3,4,5,64] -> crop -> [1,2,2,32] -> MVN(axis=-1). tensor ctor: (b, f, x, y).
+    const tensor src_size{3, 4, /*x=*/64, /*y=*/5};
+    const tensor crop_size{1, 2, /*x=*/32, /*y=*/2};
+    const tensor crop_offset{0, 0, 0, 0};
+
+    auto input = engine.allocate_memory({data_types::f32, format::bfyx, src_size});
+
+    tests::random_generator rg(GET_SUITE_NAME);
+    auto input_vec = rg.generate_random_1d<float>(input->count(), -1.f, 1.f);
+    set_values(input, input_vec);
+
+    topology topo;
+    topo.add(input_layout("input", input->get_layout()));
+    topo.add(crop("crop", input_info("input"), crop_size, crop_offset));
+    topo.add(mvn("mvn", input_info("crop"), /*normalize_variance=*/true,
+                 /*epsilon=*/0.f, /*eps_inside_sqrt=*/false,
+                 /*reduction_axes=*/std::vector<int64_t>{3}));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::optimize_data(true));
+
+    network network(engine, topo, config);
+    network.set_input_data("input", input);
+
+    auto outputs = network.execute();
+    ASSERT_EQ(outputs.size(), size_t(1));
+    auto output = outputs.at("mvn").get_memory();
+
+    const int64_t B = crop_size.batch[0];
+    const int64_t F = crop_size.feature[0];
+    const int64_t Y = crop_size.spatial[1];
+    const int64_t X = crop_size.spatial[0];
+    std::vector<float> reference(B * F * Y * X);
+
+    const int64_t SF = src_size.feature[0];
+    const int64_t SY = src_size.spatial[1];
+    const int64_t SX = src_size.spatial[0];
+
+    for (int64_t b = 0; b < B; ++b) {
+        for (int64_t f = 0; f < F; ++f) {
+            for (int64_t y = 0; y < Y; ++y) {
+                float mean = 0.f;
+                for (int64_t x = 0; x < X; ++x) {
+                    int64_t src_idx = ((b * SF + f) * SY + y) * SX + x;
+                    mean += input_vec[src_idx];
+                }
+                mean /= static_cast<float>(X);
+                float var = 0.f;
+                for (int64_t x = 0; x < X; ++x) {
+                    int64_t src_idx = ((b * SF + f) * SY + y) * SX + x;
+                    float v = input_vec[src_idx] - mean;
+                    var += v * v;
+                }
+                var /= static_cast<float>(X);
+                float inv_std = 1.f / std::sqrt(var);
+                for (int64_t x = 0; x < X; ++x) {
+                    int64_t src_idx = ((b * SF + f) * SY + y) * SX + x;
+                    int64_t dst_idx = ((b * F + f) * Y + y) * X + x;
+                    reference[dst_idx] = (input_vec[src_idx] - mean) * inv_std;
+                }
+            }
+        }
+    }
+
+    cldnn::mem_lock<float, mem_lock_type::read> out_ptr(output, get_test_stream());
+    ASSERT_EQ(out_ptr.size(), reference.size());
+    const float tolerance = 1e-4f;
+    for (size_t i = 0; i < reference.size(); ++i) {
+        ASSERT_NEAR(out_ptr[i], reference[i], tolerance) << " mismatch at index " << i;
+    }
+}

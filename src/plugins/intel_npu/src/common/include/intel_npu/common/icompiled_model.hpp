@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,8 +18,6 @@ public:
     using ov::ICompiledModel::ICompiledModel;
 
     virtual const std::shared_ptr<IGraph>& get_graph() const = 0;
-
-    virtual const Config& get_config() const = 0;
 
 protected:
     std::shared_ptr<const ICompiledModel> shared_from_this() const {

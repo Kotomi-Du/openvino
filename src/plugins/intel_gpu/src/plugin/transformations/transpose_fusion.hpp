@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -30,6 +30,18 @@ class TransposeSDPAMatcher : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("TransposeSDPAMatcher");
     TransposeSDPAMatcher();
+};
+
+class TransposeVLSDPAMatcher : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("TransposeVLSDPAMatcher");
+    TransposeVLSDPAMatcher();
+};
+
+class TransposeSplitMatcher : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("TransposeSplitMatcher");
+    TransposeSplitMatcher();
 };
 
 }   // namespace ov::intel_gpu

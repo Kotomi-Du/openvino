@@ -2,6 +2,22 @@
 ## Introduction
 Selective build or conditional compilation can significantly reduce OpenVINO™ binaries size by excluding unnecessary components for particular model's inference.
 
+## In-code conditional compilation
+Two families of macros let CPU plugin code participate in conditional compilation. They are the in-code counterpart of the build workflow described below: the COLLECT build records which branches are actually exercised, and the selective build then drops the rest.
+
+**`OV_SWITCH` / `OV_CASE`** — runtime element-type dispatch that the build system can prune. Defined in the shared conditional-compilation component, [`openvino/cc/selective_build.h`](../../../common/conditional_compilation/include/openvino/cc/selective_build.h). Inside the CPU plugin they are pulled in via [`selective_build.h`](../src/selective_build.h). Use them for per-precision dispatch instead of a manual `if/else`/`switch` on the element type — a manual chain compiles in every type unconditionally and defeats selective build.
+
+```cpp
+OV_SWITCH(intel_cpu, OpNameExecute, ctx, precision,
+          OV_CASE(ov::element::f32, float),
+          OV_CASE(ov::element::bf16, ov::bfloat16),
+          OV_CASE(ov::element::i32, int32_t))
+```
+
+**`OV_CPU_INSTANCE_*`** — architecture/backend guards for executor implementation lists, defined in [`src/utils/arch_macros.h`](../src/utils/arch_macros.h): `OV_CPU_INSTANCE_COMMON`, `OV_CPU_INSTANCE_X64`, `OV_CPU_INSTANCE_ARM64`, `OV_CPU_INSTANCE_ACL`, `OV_CPU_INSTANCE_ACL32`, `OV_CPU_INSTANCE_ACL64`, `OV_CPU_INSTANCE_DNNL`, `OV_CPU_INSTANCE_DNNL_X64`, `OV_CPU_INSTANCE_DNNL_ARM64`, `OV_CPU_INSTANCE_MLAS_X64`, `OV_CPU_INSTANCE_MLAS_ARM64`, `OV_CPU_INSTANCE_RISCV64`, `OV_CPU_INSTANCE_KLEIDIAI`. Each wraps an `ExecutorImplementation` so code for unavailable platforms is compiled away — see [executors/README.md](../src/nodes/executors/README.md#getimplementations-and-the-ov_cpu_instance-macros) for the full macro-to-condition table and how they're used in `getImplementations()`.
+
+For the OpenVINO-wide conditional-compilation guide see [docs/dev/conditional_compilation.md](../../../../docs/dev/conditional_compilation.md).
+
 ## Workflow
 
 Onednn path in OpenVINO:
@@ -16,7 +32,7 @@ The selective build carries on under the instruction of:
 
 The first build collects the information and generate a CSV file indicating which components are going to be included and which are going to be excluded in the selected build.
 
-*   For the first build, config cmake with option "-DENABLE_PROFILING_ITT=ON -DSELECTIVE_BUILD=COLLECT"
+*   For the first build, config cmake with option "-DENABLE_PROFILING_ITT=FULL -DSELECTIVE_BUILD=COLLECT"
 ```
 cd ./build
 
@@ -24,7 +40,7 @@ cmake .. \
 -DCMAKE_BUILD_TYPE=Release \
 -DCMAKE_BUILD_TYPE=Release \
 -DENABLE_CPU_DEBUG_CAPS=ON \
--DENABLE_PROFILING_ITT=ON \
+-DENABLE_PROFILING_ITT=FULL \
 -DSELECTIVE_BUILD=COLLECT \
 -DCMAKE_INSTALL_PREFIX=`pwd`/install \
 -DCMAKE_INSTALL_RPATH=`pwd`/install/runtime/3rdparty/tbb/lib:`pwd`/install/runtime/lib/intel64

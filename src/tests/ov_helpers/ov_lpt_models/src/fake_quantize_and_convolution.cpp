@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -135,7 +135,7 @@ std::shared_ptr<ov::Model> FakeQuantizeAndConvolutionFunction::get(
 
     std::shared_ptr<Node> parentOnWeights;
     {
-        const bool isDynamicChannel = inputShape.is_dynamic() || inputShape[1].is_dynamic();
+        const bool isDynamicChannel = inputShape.rank().is_dynamic() || inputShape[1].is_dynamic();
         size_t numGroups = !isDynamicChannel ? inputShape[1].get_length() : 3ul;
         size_t inputChannelsCount = !isDynamicChannel ? inputShape[1].get_length() : 3ul;
         size_t outputChannelsCount = inputChannelsCount * 2;

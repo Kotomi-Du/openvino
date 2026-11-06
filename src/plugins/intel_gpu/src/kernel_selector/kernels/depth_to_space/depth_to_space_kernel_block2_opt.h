@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ public:
     using Parent = DepthToSpaceKernelBase;
 
     DepthToSpaceKernelBlock2Opt() : DepthToSpaceKernelBase("depth_to_space_block2_opt") {}
-    virtual ~DepthToSpaceKernelBlock2Opt() {}
+    ~DepthToSpaceKernelBlock2Opt() override = default;
 
     bool Validate(const Params&) const override;
     JitConstants GetJitConstants(const depth_to_space_params& params) const override;

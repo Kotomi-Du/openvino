@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,7 +12,7 @@ public:
     using Parent = DepthToSpaceKernelBase;
 
     DepthToSpaceKernelRef() : DepthToSpaceKernelBase("depth_to_space_ref") {}
-    virtual ~DepthToSpaceKernelRef() {}
+    ~DepthToSpaceKernelRef() override = default;
 
     CommonDispatchData SetDefault(const depth_to_space_params& params) const override;
     KernelsData GetKernelsData(const Params& params) const override;

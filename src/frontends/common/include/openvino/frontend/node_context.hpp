@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,8 +11,7 @@
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/pass.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 
 class FRONTEND_API NodeContext {
 public:
@@ -169,5 +168,4 @@ using CreatorFunction = std::function<OutputVector(const NodeContext&)>;
 using CreatorFunctionNamed = std::function<std::map<std::string, OutputVector>(const NodeContext&)>;
 using CreatorFunctionNamedAndIndexed = std::function<NamedOutputVector(const NodeContext&)>;
 
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

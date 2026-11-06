@@ -1,10 +1,10 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "mlp_kernel.hpp"
 
-#include <cpu/x64/xbyak/xbyak.h>
+#include <xbyak/xbyak.h>
 
 #include <algorithm>
 #include <cassert>
@@ -23,6 +23,7 @@
 #include "openvino/core/parallel.hpp"
 #include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/float16.hpp"
+#include "utils/general_utils.h"
 
 using namespace dnnl::impl;
 using namespace dnnl::impl::utils;
@@ -110,7 +111,7 @@ void MKernel::generate_2x2() {
 
     auto const_A_steps = 64;
 
-    align(64, false);
+    align(64, 0);
     L(loop_over_ktiles);
     {
         //                B: 1x2 tiles
@@ -259,7 +260,7 @@ void MKernel::generate_1x2() {
 
     auto const_A_steps = 64;
 
-    align(64, false);
+    align(64, 0);
     L(loop_over_ktiles);
     {
         //                B: 1x2 tiles
@@ -294,10 +295,10 @@ void MKernel::generate_1x2() {
     ret();
 }
 
-class FP16ToBF16Kernel : public dnnl::impl::cpu::x64::jit_generator {
+class FP16ToBF16Kernel : public dnnl::impl::cpu::x64::jit_generator_t {
 public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(FP16ToBF16Kernel)
-    FP16ToBF16Kernel() : jit_generator("FP16ToBF16Kernel") {
+    FP16ToBF16Kernel() : jit_generator_t("FP16ToBF16Kernel") {
         create_kernel();
     }
 
@@ -316,9 +317,8 @@ public:
     }
 };
 
-template <typename Tdst>
-static std::enable_if_t<std::is_same_v<ov::bfloat16, Tdst> || std::is_same_v<ov::float16, Tdst>>
-repackB(Tdst* dst, ov::float16* src, int N_stride, int N, int K) {
+template <typename Tdst, typename = std::enable_if_t<any_of_v<Tdst, ov::bfloat16, ov::float16>>>
+static void repackB(Tdst* dst, ov::float16* src, int N_stride, int N, int K) {
     static FP16ToBF16Kernel fp16_to_bf16;
     if (N == 16 && K == 32) {
         // SIMD optimized version
@@ -366,10 +366,10 @@ static void repackB(int8_t* dst, int8_t* src, int N_stride, int N, int K) {
         auto* psrc = src + k;
         int n = 0;
         for (; n < 16 && n < N; n++, psrc += N_stride) {
-            *dst++ = is_k0_valid ? psrc[0] : 0;
-            *dst++ = is_k1_valid ? psrc[1] : 0;
-            *dst++ = is_k2_valid ? psrc[2] : 0;
-            *dst++ = is_k3_valid ? psrc[3] : 0;
+            *dst++ = is_k0_valid ? psrc[0] : static_cast<int8_t>(0);
+            *dst++ = is_k1_valid ? psrc[1] : static_cast<int8_t>(0);
+            *dst++ = is_k2_valid ? psrc[2] : static_cast<int8_t>(0);
+            *dst++ = is_k3_valid ? psrc[3] : static_cast<int8_t>(0);
         }
         for (; n < 16; n++) {
             *dst++ = 0;
@@ -513,7 +513,7 @@ void MKernel::run(int M,  // actual M
                   int strideC,                // C [M, N]
                   const uint8_t* prefetch_B,  // prefetch B
                   bool do_accumulation) {
-    call_args args;
+    call_args args{};
 
     auto* pB = repacked_B.ptr;
     auto strideB = repacked_B.Bpair_rows * repacked_B.Bpair_size;
@@ -589,7 +589,7 @@ void GateUpCombine::generate() {
     const auto zmm_up = zmm0;
     const auto ymm_dst = ymm5;
 
-    auto injector = std::make_shared<jit_uni_eltwise_injector<dnnl::impl::cpu::x64::avx512_core>>(
+    auto injector = std::make_shared<jit_uni_eltwise_injector_t<dnnl::impl::cpu::x64::avx512_core>>(
         this,
         m_act_alg,
         1.F,
@@ -623,7 +623,7 @@ void GateUpCombine::generate() {
         } else {
             vcvtneps2bf16(ymm_dst, zmm_up);
         }
-        prefetchwt1(ptr[prefetch_dst + loop_i * 2]);
+        prefetcht1(ptr[prefetch_dst + loop_i * 2]);
         vmovdqu(ptr[dst + loop_i * 2], ymm_dst);
     }
     add(loop_i, 16);
@@ -656,7 +656,7 @@ void ReduceAdd2bh::generate() {
 
         xor_(loop_i, loop_i);
 
-        align(64, false);
+        align(64, 0);
         L(loop_begin);
         {
             vmovups(zmm0, ptr[src0 + loop_i * 4]);
@@ -668,10 +668,10 @@ void ReduceAdd2bh::generate() {
             if (m_to_f16) {
                 vcvtps2ph(ptr[dst + loop_i * 2], zmm0, 0x4);
                 vcvtps2ph(ptr[dst + loop_i * 2 + 32], zmm2, 0x4);
-                prefetchwt1(ptr[prefetch_dst + loop_i * 2]);
+                prefetcht1(ptr[prefetch_dst + loop_i * 2]);
             } else {
                 vcvtne2ps2bf16(zmm4, zmm2, zmm0);
-                prefetchwt1(ptr[prefetch_dst + loop_i * 2]);
+                prefetcht1(ptr[prefetch_dst + loop_i * 2]);
                 vmovups(ptr[dst + loop_i * 2], zmm4);
             }
         }
@@ -697,7 +697,7 @@ void ReduceAdd2bh::generate() {
 
         xor_(loop_i, loop_i);
 
-        align(64, false);
+        align(64, 0);
         L(loop_begin);
         {
             vmovups(zmm0, ptr[src0 + loop_i * 4]);
@@ -705,10 +705,10 @@ void ReduceAdd2bh::generate() {
             if (m_to_f16) {
                 vcvtps2ph(ptr[dst + loop_i * 2], zmm0, 0x4);
                 vcvtps2ph(ptr[dst + loop_i * 2 + 32], zmm2, 0x4);
-                prefetchwt1(ptr[prefetch_dst + loop_i * 2]);
+                prefetcht1(ptr[prefetch_dst + loop_i * 2]);
             } else {
                 vcvtne2ps2bf16(zmm4, zmm2, zmm0);
-                prefetchwt1(ptr[prefetch_dst + loop_i * 2]);
+                prefetcht1(ptr[prefetch_dst + loop_i * 2]);
                 vmovups(ptr[dst + loop_i * 2], zmm4);
             }
         }

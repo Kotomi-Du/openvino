@@ -1,4 +1,4 @@
-// Copyright (C) 2022-2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -19,11 +19,7 @@
 #include "openvino/op/unsqueeze.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
-namespace opset_1 {
+namespace ov::frontend::onnx::ai_onnx::opset_1 {
 
 ov::OutputVector trilu(const ov::frontend::onnx::Node& node) {
     const auto inputs = node.get_ov_inputs();
@@ -44,8 +40,15 @@ ov::OutputVector trilu(const ov::frontend::onnx::Node& node) {
         // but we extend support to be able work with 1-D with length == 1
         k = inputs[1];
         auto axes = v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
+
+        const auto k_pshape = k.get_partial_shape();
+        const auto is_singleton_vector = [](const ov::PartialShape& pshape) {
+            return pshape.rank().is_static() && pshape.rank().get_length() == 1 && pshape[0].is_static() &&
+                   pshape[0].get_length() == 1;
+        };
+
         // Check if k is a tensor with a single value
-        if (k.get_shape().size() == 1 && k.get_shape()[0] == 1) {
+        if (is_singleton_vector(k_pshape)) {
             k = std::make_shared<v0::Squeeze>(k, axes);
         }
         CHECK_VALID_NODE(node, k.get_partial_shape().compatible({}), "Trilu second input must be a scalar");
@@ -111,8 +114,4 @@ ov::OutputVector trilu(const ov::frontend::onnx::Node& node) {
 }
 
 ONNX_OP("Trilu", OPSET_SINCE(1), ai_onnx::opset_1::trilu);
-}  // namespace opset_1
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx::opset_1

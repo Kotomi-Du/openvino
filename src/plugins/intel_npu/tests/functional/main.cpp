@@ -1,15 +1,16 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include <signal.h>
-#ifdef WIN32
+#ifdef _WIN32
 #    include <process.h>
 #endif
 #include <functional_test_utils/summary/op_summary.hpp>
 #include <iostream>
 #include <sstream>
 
+#include "common/npu_test_env_cfg.hpp"
 #include "gtest/gtest.h"
 #include "intel_npu/config/config.hpp"
 #include "intel_npu/npu_private_properties.hpp"
@@ -45,7 +46,7 @@ int main(int argc, char** argv, char** envp) {
     }
     oss << std::endl;
 
-#ifdef WIN32
+#ifdef _WIN32
     oss << "Process id: " << _getpid() << std::endl;
 #else
     oss << "Process id: " << getpid() << std::endl;
@@ -59,16 +60,68 @@ int main(int argc, char** argv, char** envp) {
         oss << *env << "; ";
     }
 
+    auto& cfg = ov::test::utils::NpuTestEnvConfig::getInstance();
+    if (cfg.OV_NPU_TESTS_BLOBS_PATH.empty()) {
+        auto path = std::string_view(argv[0]);
+        const char slashDelimiter = '/';
+        const char backSlashDelimiter = '\\';
+        size_t pos = std::string::npos;
+        size_t lastSlashDelim = path.find_last_of(slashDelimiter);
+        size_t lastBackSlashDelim = path.find_last_of(backSlashDelimiter);
+        if (lastSlashDelim != std::string::npos && lastBackSlashDelim != std::string::npos) {
+            pos = std::max(lastSlashDelim, lastBackSlashDelim);
+        } else {
+            pos = path.find_last_of(backSlashDelimiter) != std::string_view::npos
+                      ? path.find_last_of(backSlashDelimiter)
+                      : path.find_last_of(slashDelimiter);
+        }
+        cfg.OV_NPU_TESTS_BLOBS_PATH = pos != std::string_view::npos ? path.substr(0, pos + 1) : "";
+        cfg.OV_NPU_TESTS_BLOBS_PATH += "intel_npu_blobs/";
+    }
+
     ::testing::InitGoogleTest(&argc, argv);
+
+    for (int i = 1; i < argc; i++) {
+        const std::string_view arg(argv[i]);
+        constexpr std::string_view prefix = "--driver_release=";
+        if (arg.find(prefix) == 0) {
+            const std::string_view value = arg.substr(prefix.length());
+            auto parsed = ov::test::utils::parseDriverType(value.data());
+            if (parsed.has_value()) {
+                cfg.driver_release = *parsed;
+                std::cout << "Driver type set to: " << ov::test::utils::driverTypeToString(cfg.driver_release)
+                          << std::endl;
+            } else {
+                std::cerr << "WARNING: Invalid --driver_release value: '" << value
+                          << "' (expected pv, release, or latest)." << std::endl;
+            }
+            break;
+        }
+    }
+
     ::testing::AddGlobalTestEnvironment(new ov::test::utils::NpuTestReportEnvironment());
 
     const bool dryRun = ::testing::GTEST_FLAG(list_tests) || ::testing::internal::g_help_flag;
 
     if (!dryRun) {
+        // Check if device available, exit if not found.
+        std::vector<std::string> availableDevices;
+        const auto core = ov::test::utils::PluginCache::get().core();
+        if (core != nullptr) {
+            availableDevices = core->get_available_devices();
+            auto it = std::find(availableDevices.begin(), availableDevices.end(), "NPU");
+            if (it == availableDevices.end()) {
+                std::cerr << "Driver not found, exiting." << std::endl;
+                return -1;
+            }
+        } else {
+            std::cerr << "Failed to get OpenVINO Core from cache!" << std::endl;
+        }
+
         const std::string noFetch{"<not fetched>"};
         std::string backend{noFetch}, arch{noFetch}, full{noFetch};
         try {
-            ov::test::utils::NpuTestTool npuTestTool(ov::test::utils::NpuTestEnvConfig::getInstance());
+            ov::test::utils::NpuTestTool npuTestTool(cfg);
             backend = npuTestTool.getDeviceMetric(ov::intel_npu::backend_name.name());
             arch = npuTestTool.getDeviceMetric(ov::device::architecture.name());
             full = npuTestTool.getDeviceMetric(ov::device::full_name.name());
@@ -79,7 +132,7 @@ int main(int argc, char** argv, char** envp) {
                   << "'; Full device name: '" << full << "'" << std::endl;
     }
 
-    std::string dTest = ::testing::internal::GTEST_FLAG(internal_run_death_test);
+    std::string dTest = ::testing::GTEST_FLAG(internal_run_death_test);
     if (dTest.empty()) {
         std::cout << oss.str() << std::endl;
     } else {
@@ -87,20 +140,10 @@ int main(int argc, char** argv, char** envp) {
     }
 
     auto& log = intel_npu::Logger::global();
-    auto level = ov::test::utils::NpuTestEnvConfig::getInstance().IE_NPU_TESTS_LOG_LEVEL;
-    ov::log::Level logLevel =
-        level.empty() ? ov::log::Level::ERR : intel_npu::OptionParser<ov::log::Level>::parse(level.c_str());
+    ov::log::Level logLevel = cfg.IE_NPU_TESTS_LOG_LEVEL.empty()
+                                  ? ov::log::Level::ERR
+                                  : intel_npu::OptionParser<ov::log::Level>::parse(cfg.IE_NPU_TESTS_LOG_LEVEL.c_str());
     log.setLevel(logLevel);
-
-    auto blobPaths = ov::test::utils::NpuTestEnvConfig::getInstance().OV_NPU_TESTS_BLOBS_PATH;
-    if (blobPaths.empty()) {
-        auto path = std::string_view(argv[0]);
-        size_t pos =
-            path.find_last_of('\\') != std::string_view::npos ? path.find_last_of('\\') : path.find_last_of('/');
-        ov::test::utils::NpuTestEnvConfig::getInstance().OV_NPU_TESTS_BLOBS_PATH =
-            pos != std::string_view::npos ? path.substr(0, pos + 1) : "";
-        ov::test::utils::NpuTestEnvConfig::getInstance().OV_NPU_TESTS_BLOBS_PATH += "intel_npu_blobs/";
-    }
 
     return RUN_ALL_TESTS();
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,6 +6,8 @@
 #include "random_generator.hpp"
 #include "openvino/reference/scatter_nd_update.hpp"
 #include "scatter_nd_update_inst.h"
+#include "shape_of_inst.h"
+#include "reshape_inst.h"
 
 #include <intel_gpu/primitives/input_layout.hpp>
 #include <intel_gpu/primitives/scatter_update.hpp>
@@ -88,7 +90,7 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
         return result;
     }
 
-    template<typename T, typename T_size>
+    template<typename T, typename T_size, typename T_indices>
     void execute_fp16(const scatter_nd_update_basic_test_params& params, bool is_caching_test)
     {
         auto& engine = get_test_engine();
@@ -114,21 +116,18 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
         indices_vec.resize(params.indices_rank);
 
         auto input_data_fp16 = rg.generate_random_1d<T>(params.input_size.count(), -127, 127);
-        auto indices_data_fp16 = generate_unique_indices<T>(params);
+        auto indices_data = generate_unique_indices<T_indices>(params);
         auto updates_data_fp16 = rg.generate_random_1d<T>(params.updates_size.count(), -127, 127);
 
         std::vector<float> input_data(params.input_size.count());
         for (size_t i = 0; i < params.input_size.count(); ++i)
             input_data[i] = static_cast<float>(input_data_fp16[i]);
-        std::vector<float> indices_data(params.indices_size.count());
-        for (size_t i = 0; i < params.indices_size.count(); ++i)
-            indices_data[i] = static_cast<float>(indices_data_fp16[i]);
         std::vector<float> updates_data(params.updates_size.count());
         for (size_t i = 0; i < params.updates_size.count(); ++i)
             updates_data[i] = static_cast<float>(updates_data_fp16[i]);
 
         set_values(input1, input_data_fp16);
-        set_values(input2, indices_data_fp16);
+        set_values(input2, indices_data);
         set_values(input3, updates_data_fp16);
 
         // execute scatter_nd_update
@@ -151,10 +150,10 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
 
         auto outputs = network->execute();
         auto output = outputs.at("out").get_memory();
-        cldnn::mem_lock<T_size> outputs_ptr(output, get_test_stream());
+        cldnn::mem_lock<T_size, mem_lock_type::read> outputs_ptr(output, get_test_stream());
 
         auto outputs_ref = std::vector<float>(params.input_size.count());
-        ov::reference::scatterNdUpdate<float, float>(input_data.data(),
+        ov::reference::scatterNdUpdate<float, T_indices>(input_data.data(),
                                                      indices_data.data(),
                                                      updates_data.data(),
                                                      outputs_ref.data(),
@@ -167,7 +166,7 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
         }
     }
 
-    template<typename T>
+    template<typename T, typename T_indices>
     void execute(const scatter_nd_update_basic_test_params& params, bool is_caching_test)
     {
         // create input, indices, updates using params
@@ -194,7 +193,7 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
         indices_vec.resize(params.indices_rank);
 
         auto input_data = rg.generate_random_1d<T>(params.input_size.count(), -127, 127);
-        auto indices_data = generate_unique_indices<T>(params);
+        auto indices_data = generate_unique_indices<T_indices>(params);
         auto updates_data = rg.generate_random_1d<T>(params.updates_size.count(), -127, 127);
 
         set_values(input1, input_data);
@@ -221,10 +220,10 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
 
         auto outputs = network->execute();
         auto output = outputs.at("out").get_memory();
-        cldnn::mem_lock<T> outputs_ptr(output, get_test_stream());
+        cldnn::mem_lock<T, mem_lock_type::read> outputs_ptr(output, get_test_stream());
 
         auto outputs_ref = std::vector<T>(params.input_size.count());
-        ov::reference::scatterNdUpdate<T, T>(input_data.data(),
+        ov::reference::scatterNdUpdate<T, T_indices>(input_data.data(),
                                              indices_data.data(),
                                              updates_data.data(),
                                              outputs_ref.data(),
@@ -240,19 +239,32 @@ struct scatter_nd_update_random_test : testing::TestWithParam<scatter_nd_update_
 
 TEST_P(scatter_nd_update_random_test, random)
 {
+    bool cache = false;
     auto param = GetParam();
-    if (param.input_type == data_types::u8)
-        this->execute<uint8_t>(param, false);
-    else if (param.input_type == data_types::i8)
-        this->execute<int8_t>(param, false);
-    else if (param.input_type == data_types::i32)
-        this->execute<int32_t>(param, false);
-    else if (param.input_type == data_types::i64)
-        this->execute<int64_t>(param, false);
-    else if (param.input_type == data_types::f16)
-        this->execute_fp16<ov::float16, uint16_t>(param, false);
-    else if (param.input_type == data_types::f32)
-        this->execute<float>(param, false);
+    if (param.input_type == data_types::u8 && param.indices_type == data_types::i32)
+        this->execute<uint8_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::u8 && param.indices_type == data_types::i64)
+        this->execute<uint8_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::i8 && param.indices_type == data_types::i32)
+        this->execute<int8_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::i8 && param.indices_type == data_types::i64)
+        this->execute<int8_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::i32 && param.indices_type == data_types::i32)
+        this->execute<int32_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::i32 && param.indices_type == data_types::i64)
+        this->execute<int32_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::i64 && param.indices_type == data_types::i32)
+        this->execute<int64_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::i64 && param.indices_type == data_types::i64)
+        this->execute<int64_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::f16 && param.indices_type == data_types::i32)
+        this->execute_fp16<ov::float16, uint16_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::f16 && param.indices_type == data_types::i64)
+        this->execute_fp16<ov::float16, uint16_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::f32 && param.indices_type == data_types::i32)
+        this->execute<float, int32_t>(param, cache);
+    else if (param.input_type == data_types::f32 && param.indices_type == data_types::i64)
+        this->execute<float, int64_t>(param, cache);
     else
         OPENVINO_THROW("unidentified data type");
 }
@@ -261,7 +273,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_bsv32_fsv16_4d_r
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16,
                                { 6, 1, 1, 1 }, { 3, 1, 1, 1 }, { 3, 1, 1, 1 },
@@ -272,7 +284,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_bsv32_fsv16_4d_r
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16,
                                { 48, 24, 3, 3 }, { 3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -283,7 +295,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_fsv16_4d_rank_1,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::b_fs_yx_fsv16, format::b_fs_yx_fsv16, format::b_fs_yx_fsv16,
                                { 6, 1, 1, 1 }, { 3, 1, 1, 1 }, { 3, 1, 1, 1 },
@@ -294,7 +306,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_fsv16_4d_rank_2,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::b_fs_yx_fsv16, format::b_fs_yx_fsv16, format::b_fs_yx_fsv16,
                                { 48, 24, 3, 3 }, { 3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -305,7 +317,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_fsv16_5d_rank_2,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 3, 3, 10 }, { 5, 2, 1, 1 }, { 5, 10, 1, 3, 3 },
@@ -316,7 +328,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_fsv16_5d_rank_3,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 2, 1, 2 }, { 5, 2, 8, 9, 10 },
@@ -327,7 +339,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp32_fsv16_5d_rank_4,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f32, data_types::f32, data_types::f32,
+                             { data_types::f32, data_types::i32, data_types::f32,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 2, 4, 3 }, { 5, 2, 1, 8, 3 },
@@ -338,7 +350,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_fsv16_4d_rank_1,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::b_fs_yx_fsv16, format::b_fs_yx_fsv16, format::b_fs_yx_fsv16,
                                { 6, 1, 1, 1 }, { 3, 1, 1, 1 }, { 3, 1, 1, 1 },
@@ -349,7 +361,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_fsv16_4d_rank_2,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::b_fs_yx_fsv16, format::b_fs_yx_fsv16, format::b_fs_yx_fsv16,
                                { 48, 24, 3, 3 }, { 3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -360,7 +372,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_fsv16_5d_rank_1,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 1, 1, 1 }, { 5, 7, 8, 9, 10 },
@@ -371,7 +383,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_fsv16_5d_rank_2,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 4, 1, 1 }, { 5, 8, 1, 1, 1 },
@@ -382,7 +394,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_fsv16_5d_rank_3,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 2, 1, 3 }, { 5, 2, 1, 8, 9 },
@@ -393,7 +405,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_fsv16_5d_rank_4,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 2, 4, 3 }, { 5, 2, 1, 8, 3 },
@@ -404,7 +416,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_bsv32_fsv16_4d_r
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16,
                                { 6, 1, 1, 1 }, { 3, 1, 1, 1 }, { 3, 1, 1, 1 },
@@ -415,7 +427,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_fp16_bsv32_fsv16_4d_r
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::f16, data_types::f16, data_types::f16,
+                             { data_types::f16, data_types::i32, data_types::f16,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16,
                                { 48, 24, 3, 3 },  {3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -426,7 +438,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_i8_bsv32_fsv16_4d_ran
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::i8, data_types::i8, data_types::i8,
+                             { data_types::i8, data_types::i32, data_types::i8,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16, format::bs_fs_yx_bsv32_fsv16,
                                { 41, 23, 3, 3 }, { 3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -437,7 +449,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_i8_bsv32_fsv32_4d_ran
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::i8, data_types::i8, data_types::i8,
+                             { data_types::i8, data_types::i32, data_types::i8,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::bs_fs_yx_bsv32_fsv32, format::bs_fs_yx_bsv32_fsv32, format::bs_fs_yx_bsv32_fsv32,
                                { 6, 1, 1, 1 }, { 3, 1, 1, 1 }, { 3, 1, 1, 1 },
@@ -448,7 +460,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_i8_fsv32_4d_rank_2,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::i8, data_types::i8, data_types::i8,
+                             { data_types::i8, data_types::i32, data_types::i8,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::b_fs_yx_fsv32, format::b_fs_yx_fsv32, format::b_fs_yx_fsv32,
                                { 41, 23, 3, 3 }, { 3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -459,7 +471,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_i8_fsv32_5d_rank_3,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::i8, data_types::i8, data_types::i8,
+                             { data_types::i8, data_types::i32, data_types::i8,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv32, format::b_fs_yx_fsv32, format::b_fs_zyx_fsv32,
                                { 6, 7, 8, 9, 10 }, { 5, 2, 1, 2 }, { 5, 2, 8, 9, 10 },
@@ -470,7 +482,7 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_i8_fsv16_4d_rank_2,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::i8, data_types::i8, data_types::i8,
+                             { data_types::i8, data_types::i32, data_types::i8,
                                format::bfyx, format::bfyx, format::bfyx,
                                format::b_fs_yx_fsv16, format::b_fs_yx_fsv16, format::b_fs_yx_fsv16,
                                { 41, 23, 3, 3 }, { 3, 2, 1, 1 }, { 3, 3, 1, 3 },
@@ -481,19 +493,80 @@ INSTANTIATE_TEST_SUITE_P(scatter_nd_update_gpu_random_test_i8_fsv16_5d_rank_4,
                          scatter_nd_update_random_test,
                          testing::ValuesIn(
                              std::vector<scatter_nd_update_basic_test_params>{
-                             { data_types::i8, data_types::i8, data_types::i8,
+                             { data_types::i8, data_types::i32, data_types::i8,
                                format::bfzyx, format::bfyx, format::bfzyx,
                                format::b_fs_zyx_fsv16, format::b_fs_yx_fsv16, format::b_fs_zyx_fsv16,
                                { 6, 7, 8, 9, 10 }, { 5, 2, 3, 3 }, { 5, 2, 8, 9, 3 },
                                4 }
                          }));
 
+TEST(scatter_nd_update_gpu_fp16_test16, data3_indice4_update3_dynamic) {
+    auto& engine = get_test_engine();
+
+    auto input1_layout = layout{ ov::PartialShape::dynamic(3), data_types::f16, format::bfyx };
+    auto input2_layout = layout{ ov::PartialShape::dynamic(4), data_types::i32, format::bfyx };
+    auto input3_layout = layout{ ov::PartialShape::dynamic(3), data_types::f16, format::bfyx };
+
+    auto input1 = engine.allocate_memory({ { 2, 2, 3 }, data_types::f16, format::bfyx }); // data
+    auto input2 = engine.allocate_memory({ { 2, 1, 1, 3 }, data_types::i32, format::bfyx }); // Indexes
+    auto input3 = engine.allocate_memory({ { 2, 1, 1 }, data_types::f16, format::bfyx }); // Updates
+
+    set_values(input1, {
+        // 0
+        ov::float16(1.f), ov::float16(2.f), ov::float16(3.f),
+        ov::float16(1.f), ov::float16(2.f), ov::float16(3.f),
+        // 1
+        ov::float16(1.f), ov::float16(2.f), ov::float16(3.f),
+        ov::float16(1.f), ov::float16(2.f), ov::float16(3.f),
+    });
+
+    set_values(input2, {
+        0, -1, -1, 1, -1, -1,
+    });
+
+    set_values(input3, {
+        ov::float16(1.f), ov::float16(-1.f),
+    });
+
+    std::vector<float> expected_results = {
+        // 0
+        ov::float16(1.f), ov::float16(2.f), ov::float16(3.f),
+        ov::float16(1.f), ov::float16(2.f), ov::float16(1.f),
+        // 1
+        ov::float16(1.f), ov::float16(2.f), ov::float16(3.f),
+        ov::float16(1.f), ov::float16(2.f), ov::float16(-1.f),
+    };
+
+    topology topology;
+    topology.add(input_layout("InputData", input1->get_layout()));
+    topology.add(input_layout("InputIndices", input2->get_layout()));
+    topology.add(input_layout("InputUpdates", input3->get_layout()));
+    topology.add(
+        scatter_nd_update("scatter_nd_update", input_info("InputData"), input_info("InputIndices"), input_info("InputUpdates"), 4)
+    );
+
+    network network(engine, topology, get_test_default_config(engine));
+
+
+    network.set_input_data("InputData", input1);
+    network.set_input_data("InputIndices", input2);
+    network.set_input_data("InputUpdates", input3);
+
+    auto outputs = network.execute();
+
+    auto output = outputs.at("scatter_nd_update").get_memory();
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
+
+    for (size_t i = 0; i < expected_results.size(); ++i) {
+        ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
+    }
+}
 
 TEST(scatter_nd_update_gpu_fp16_test15, data5_indice3_update5) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 2, 4, 3 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx,  { 1, 2, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx,  { 1, 2, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 1, 2, 2, 4, 3, 2 } }); // updates
 
     set_values(input1, {
@@ -517,8 +590,8 @@ TEST(scatter_nd_update_gpu_fp16_test15, data5_indice3_update5) {
     });
 
     set_values(input2, {
-        ov::float16(1.0f),
-        ov::float16(0.0f),
+        1,
+        0,
     });
 
     set_values(input3, {
@@ -577,7 +650,7 @@ TEST(scatter_nd_update_gpu_fp16_test15, data5_indice3_update5) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -588,7 +661,7 @@ TEST(scatter_nd_update_gpu_fp16_test14, data5_indice2_update3) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 2, 4, 3 } }); // data 2x2x3x4x2 (bfzyx)
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx,  { 3, 3, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx,  { 3, 3, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 3, 4, 1, 1, 2 } }); // updates
 
     set_values(input1, {
@@ -612,9 +685,9 @@ TEST(scatter_nd_update_gpu_fp16_test14, data5_indice2_update3) {
         });
 
     set_values(input2, {
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(2.0f),
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(0.0f),
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f),
+        1, 1, 2,
+        1, 1, 0,
+        0, 1, 1,
         });
 
     set_values(input3, {
@@ -661,7 +734,7 @@ TEST(scatter_nd_update_gpu_fp16_test14, data5_indice2_update3) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -672,7 +745,7 @@ TEST(scatter_nd_update_gpu_fp16_test13, data4_indice2_update2) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 4, 2 } }); // data 2x3x2x4 (bfyx)
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 3, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 3, 3, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 4, 1, 1 } }); // updates
 
     set_values(input1, {
@@ -686,9 +759,9 @@ TEST(scatter_nd_update_gpu_fp16_test13, data4_indice2_update2) {
         });
 
     set_values(input2, {
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(0.0f),
-        ov::float16(1.0f), ov::float16(2.0f), ov::float16(1.0f),
-        ov::float16(0.0f), ov::float16(2.0f), ov::float16(1.0f),
+        1, 1, 0,
+        1, 2, 1,
+        0, 2, 1,
         });
 
     set_values(input3, {
@@ -725,7 +798,7 @@ TEST(scatter_nd_update_gpu_fp16_test13, data4_indice2_update2) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -736,7 +809,7 @@ TEST(scatter_nd_update_gpu_fp16_test12, data3_indice3_update1) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 3, 1, 4 } }); // data 3x3x4 (bfy)
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 4, 3, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 4, 3, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 4, 1, 1, 1 } }); // updates
 
     set_values(input1, {
@@ -754,10 +827,10 @@ TEST(scatter_nd_update_gpu_fp16_test12, data3_indice3_update1) {
         });
 
     set_values(input2, {
-        ov::float16(2.0f), ov::float16(0.0f), ov::float16(0.0f),
-        ov::float16(1.0f), ov::float16(2.0f), ov::float16(3.0f),
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(0.0f),
+        2, 0, 0,
+        1, 2, 3,
+        1, 1, 1,
+        0, 1, 0,
         });
 
     set_values(input3, {
@@ -796,7 +869,7 @@ TEST(scatter_nd_update_gpu_fp16_test12, data3_indice3_update1) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -807,7 +880,7 @@ TEST(scatter_nd_update_gpu_fp16_test11, data6_indice1_update6) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 3, 4, 2 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 1, 1, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 1, 1, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 1, 2, 2, 3, 4, 2 } }); // updates
 
     set_values(input1, {
@@ -850,7 +923,7 @@ TEST(scatter_nd_update_gpu_fp16_test11, data6_indice1_update6) {
         });
 
     set_values(input2, {
-        ov::float16(1.0f),
+        1,
         });
 
     set_values(input3, {
@@ -926,7 +999,7 @@ TEST(scatter_nd_update_gpu_fp16_test11, data6_indice1_update6) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -937,7 +1010,7 @@ TEST(scatter_nd_update_gpu_fp16_test10, data5_indice1_update5) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 3, 4, 2 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 1, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 3, 4, 2 } }); // updates
 
     set_values(input1, {
@@ -961,7 +1034,7 @@ TEST(scatter_nd_update_gpu_fp16_test10, data5_indice1_update5) {
         });
 
     set_values(input2, {
-        ov::float16(1.0f), ov::float16(0.0f),
+        1, 0,
         });
 
     set_values(input3, {
@@ -1022,7 +1095,7 @@ TEST(scatter_nd_update_gpu_fp16_test10, data5_indice1_update5) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1033,7 +1106,7 @@ TEST(scatter_nd_update_gpu_fp16_test9, data4_indice1_update4) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 3, 4, 2 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 1, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 4, 2 } }); // updates
 
     set_values(input1, {
@@ -1052,7 +1125,7 @@ TEST(scatter_nd_update_gpu_fp16_test9, data4_indice1_update4) {
         });
 
     set_values(input2, {
-        ov::float16(2.0f), ov::float16(0.0f),
+        2, 0,
         });
 
     set_values(input3, {
@@ -1100,7 +1173,7 @@ TEST(scatter_nd_update_gpu_fp16_test9, data4_indice1_update4) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1111,7 +1184,7 @@ TEST(scatter_nd_update_gpu_fp16_test8, data6_indice2_update5) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 1, 2, 2, 4, 3, 2 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx,   { 2, 2, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx,   { 2, 2, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 1, 2, 4, 3 } }); // updates
 
     set_values(input1, {
@@ -1135,8 +1208,8 @@ TEST(scatter_nd_update_gpu_fp16_test8, data6_indice2_update5) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f),
-        ov::float16(0.0f), ov::float16(0.0f)
+        0, 1,
+        0, 0,
         });
 
     set_values(input3, {
@@ -1198,7 +1271,7 @@ TEST(scatter_nd_update_gpu_fp16_test8, data6_indice2_update5) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1209,7 +1282,7 @@ TEST(scatter_nd_update_gpu_fp16_test7, data5_indice2_update4) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 1, 2, 3, 4, 2 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx,  { 2, 2, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx,  { 2, 2, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx,  { 2, 2, 1, 3, 4 } }); // updates
 
 
@@ -1224,8 +1297,8 @@ TEST(scatter_nd_update_gpu_fp16_test7, data5_indice2_update4) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f),
-        ov::float16(0.0f), ov::float16(0.0f)
+        0, 1,
+        0, 0,
         });
 
     set_values(input3, {
@@ -1266,7 +1339,7 @@ TEST(scatter_nd_update_gpu_fp16_test7, data5_indice2_update4) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1278,7 +1351,7 @@ TEST(scatter_nd_update_gpu_fp16_test6, data4_indice2_update3) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 2, 4 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 3, 2, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 4, 1, 2 } }); // updates
 
 
@@ -1293,9 +1366,9 @@ TEST(scatter_nd_update_gpu_fp16_test6, data4_indice2_update3) {
         });
 
     set_values(input2, {
-        ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(1.0f), ov::float16(0.0f),
-        ov::float16(0.0f), ov::float16(2.0f)
+        1, 1,
+        1, 0,
+        0, 2,
         });
 
     set_values(input3, {
@@ -1332,7 +1405,7 @@ TEST(scatter_nd_update_gpu_fp16_test6, data4_indice2_update3) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1343,7 +1416,7 @@ TEST(scatter_nd_update_gpu_fp16_test5, data3_indice2_update2) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 1, 4 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 3, 2, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 4, 1, 1 } }); // updates
 
 
@@ -1358,9 +1431,9 @@ TEST(scatter_nd_update_gpu_fp16_test5, data3_indice2_update2) {
         });
 
     set_values(input2, {
-        ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(1.0f), ov::float16(0.0f),
-        ov::float16(0.0f), ov::float16(2.0f)
+        1, 1,
+        1, 0,
+        0, 2,
         });
 
     set_values(input3, {
@@ -1397,7 +1470,7 @@ TEST(scatter_nd_update_gpu_fp16_test5, data3_indice2_update2) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1408,7 +1481,7 @@ TEST(scatter_nd_update_gpu_fp16_test4, data2_indice2_update1) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 4, 1, 1 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 3, 2, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 1, 1, 1 } }); // updates
 
 
@@ -1419,9 +1492,9 @@ TEST(scatter_nd_update_gpu_fp16_test4, data2_indice2_update1) {
         });
 
     set_values(input2, {
-        ov::float16(2.0f), ov::float16(1.0f),
-        ov::float16(0.0f), ov::float16(3.0f),
-        ov::float16(0.0f), ov::float16(2.0f)
+        2, 1,
+        0, 3,
+        0, 2
         });
 
     set_values(input3, {
@@ -1452,7 +1525,7 @@ TEST(scatter_nd_update_gpu_fp16_test4, data2_indice2_update1) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1463,7 +1536,7 @@ TEST(scatter_nd_update_gpu_fp16_test3, data3_indice1_update3) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 3, 4, 1 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 1, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 4, 1 } }); // updates
 
 
@@ -1482,7 +1555,7 @@ TEST(scatter_nd_update_gpu_fp16_test3, data3_indice1_update3) {
         });
 
     set_values(input2, {
-            ov::float16(2.0f), ov::float16(0.0f)
+        2, 0,
         });
 
     set_values(input3, {
@@ -1527,7 +1600,7 @@ TEST(scatter_nd_update_gpu_fp16_test3, data3_indice1_update3) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1539,7 +1612,7 @@ TEST(scatter_nd_update_gpu_fp16_test2, data2_indice1_update2) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 4, 1, 1 } }); // data
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // indices
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 1, 1, 1 } }); // indices
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 4, 1, 1 } }); // updates
 
 
@@ -1550,12 +1623,12 @@ TEST(scatter_nd_update_gpu_fp16_test2, data2_indice1_update2) {
         });
 
     set_values(input2, {
-            ov::float16(2.0f), ov::float16(0.0f)
+        2, 0
         });
 
     set_values(input3, {
-            ov::float16(20.0f), ov::float16(21.0f), ov::float16(22.0f), ov::float16(23.0f),
-            ov::float16(24.0f), ov::float16(25.0f), ov::float16(26.0f), ov::float16(27.0f)
+        ov::float16(20.0f), ov::float16(21.0f), ov::float16(22.0f), ov::float16(23.0f),
+        ov::float16(24.0f), ov::float16(25.0f), ov::float16(26.0f), ov::float16(27.0f)
         });
 
     std::vector<float> expected_results = {
@@ -1582,7 +1655,7 @@ TEST(scatter_nd_update_gpu_fp16_test2, data2_indice1_update2) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1593,7 +1666,7 @@ TEST(scatter_nd_update_gpu_fp16_test1, data1_indice1_update1) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 8, 1, 1, 1 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 4, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 4, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 4, 1, 1, 1 } }); // Updates
 
 
@@ -1602,7 +1675,7 @@ TEST(scatter_nd_update_gpu_fp16_test1, data1_indice1_update1) {
     });
 
     set_values(input2, {
-        ov::float16(2.0f), ov::float16(4.0f), ov::float16(5.0f), ov::float16(7.0f)
+        2, 4, 5, 7
     });
 
     set_values(input3, {
@@ -1631,7 +1704,7 @@ TEST(scatter_nd_update_gpu_fp16_test1, data1_indice1_update1) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     for (size_t i = 0; i < expected_results.size(); ++i) {
         ASSERT_EQ(expected_results[i], half_to_float(output_ptr[i]));
@@ -1651,7 +1724,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2311) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 6, 6, 1, 6 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 3, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // Updates
 
     set_values(input1, {
@@ -1699,8 +1772,8 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2311) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(2.0f),
-        ov::float16(3.0f), ov::float16(4.0f), ov::float16(5.0f)
+        0, 1, 2,
+        3, 4, 5
         });
 
     set_values(input3, {
@@ -1727,7 +1800,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2311) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f, 102.f, 103.f, 104.f, 105.f,
@@ -1789,7 +1862,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2211) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 6, 6, 1, 6 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 2, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 2, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 6, 1, 1 } }); // Updates
 
 
@@ -1838,8 +1911,8 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2211) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f),
-        ov::float16(3.0f), ov::float16(4.0f),
+        0, 1,
+        3, 4,
         });
 
     set_values(input3, {
@@ -1866,7 +1939,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2211) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f, 102.f, 103.f, 104.f, 105.f,
@@ -1928,7 +2001,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 6, 6, 1, 6 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 6, 1, 6 } }); // Updates
 
 
@@ -1977,8 +2050,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f),
-        ov::float16(3.0f)
+        0, 3
         });
 
     set_values(input3, {
@@ -2016,7 +2088,7 @@ TEST(scatter_nd_update_gpu_fp16, d6661_i2111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         777.f, 999.f, 999.f, 999.f, 999.f, 999.f,
@@ -2079,7 +2151,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2411) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 4, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 4, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // Updates
 
 
@@ -2110,8 +2182,8 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2411) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(2.0f), ov::float16(1.0f),
-        ov::float16(2.0f), ov::float16(1.0f), ov::float16(2.0f), ov::float16(1.0f)
+        0, 1, 2, 1,
+        2, 1, 2, 1,
         });
 
     set_values(input3, {
@@ -2137,7 +2209,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2411) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -2182,7 +2254,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2311) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 3, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 2, 1, 1 } }); // Updates
 
 
@@ -2213,8 +2285,8 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2311) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(2.0f),
-        ov::float16(2.0f), ov::float16(1.0f), ov::float16(2.0f)
+        0, 1, 2,
+        2, 1, 2
         });
 
     set_values(input3, {
@@ -2240,7 +2312,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2311) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -2285,7 +2357,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2211) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 2, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 2, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 3, 1, 2 } }); // Updates
 
 
@@ -2316,8 +2388,8 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2211) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f),
-        ov::float16(2.0f), ov::float16(1.0f)
+        0, 1,
+        2, 1
         });
 
     set_values(input3, {
@@ -2349,7 +2421,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2211) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -2394,7 +2466,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfyx, { 3, 2, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfyx, { 2, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfyx, { 2, 2, 2, 3 } }); // Updates
 
 
@@ -2425,8 +2497,8 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f),
-        ov::float16(2.0f)
+        0,
+        2
         });
 
     set_values(input3, {
@@ -2466,7 +2538,7 @@ TEST(scatter_nd_update_gpu_fp16, d3232_i2111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         666.f, 666.f,
@@ -2510,7 +2582,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i25111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 3, 2, 3, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 5, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfzyx, { 2, 5, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 1, 1, 1, 1 } }); // Updates
 
 
@@ -2573,8 +2645,8 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i25111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(2.0f),
-        ov::float16(2.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f)
+        0, 1, 1, 1, 2,
+        2, 1, 1, 1, 1,
         });
 
     set_values(input3, {
@@ -2600,7 +2672,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i25111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f, 102.f,
@@ -2677,7 +2749,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i24111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 3, 2, 3, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 4, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfzyx, { 2, 4, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 3, 1, 1, 1 } }); // Updates
 
 
@@ -2740,8 +2812,8 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i24111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(2.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f)
+        0, 1, 1, 1,
+        2, 1, 1, 1,
         });
 
     set_values(input3, {
@@ -2768,7 +2840,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i24111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f, 102.f,
@@ -2845,7 +2917,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i23111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 3, 2, 3, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 3, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfzyx, { 2, 3, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 1, 1, 3 } }); // Updates
 
 
@@ -2908,8 +2980,8 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i23111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(2.0f), ov::float16(1.0f), ov::float16(1.0f)
+        0, 1, 1,
+        2, 1, 1,
         });
 
     set_values(input3, {
@@ -2939,7 +3011,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i23111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f, 102.f,
@@ -3016,7 +3088,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i22111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 3, 2, 3, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfzyx, { 2, 2, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 3, 1, 3, 2 } }); // Updates
 
 
@@ -3079,8 +3151,8 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i22111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f),
-        ov::float16(2.0f), ov::float16(1.0f)
+        0, 1,
+        2, 1,
         });
 
     set_values(input3, {
@@ -3122,7 +3194,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i22111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f, 102.f,
@@ -3199,7 +3271,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i21111) {
     auto& engine = get_test_engine();
 
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 3, 2, 3, 2, 3 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfzyx, { 2, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfzyx, { 2, 2, 3, 2, 3 } }); // Updates
 
 
@@ -3262,8 +3334,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i21111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f),
-        ov::float16(2.0f)
+        0, 2,
         });
 
     set_values(input3, {
@@ -3323,7 +3394,7 @@ TEST(scatter_nd_update_gpu_fp16, d32323_i21111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         555.f, 555.f, 555.f,
@@ -3401,7 +3472,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i261111) {
 
     // memory order is bfxyzw
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 6, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfwzyx, { 2, 6, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 1, 1, 1, 1, 1 } }); // Updates
 
 
@@ -3456,8 +3527,8 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i261111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(0.0f),
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(0.0f)
+        0, 1, 1, 1, 1, 0,
+        1, 1, 1, 1, 1, 0,
         });
 
     set_values(input3, {
@@ -3483,7 +3554,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i261111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -3553,7 +3624,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i251111) {
 
     // memory order is bfxyzw
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 5, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfwzyx, { 2, 5, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 1, 1, 1, 1 } }); // Updates
 
 
@@ -3608,8 +3679,8 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i251111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f)
+        0, 1, 1, 1, 1,
+        1, 1, 1, 1, 1,
         });
 
     set_values(input3, {
@@ -3636,7 +3707,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i251111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -3706,7 +3777,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i241111) {
 
     // memory order is bfxyzw
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 4, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfwzyx, { 2, 4, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 1, 1, 1, 2 } }); // Updates
 
 
@@ -3761,8 +3832,8 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i241111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f)
+        0, 1, 1, 1,
+        1, 1, 1, 1,
         });
 
     set_values(input3, {
@@ -3792,7 +3863,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i241111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -3863,7 +3934,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i231111) {
 
     // memory order is bfxyzw
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 3, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfwzyx, { 2, 3, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 1, 1, 2, 2 } }); // Updates
 
 
@@ -3918,8 +3989,8 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i231111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f), ov::float16(1.0f),
-        ov::float16(1.0f), ov::float16(1.0f), ov::float16(1.0f)
+        0, 1, 1,
+        1, 1, 1,
         });
 
     set_values(input3, {
@@ -3955,7 +4026,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i231111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -4025,7 +4096,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i221111) {
 
     // memory order is bfxyzw
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfwzyx, { 2, 2, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 1, 2, 2, 2 } }); // Updates
 
 
@@ -4080,8 +4151,8 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i221111) {
         });
 
     set_values(input2, {
-        ov::float16(0.0f), ov::float16(1.0f),
-        ov::float16(1.0f), ov::float16(1.0f)
+        0, 1,
+        1, 1,
         });
 
     set_values(input3, {
@@ -4129,7 +4200,7 @@ TEST(scatter_nd_update_gpu_fp16, d222222_i221111) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         100.f, 101.f,
@@ -4199,7 +4270,7 @@ void test_d222222_i211111(bool is_caching_test) {
 
     // memory order is bfxyzw
     auto input1 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Dictionary
-    auto input2 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 1, 1, 1, 1, 1 } }); // Indexes
+    auto input2 = engine.allocate_memory({ data_types::i32, format::bfwzyx, { 2, 1, 1, 1, 1, 1 } }); // Indexes
     auto input3 = engine.allocate_memory({ data_types::f16, format::bfwzyx, { 2, 2, 2, 2, 2, 2 } }); // Updates
 
 
@@ -4254,8 +4325,8 @@ void test_d222222_i211111(bool is_caching_test) {
         });
 
     set_values(input2, {
-        T(0.0f),
-        T(1.0f)
+        0,
+        1,
         });
 
     set_values(input3, {
@@ -4326,7 +4397,7 @@ void test_d222222_i211111(bool is_caching_test) {
 
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<uint16_t> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<uint16_t, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         777.f, 777.f,
@@ -4397,11 +4468,11 @@ TEST(scatter_nd_update_gpu, dynamic) {
     auto& engine = get_test_engine();
 
     auto input1_layout = layout{ ov::PartialShape::dynamic(4), data_types::f32, format::bfyx };
-    auto input2_layout = layout{ ov::PartialShape::dynamic(2), data_types::f32, format::bfyx };
+    auto input2_layout = layout{ ov::PartialShape::dynamic(2), data_types::i32, format::bfyx };
     auto input3_layout = layout{ ov::PartialShape::dynamic(2), data_types::f32, format::bfyx };
 
     auto input1 = engine.allocate_memory({ { 2, 1, 2, 8 }, data_types::f32, format::bfyx }); // Dictionary
-    auto input2 = engine.allocate_memory({ { 2, 3 },       data_types::f32, format::bfyx }); // Indexes
+    auto input2 = engine.allocate_memory({ { 2, 3 },       data_types::i32, format::bfyx }); // Indexes
     auto input3 = engine.allocate_memory({ { 2, 8 },       data_types::f32, format::bfyx }); // Updates
 
     set_values(input1, {
@@ -4412,7 +4483,7 @@ TEST(scatter_nd_update_gpu, dynamic) {
     });
 
     set_values(input2, {
-        0.f, 1.f, 1.f, 2.f, 2.f, 2.f
+        0, 0, 1, 1, 0, 1
     });
 
     set_values(input3, {
@@ -4444,7 +4515,7 @@ TEST(scatter_nd_update_gpu, dynamic) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f,
@@ -4469,11 +4540,11 @@ TEST(scatter_nd_update_gpu, dynamic_padded_output) {
     auto& engine = get_test_engine();
 
     auto input1_layout = layout{ ov::PartialShape::dynamic(4), data_types::f32, format::bfyx };
-    auto input2_layout = layout{ ov::PartialShape::dynamic(2), data_types::f32, format::bfyx };
+    auto input2_layout = layout{ ov::PartialShape::dynamic(2), data_types::i32, format::bfyx };
     auto input3_layout = layout{ ov::PartialShape::dynamic(2), data_types::f32, format::bfyx };
 
     auto input1 = engine.allocate_memory({ { 1, 1, 2, 8 }, data_types::f32, format::bfyx }); // Dictionary
-    auto input2 = engine.allocate_memory({ { 0, 3 },       data_types::f32, format::bfyx }); // Indexes
+    auto input2 = engine.allocate_memory({ { 0, 3 },       data_types::i32, format::bfyx }); // Indexes
     auto input3 = engine.allocate_memory({ { 0, 8 },       data_types::f32, format::bfyx }); // Updates
 
     set_values(input1, {
@@ -4505,7 +4576,7 @@ TEST(scatter_nd_update_gpu, dynamic_padded_output) {
     auto outputs = network.execute();
 
     auto output = outputs.at("scatter_nd_update").get_memory();
-    cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
     std::vector<float> expected_results = {
         0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f,
@@ -4624,7 +4695,7 @@ TEST(scatter_nd_update_gpu, dynamic_5d) {
 
         auto output = outputs.at("scatter_nd_update").get_memory();
         ASSERT_EQ(output->get_layout().get_partial_shape(), input1->get_layout().get_partial_shape());
-        cldnn::mem_lock<float> output_ptr(output, get_test_stream());
+        cldnn::mem_lock<float, mem_lock_type::read> output_ptr(output, get_test_stream());
 
         for (size_t i = 0; i < expected_res.size(); ++i) {
             ASSERT_EQ(expected_res[i], output_ptr[i]) << " i = " << i;
@@ -4635,23 +4706,72 @@ TEST(scatter_nd_update_gpu, dynamic_5d) {
 #ifdef RUN_ALL_MODEL_CACHING_TESTS
 TEST_P(scatter_nd_update_random_test, random_cached)
 {
+    bool cache = true;
     auto param = GetParam();
-    if (param.input_type == data_types::u8)
-        this->execute<uint8_t>(param, true);
-    else if (param.input_type == data_types::i8)
-        this->execute<int8_t>(param, true);
-    else if (param.input_type == data_types::i32)
-        this->execute<int32_t>(param, true);
-    else if (param.input_type == data_types::i64)
-        this->execute<int64_t>(param, true);
-    else if (param.input_type == data_types::f16)
-        this->execute_fp16<ov::float16, uint16_t>(param, true);
-    else if (param.input_type == data_types::f32)
-        this->execute<float>(param, true);
+    if (param.input_type == data_types::u8 && param.indices_type == data_types::i32)
+        this->execute<uint8_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::u8 && param.indices_type == data_types::i64)
+        this->execute<uint8_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::i8 && param.indices_type == data_types::i32)
+        this->execute<int8_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::i8 && param.indices_type == data_types::i64)
+        this->execute<int8_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::i32 && param.indices_type == data_types::i32)
+        this->execute<int32_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::i32 && param.indices_type == data_types::i64)
+        this->execute<int32_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::i64 && param.indices_type == data_types::i32)
+        this->execute<int64_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::i64 && param.indices_type == data_types::i64)
+        this->execute<int64_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::f16 && param.indices_type == data_types::i32)
+        this->execute_fp16<ov::float16, uint16_t, int32_t>(param, cache);
+    else if (param.input_type == data_types::f16 && param.indices_type == data_types::i64)
+        this->execute_fp16<ov::float16, uint16_t, int64_t>(param, cache);
+    else if (param.input_type == data_types::f32 && param.indices_type == data_types::i32)
+        this->execute<float, int32_t>(param, cache);
+    else if (param.input_type == data_types::f32 && param.indices_type == data_types::i64)
+        this->execute<float, int64_t>(param, cache);
     else
         OPENVINO_THROW("unidentified data type");
 }
 #endif
 TEST(scatter_nd_update_gpu_fp16, d222222_i211111_cached) {
     test_d222222_i211111<ov::float16>(true);
+}
+
+TEST(scatter_nd_update_gpu, subgraph_input_changed) {
+    auto& engine = get_test_engine();
+
+    auto input1 = engine.allocate_memory({ ov::PartialShape{2, 1}, data_types::f32, format::bfyx }); // Dictionary
+    auto input2 = engine.allocate_memory({ ov::PartialShape{2, 1}, data_types::i32, format::bfyx }); // Indexes
+    auto input3 = engine.allocate_memory({ ov::PartialShape{2, 1}, data_types::i32, format::bfyx }); // Updates
+    layout in_layout = {ov::PartialShape::dynamic(2), data_types::f32, format::bfyx};
+
+    set_values(input2, {0, 1});
+    set_values(input3, {2, 5});
+
+    std::vector<int32_t> expected_results = {2, 5};
+
+    topology topology;
+    topology.add(input_layout("input_data", in_layout));
+    topology.add(data("input_indices", input2));
+    topology.add(data("input_updates", input3));
+    topology.add(shape_of("shape_of", input_info("input_data"), data_types::i32));
+    topology.add(reshape("reshape", input_info("shape_of"), false, {}, ov::PartialShape{2, 1}));
+    topology.add(scatter_nd_update("scatter_nd_update", input_info("reshape"), input_info("input_indices"), input_info("input_updates"), 2));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+
+    network network(engine, topology, config);
+    network.set_input_data("input_data", input1);
+
+    auto outputs = network.execute();
+    auto output = outputs.at("scatter_nd_update").get_memory();
+    cldnn::mem_lock<int32_t, mem_lock_type::read> output_ptr(output, get_test_stream());
+
+    for (size_t i = 0; i < 2; ++i) {
+        ASSERT_EQ(expected_results[i], output_ptr[i]);
+    }
 }

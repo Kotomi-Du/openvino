@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <string>
@@ -26,13 +27,32 @@
 namespace ov::intel_cpu {
 
 // @todo another option is to determine shape relation by executor type
-enum class ShapeTolerance { Agnostic, Dependant };
+enum class ShapeTolerance : uint8_t { Agnostic, Dependant };
 
-enum class ExecutorType { Undefined, Graph, Common, jit_x64, Dnnl, Acl, Mlas, jit_aarch64, Shl, Kleidiai };
+enum class ExecutorType : uint8_t {
+    Undefined,
+    Reference,
+    Graph,
+    Common,
+    Jit,
+    Dnnl,
+    Acl,
+    Mlas,
+    Kleidiai,
+};
 
-enum class OperationType { FullyConnected, MatMul, Convolution };
+enum class OperationType : uint8_t {
+    FullyConnected,
+    MatMul,
+    Convolution,
+    Eltwise,
+    GatherMatmul,
+    GatedDeltaNet,
+    SelectiveSSM,
+    PagedSelectiveSSM
+};
 
-std::string ExecutorTypeToString(const ExecutorType type);
+std::string ExecutorTypeToString(ExecutorType type);
 ExecutorType ExecutorTypeFromString(const std::string& typeStr);
 
 class ExecutorContext {
@@ -49,7 +69,8 @@ public:
           engine(graphContext->getEngine()),
           implPriorities(std::move(implPriorities)),
           privateWeighCache(std::move(privateWeighCache)),
-          numNumaNodes(graphContext->getNumNumaNodes()) {
+          numNumaNodes(graphContext->getNumNumaNodes()),
+          cpuParallel(graphContext->getCpuParallel()) {
         auto cpuStreamsExecutor = graphContext->getCPUStreamExecutor();
         curNumaNodeId = std::max(0, cpuStreamsExecutor ? cpuStreamsExecutor->get_numa_node_id() : curNumaNodeId);
     }
@@ -64,7 +85,7 @@ public:
         return scratchPads[curNumaNodeId];
     }
 
-    [[nodiscard]] std::shared_ptr<std::unordered_map<std::string, MemoryPtr>> getPrivateWeighCache() const {
+    [[nodiscard]] std::shared_ptr<std::unordered_map<std::string, MemoryPtr>> getPrivateWeightCache() const {
         return privateWeighCache;
     }
 
@@ -76,8 +97,16 @@ public:
         return implPriorities;
     }
 
-    [[nodiscard]] const WeightsSharing::Ptr getWeightsCache() const {
+    [[nodiscard]] WeightsSharing::Ptr getWeightsCache() const {
         return weightsCache;
+    }
+
+    [[nodiscard]] std::shared_ptr<CpuParallel> getCpuParallel() const {
+        return cpuParallel;
+    }
+
+    [[nodiscard]] std::shared_ptr<ThreadPool> getThreadPool() const {
+        return cpuParallel->get_thread_pool();
     }
 
 private:
@@ -92,11 +121,12 @@ private:
     std::shared_ptr<std::unordered_map<std::string, MemoryPtr>> privateWeighCache;
     int numNumaNodes;
     int curNumaNodeId = -1;
+    std::shared_ptr<CpuParallel> cpuParallel;
 };
 
 class ExecutorFactoryLegacy {
 public:
-    ExecutorFactoryLegacy(ExecutorContext::CPtr context) : context(std::move(context)) {}
+    explicit ExecutorFactoryLegacy(ExecutorContext::CPtr context) : context(std::move(context)) {}
     virtual ~ExecutorFactoryLegacy() = default;
 
     const ExecutorContext::CPtr context;

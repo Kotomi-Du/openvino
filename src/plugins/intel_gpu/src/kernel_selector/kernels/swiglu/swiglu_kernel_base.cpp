@@ -1,8 +1,9 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "swiglu_kernel_base.h"
+
 #include "kernel_selector_utils.h"
 
 namespace kernel_selector {
@@ -19,7 +20,7 @@ JitConstants SwiGLUKernelBase::GetJitConstants(const swiglu_params& params, cons
     JitConstants jit = MakeBaseParamsJitConstants(params);
 
     jit.AddConstants({MakeJitConstant("AXIS", params.axis)});
-    jit.AddConstants({MakeJitConstant("SPLIT_LENGTH", params.split_length)});
+    jit.AddConstants({MakeJitConstant("GLU_STRIDE", params.glu_stride)});
     jit.AddConstants({MakeJitConstant("GLU_TYPE", params.glu_type)});
     jit.AddConstants({MakeJitConstant("LWS0", dispatchData.lws[0])});
     jit.AddConstants({MakeJitConstant("LWS1", dispatchData.lws[1])});
@@ -33,9 +34,20 @@ JitConstants SwiGLUKernelBase::GetJitConstants(const swiglu_params& params, cons
         jit.AddConstants({MakeJitConstant("GEGLU_MULT", "0.044715" + type_suffix)});
         jit.AddConstants({MakeJitConstant("GEGLU_SQUARE_2_OVER_PI", "0.79788458347320556640625" + type_suffix)});
     }
-    jit.AddConstants({MakeJitConstant("SPLIT_TO_GLU_IDX", params.split_to_glu_idx)});
+    jit.AddConstants({MakeJitConstant("GATE_IDX", params.gate_idx)});
     jit.Merge(MakeTypeJitConstants(GetAccumulatorType(params), "ACCUMULATOR"));
     jit.Merge(GetTensorFriendlyWorkGroupsJit(params.outputs[0]));
+
+    if ((params.clamp_min > std::numeric_limits<float>::lowest() || params.clamp_max < std::numeric_limits<float>::max()) &&
+        (params.glu_type == ov::op::internal::GLU::GluType::Swish)) {
+        jit.AddConstants({MakeJitConstant("CLAMP_MAX", static_cast<float>(params.clamp_max))});
+        jit.AddConstants({MakeJitConstant("CLAMP_MIN", static_cast<float>(params.clamp_min))});
+    }
+    jit.AddConstants({MakeJitConstant("SWISH_BETA", static_cast<float>(params.swish_beta))});
+    jit.AddConstants({MakeJitConstant("UP_ADD_VAL", static_cast<float>(params.up_add_val))});
+    if (params.scale_factor > 0.0f) {
+        jit.AddConstants({MakeJitConstant("SCALE_FACTOR", static_cast<float>(params.scale_factor))});
+    }
 
     return jit;
 }
@@ -43,8 +55,9 @@ JitConstants SwiGLUKernelBase::GetJitConstants(const swiglu_params& params, cons
 KernelsData SwiGLUKernelBase::GetKernelsData(const Params& params) const {
     assert(params.GetType() == KernelType::SWIGLU);
 
-    if (!Validate(params))
+    if (!Validate(params)) {
         return {};
+    }
 
     const swiglu_params& orgParams = static_cast<const swiglu_params&>(params);
     auto dispatchData = SetDefault(orgParams);
@@ -75,21 +88,24 @@ KernelsData SwiGLUKernelBase::GetKernelsData(const Params& params) const {
     return {kd};
 }
 
-
 bool SwiGLUKernelBase::Validate(const Params& params) const {
-    if (!KernelBaseOpenCL::Validate(params))
-        return false;
+    if (!KernelBaseOpenCL::Validate(params)) {
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
+    }
 
     return true;
 }
 
 Datatype SwiGLUKernelBase::GetAccumulatorType(const swiglu_params& params) const {
-    Datatype types[] = { Datatype::F32, Datatype::F16, Datatype::INT64, Datatype::INT32, Datatype::UINT32};
+    Datatype types[] = {Datatype::F32, Datatype::F16, Datatype::INT64, Datatype::INT32, Datatype::UINT32};
 
-    for (Datatype type : types)
-        for (auto& in : params.inputs)
-            if (in.GetDType() == type)
+    for (Datatype type : types) {
+        for (const auto& in : params.inputs) {
+            if (in.GetDType() == type) {
                 return type;
+            }
+        }
+    }
 
     return Datatype::F32;
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -32,11 +32,7 @@ ov::op::PadMode get_pad_mode(std::string mode) {
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace com_microsoft {
-namespace opset_1 {
+namespace ov::frontend::onnx::com_microsoft::opset_1 {
 ov::OutputVector pad(const ov::frontend::onnx::Node& node) {
     const auto inputs = node.get_ov_inputs();
     const auto& data = inputs[0];
@@ -60,7 +56,7 @@ ov::OutputVector pad(const ov::frontend::onnx::Node& node) {
         std::vector<std::int64_t> pads_vector =
             ov::as_type_ptr<v0::Constant>(pads.get_node_shared_ptr())->get_vector<std::int64_t>();
 
-        std::size_t const half_size = pads_vector.size() / 2;
+        const std::size_t half_size = pads_vector.size() / 2;
         std::vector<std::int64_t> padding_begin_values(pads_vector.begin(), pads_vector.begin() + half_size);
         std::vector<std::int64_t> padding_end_values(pads_vector.begin() + half_size, pads_vector.end());
 
@@ -81,8 +77,4 @@ ov::OutputVector pad(const ov::frontend::onnx::Node& node) {
 
 ONNX_OP("Pad", OPSET_SINCE(1), com_microsoft::opset_1::pad, MICROSOFT_DOMAIN);
 
-}  // namespace opset_1
-}  // namespace com_microsoft
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::com_microsoft::opset_1

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "select_inst.h"
@@ -54,7 +54,14 @@ std::vector<layout> select_inst::calc_output_layouts(const select_node& /*node*/
 
     std::vector<ShapeType> output_shapes = ov::op::v1::shape_infer(&op, input_shapes);
 
-    return {{output_shapes[0], dt, format::get_default_format(output_shapes[0].size())}};
+    const auto out_rank = output_shapes[0].size();
+    auto out_format = format::get_default_format(out_rank);
+    // Keep byxf from the "then" input to avoid an extra reorder after select in byxf graphs
+    if (input1_layout.format == format::byxf && input1_layout.get_partial_shape().size() == out_rank) {
+        out_format = format::byxf;
+    }
+
+    return {{output_shapes[0], dt, out_format}};
 }
 
 template std::vector<layout> select_inst::calc_output_layouts<ov::PartialShape>(select_node const& node, const kernel_impl_params& impl_param);
@@ -77,7 +84,7 @@ std::string select_inst::to_string(select_node const& node) {
 }
 
 select_inst::typed_primitive_inst(network& network, select_node const& node) : parent(network, node) {
-    auto& deps = node.get_dependencies();
+    const auto& deps = node.get_dependencies();
 
     auto dep0_out_layout = deps[0].first->get_output_layout();
     auto dep1_out_layout = deps[1].first->get_output_layout();
@@ -85,8 +92,9 @@ select_inst::typed_primitive_inst(network& network, select_node const& node) : p
 
     if (dep0_out_layout.is_dynamic() ||
         dep1_out_layout.is_dynamic() ||
-        dep2_out_layout.is_dynamic())
+        dep2_out_layout.is_dynamic()) {
         return;
+    }
 
     CLDNN_ERROR_LESS_THAN(node.id(),
                                 "Number of inputs",
@@ -135,10 +143,33 @@ select_inst::typed_primitive_inst(network& network, select_node const& node) : p
 
                     CLDNN_ERROR_BOOL(node.id(),
                                         "Sizes equal or broadcast is possible",
-                                        !(current_dim == output_tensor.raw[d] || current_dim == 1),
+                                        current_dim != output_tensor.raw[d] && current_dim != 1,
                                         "Invalid input shapes");
                 }
             }
+        } else if (node.get_primitive()->broadcast_spec.m_type == ov::op::AutoBroadcastType::PDPD) {
+            auto output_pshape = deps[1].first->get_output_layout().get_partial_shape();
+            auto broadcast_spec = node.get_primitive()->broadcast_spec;
+
+            auto check_broadcast = [&](const ov::PartialShape& input_pshape, const char* input_name) {
+                auto spec = broadcast_spec;
+                if (spec.m_axis > 0 &&
+                    input_pshape.rank().is_static() &&
+                    output_pshape.rank().is_static() &&
+                    input_pshape.rank().get_length() == output_pshape.rank().get_length()) {
+                    // Inputs may be pre-aligned to output rank for PDPD; ignore explicit axis in the check.
+                    spec.m_axis = 0;
+                }
+                auto merged = output_pshape;
+                bool ok = ov::PartialShape::broadcast_merge_into(merged, input_pshape, spec);
+                CLDNN_ERROR_BOOL(node.id(),
+                                 std::string(input_name) + " broadcastable to output shape",
+                                 !ok,
+                                 "Invalid input shapes");
+            };
+
+            check_broadcast(deps[2].first->get_output_layout().get_partial_shape(), "Else");
+            check_broadcast(deps[0].first->get_output_layout().get_partial_shape(), "Cond");
         } else {
             CLDNN_ERROR_MESSAGE(node.id(), "Unsupported broadcast_type: " + std::to_string(static_cast<int>(node.get_primitive()->broadcast_spec.m_type)));
         }

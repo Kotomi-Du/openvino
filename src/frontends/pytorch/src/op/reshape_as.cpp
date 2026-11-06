@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,10 +7,7 @@
 #include "openvino/op/shape_of.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 OutputVector translate_reshape_as(const NodeContext& context) {
     num_inputs_check(context, 2, 2);
@@ -20,7 +17,4 @@ OutputVector translate_reshape_as(const NodeContext& context) {
     return {context.mark_node(std::make_shared<ov::op::v1::Reshape>(input_tensor, desired_shape, false))};
 };
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

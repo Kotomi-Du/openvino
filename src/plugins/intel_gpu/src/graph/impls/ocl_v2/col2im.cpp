@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -38,11 +38,7 @@ bool check_col2im_contain_batch(const kernel_impl_params& params) {
 
     // Check input size L which is the total number of blocks : product from d=1
     // to 2 of origin size
-    if (input_layout.spatial(1) == 1 && input_layout.spatial(1) != static_cast<tensor::value_type>(orig_size[0] * orig_size[1])) {
-        return false;
-    }
-
-    return true;
+    return input_layout.spatial(1) != 1 || input_layout.spatial(1) == static_cast<tensor::value_type>(orig_size[0] * orig_size[1]);
 }
 
 class Col2ImGenerator : public KernelGenerator {

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -74,8 +74,8 @@ void sort_and_keep_n_items(std::vector<proposal_t>& proposals, size_t n) {
 
 roi_t gen_bbox(const proposal_inst::anchor& box,
                const delta_t& delta,
-               int anchor_shift_x,
-               int anchor_shift_y,
+               int64_t anchor_shift_x,
+               int64_t anchor_shift_y,
                int img_w,
                int img_h,
                float coordinates_offset,
@@ -135,7 +135,7 @@ std::vector<roi_t> perform_nms(const std::vector<proposal_t>& proposals,
 
         bool overlaps = std::any_of(res.begin(), res.end(), [&](const roi_t& res_bbox) {
             bool intersecting =
-                (bbox.x0 < res_bbox.x1) & (res_bbox.x0 < bbox.x1) & (bbox.y0 < res_bbox.y1) & (res_bbox.y0 < bbox.y1);
+                (bbox.x0 < res_bbox.x1) && (res_bbox.x0 < bbox.x1) && (bbox.y0 < res_bbox.y1) && (res_bbox.y0 < bbox.y1);
             float overlap = 0.0f;
             if (intersecting) {
                 const float x0 = std::max(bbox.x0, res_bbox.x0);
@@ -159,8 +159,9 @@ std::vector<roi_t> perform_nms(const std::vector<proposal_t>& proposals,
 
         if (!overlaps) {
             res.push_back(bbox);
-            if (res.size() == top_n)
+            if (res.size() == top_n) {
                 break;
+            }
         }
     }
 
@@ -279,25 +280,25 @@ struct proposal_impl : typed_primitive_impl<proposal> {
 
         // feat map sizes
         const auto& score_layout = cls_scores->get_layout();
-        int fm_h = score_layout.spatial(1);
-        int fm_w = score_layout.spatial(0);
+        int64_t fm_h = score_layout.spatial(1);
+        int64_t fm_w = score_layout.spatial(0);
 
-        int fm_sz = fm_w * fm_h;
+        int64_t fm_sz = fm_w * fm_h;
 
         mem_lock<dtype, mem_lock_type::read> cls_scores_ptr{cls_scores, stream};
         mem_lock<dtype, mem_lock_type::read> bbox_pred_ptr{std::move(bbox_pred), stream};
         const dtype* cls_scores_mem = cls_scores_ptr.data();
         const dtype* bbox_pred_mem = bbox_pred_ptr.data();
 
-        for (int n = 0; n < score_layout.batch(); n++) {
+        for (int64_t n = 0; n < score_layout.batch(); n++) {
             std::vector<proposal_t> sorted_proposals_confidence;
             size_t num_proposals = fm_h * fm_w * anchors_num;
             sorted_proposals_confidence.reserve(num_proposals);
-            for (int y = 0; y < fm_h; ++y) {
-                for (int x = 0; x < fm_w; ++x) {
-                    const int anchor_shift_x = (swap_xy ? y : x) * primitive->feature_stride;
-                    const int anchor_shift_y = (swap_xy ? x : y) * primitive->feature_stride;
-                    const int location_index = y * fm_w + x;
+            for (int64_t y = 0; y < fm_h; ++y) {
+                for (int64_t x = 0; x < fm_w; ++x) {
+                    const int64_t anchor_shift_x = (swap_xy ? y : x) * primitive->feature_stride;
+                    const int64_t anchor_shift_y = (swap_xy ? x : y) * primitive->feature_stride;
+                    const int64_t location_index = y * fm_w + x;
 
                     // we assume proposals are grouped by window location
                     for (unsigned int anchor_index = 0; anchor_index < anchors_num; anchor_index++) {
@@ -381,8 +382,9 @@ struct proposal_impl : typed_primitive_impl<proposal> {
                 float_write_helper(top_data + 5 * i + 2, 0.0f);
                 float_write_helper(top_data + 5 * i + 3, 0.0f);
                 float_write_helper(top_data + 5 * i + 4, 0.0f);
-                if (top_data_prob != nullptr)
+                if (top_data_prob != nullptr) {
                     float_write_helper(top_data_prob + i, 0.0f);
+                }
             }
         }
     }
@@ -404,8 +406,9 @@ struct proposal_impl : typed_primitive_impl<proposal> {
         }
 
         if (instance.dep_memory(proposal_inst::cls_scores_index).get_layout().data_type !=
-            instance.dep_memory(proposal_inst::bbox_pred_index).get_layout().data_type)
+            instance.dep_memory(proposal_inst::bbox_pred_index).get_layout().data_type) {
             throw std::runtime_error("clDNN: proposal primitive doesn't support mixed bbox and scores types");
+        }
 
         if (instance.dependencies().size() == 4) {
             auto proposal_probabilities = instance.dep_memory_ptr(proposal_inst::proposal_probabilities_out);

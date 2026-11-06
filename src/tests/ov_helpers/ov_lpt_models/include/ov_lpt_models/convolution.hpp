@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -62,8 +62,7 @@ public:
         std::shared_ptr<ov::opset1::Constant> weights,
         const ov::builder::subgraph::FakeQuantizeOnWeights fakeQuantizeOnWeights,
         const ov::element::Type precisionAfterOperation,
-        const ov::builder::subgraph::DequantizationOperations& dequantizationAfter,
-        const ov::element::Type precisionAfterDequantization);
+        const ov::builder::subgraph::DequantizationOperations& dequantizationAfter);
 
     static std::shared_ptr<ov::Model> get(
         const ov::Shape& inputShape,

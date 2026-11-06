@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,7 +18,7 @@ struct adaptive_pooling_params : public base_params {
 class AdaptivePoolingRef : public KernelBaseOpenCL {
 public:
     AdaptivePoolingRef() : KernelBaseOpenCL("adaptive_pooling_gpu_ref") {}
-    ~AdaptivePoolingRef() = default;
+    ~AdaptivePoolingRef() override = default;
 
     using DispatchData = CommonDispatchData;
 

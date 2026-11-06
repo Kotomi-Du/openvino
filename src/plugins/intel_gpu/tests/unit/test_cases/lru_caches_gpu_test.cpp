@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -51,6 +51,30 @@ TEST(lru_cache, basic_data_type)
     for (auto key : ca.get_all_keys()) {
         ASSERT_EQ(key, expected_value[idx--].first);
     }
+}
+
+TEST(lru_cache, erase)
+{
+    const size_t cap = 4;
+    LruCache<int, int> ca(cap);
+
+    for (int i = 1; i <= static_cast<int>(cap); i++) {
+        ca.add(i, i + 10);
+    }
+    ASSERT_EQ(ca.get_all_keys(), std::vector<int>({4, 3, 2, 1}));
+
+    ASSERT_FALSE(ca.erase(cap + 1));
+    ASSERT_EQ(ca.size(), cap);
+
+    ASSERT_TRUE(ca.erase(3));
+    ASSERT_FALSE(ca.has(3));
+    ASSERT_EQ(ca.size(), cap - 1);
+    ASSERT_EQ(ca.get_all_keys(), std::vector<int>({4, 2, 1}));
+
+    // Erasing an entry which has just been touched leaves the order of the remaining ones untouched
+    ca.get(1);
+    ASSERT_TRUE(ca.erase(1));
+    ASSERT_EQ(ca.get_all_keys(), std::vector<int>({4, 2}));
 }
 
 class lru_cache_test_data {
@@ -125,9 +149,11 @@ TEST(lru_cache, custom_data_type) {
 }
 
 namespace {
-struct ImplHasher {
-    size_t operator()(const kernel_impl_params &k) const {
-        return k.hash();
+// Force all entries to collide so the test exercises the cache's collision-handling
+// logic regardless of the std::hash implementation (which is not portable across compilers).
+struct CollidingImplHasher {
+    size_t operator()(const kernel_impl_params& /*k*/) const {
+        return 42;
     }
 };
 }  // namespace
@@ -141,7 +167,7 @@ TEST(lru_cache, collisions) {
     auto shape_of1_prim = std::make_shared<shape_of>("shape_of1", input_info("input1"), data_types::i64);
     auto shape_of2_prim = std::make_shared<shape_of>("shape_of2", input_info("input2"), data_types::i64);
 
-    using ImplementationsCache = cldnn::LruCacheThreadSafe<kernel_impl_params, std::shared_ptr<primitive_impl>, ImplHasher>;
+    using ImplementationsCache = cldnn::LruCacheThreadSafe<kernel_impl_params, std::shared_ptr<primitive_impl>, CollidingImplHasher>;
     ImplementationsCache cache(0);
 
     program prog(get_test_engine());
@@ -153,7 +179,7 @@ TEST(lru_cache, collisions) {
     program_wrapper::add_connection(prog, input2_node, shape_of2_node);
 
     auto params1 = *shape_of1_node.get_kernel_impl_params();
-    auto params2 = *shape_of1_node.get_kernel_impl_params();
+    auto params2 = *shape_of2_node.get_kernel_impl_params();
 
     auto out_layouts1 = shape_of_inst::calc_output_layouts<ov::PartialShape>(shape_of1_node, params1);
     auto out_layouts2 = shape_of_inst::calc_output_layouts<ov::PartialShape>(shape_of2_node, params2);
@@ -167,15 +193,12 @@ TEST(lru_cache, collisions) {
     auto impl1 = shape_of1_node.type()->create_impl(shape_of1_node);
     auto impl2 = shape_of2_node.type()->create_impl(shape_of2_node);
 
-    // Ensure that hashes for primitive, input layouts and full impl params are same due to collision
-    ASSERT_EQ(shape_of1_prim->hash(), shape_of2_prim->hash());
-    ASSERT_EQ(l1.hash(), l2.hash());
-    ASSERT_EQ(shape_of1_node.get_kernel_impl_params()->hash(), shape_of2_node.get_kernel_impl_params()->hash());
-    ASSERT_FALSE(shape_of1_node.get_kernel_impl_params() == shape_of2_node.get_kernel_impl_params());
+    // Params must differ so the cache stores both despite the forced hash collision
+    ASSERT_FALSE(*shape_of1_node.get_kernel_impl_params() == *shape_of2_node.get_kernel_impl_params());
 
     cache.add(*shape_of1_node.get_kernel_impl_params(), impl1->clone());
     cache.add(*shape_of2_node.get_kernel_impl_params(), impl2->clone());
 
-    // But cache still contains both entries, as input layouts are differenet - thus kernels are different
+    // Cache still contains both entries, as input layouts are different — thus kernels are different
     ASSERT_EQ(cache.size(), 2);
 }

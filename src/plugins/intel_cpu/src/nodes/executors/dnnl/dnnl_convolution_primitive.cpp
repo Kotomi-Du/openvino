@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cassert>
 #include <common/c_types_map.hpp>
+#include <common/primitive_attr.hpp>
+#include <common/primitive_hashing.hpp>
 #include <common/primitive_hashing_utils.hpp>
 #include <common/utils.hpp>
 #include <cstddef>
@@ -23,7 +25,6 @@
 #include <utility>
 #include <vector>
 
-#include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu_types.h"
 #include "dnnl_extension_utils.h"
 #include "dnnl_postops_composer.h"
@@ -39,12 +40,15 @@
 #include "nodes/executors/executor.hpp"
 #include "nodes/executors/fullyconnected_config.hpp"
 #include "nodes/executors/graph_emitter.hpp"
+#include "nodes/executors/implementation_utils.hpp"
 #include "nodes/executors/memory_arguments.hpp"
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/except.hpp"
 #include "openvino/core/type/element_type.hpp"
+#include "openvino/runtime/system_conf.hpp"
 #include "post_ops.hpp"
 #include "shape_inference/custom/convolution.hpp"
+#include "thread_pool_imp.hpp"
 #include "utils/debug_capabilities.h"
 #include "utils/general_utils.h"
 
@@ -96,7 +100,7 @@ DnnlConvolutionPrimitive::IntermediateReorders::IntermediateReorders(const Key& 
             createIfNotEqual(key.dst->getDnnlDesc(), primDesc.dst_desc(), AllocateMemoryFor::Dst, engine);
     }
 
-    if (key.nonConstantWeights && key.wei->getDnnlDesc() != primDesc.weights_desc()) {
+    if (!key.constantWeights && key.wei->getDnnlDesc() != primDesc.weights_desc()) {
         m_inputReorders[DNNL_ARG_WEIGHTS] =
             createIfNotEqual(key.wei->getDnnlDesc(), primDesc.weights_desc(), AllocateMemoryFor::Dst, engine);
     }
@@ -140,7 +144,7 @@ size_t DnnlConvolutionPrimitive::Key::hash() const {
 
     seed = hash_combine(seed, get_attr_hash(*attr.get()));
     seed = hash_combine(seed, fcSemantic);
-    seed = hash_combine(seed, nonConstantWeights);
+    seed = hash_combine(seed, constantWeights);
 
     return seed;
 }
@@ -166,7 +170,7 @@ bool DnnlConvolutionPrimitive::Key::operator==(const Key& rhs) const {
 
     result = result && *attr.get() == *rhs.attr.get();
     result = result && fcSemantic == rhs.fcSemantic;
-    result = result && nonConstantWeights == rhs.nonConstantWeights;
+    result = result && constantWeights == rhs.constantWeights;
 
     return result;
 }
@@ -174,7 +178,7 @@ bool DnnlConvolutionPrimitive::Key::operator==(const Key& rhs) const {
 // make a fake shape: N, C, W
 template <typename T>
 static std::vector<T> normalizeDims(const std::vector<T>& dims) {
-    assert(one_of(static_cast<int>(dims.size()), 2, 3));
+    assert(any_of(static_cast<int>(dims.size()), 2, 3));
 
     if (dims.size() == 3) {
         return {dims[0], dims[2], dims[1]};
@@ -288,8 +292,8 @@ static std::tuple<primitive_desc, size_t> selectPrimitiveDescWithMultipleAttribu
 
     struct PrimitiveDescWithPriority {
         dnnl::primitive_desc prim_desc;
-        size_t attrId;
-        size_t priority;
+        size_t attrId = 0UL;
+        size_t priority = 0UL;
     };
 
     PrimitiveDescWithPriority prim_desc_w_priority{dnnl::primitive_desc(), 0, implPriorities.size()};
@@ -401,7 +405,6 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
                                                   paddingR,
                                                   attr,
                                                   engine);
-            return std::move(prim_desc);
         }
 
         for (auto preferredImplType : implPriorities) {
@@ -452,26 +455,44 @@ static std::vector<DnnlPrimitiveAttrs> createPrimitiveAttrs(const ConvAttrs& att
     const auto& outputDims = attrs.fcSemantic ? normalizeDims(originalOutputDims) : originalOutputDims;
 
     auto isINT8 =
-        one_of(srcDesc->getPrecision(), ov::element::u8, ov::element::i8) && weiDesc->getPrecision() == ov::element::i8;
+        any_of(srcDesc->getPrecision(), ov::element::u8, ov::element::i8) && weiDesc->getPrecision() == ov::element::i8;
     auto outputDataType = DnnlExtensionUtils::ElementTypeToDataType(dstDesc->getPrecision());
 
     const auto weightScaleMask = attrs.isGrouped ? 3 : 1 << 0;
     constexpr int channelDimIdx = 1;
 
+#if defined(OPENVINO_ARCH_ARM) || defined(OPENVINO_ARCH_ARM64)
+    // By default fp16 convolution ACL kernels accumulate into fp32, which makes oneDNN fall back from
+    // the fast indirect-gemm ACL implementation to the slower im2col gemm
+    // Requesting the relaxed accumulation mode for f16:f16:f16 convolutions lets oneDNN keep f16 accumulation
+    const bool relaxedF16Acc = srcDesc->getPrecision() == ov::element::f16 &&
+                               weiDesc->getPrecision() == ov::element::f16 &&
+                               dstDesc->getPrecision() == ov::element::f16;
+    auto applyRelaxedF16Accumulation = [&relaxedF16Acc](auto& primitiveAttrs) {
+        if (relaxedF16Acc) {
+            primitiveAttrs.attr.set_accumulation_mode(dnnl::accumulation_mode::relaxed);
+        }
+    };
+#else
+    auto applyRelaxedF16Accumulation = [](auto&) {};
+#endif
+
     if (attrs.fcSemantic) {
         // use original post ops and zero points in case if used as FC executor
-        return {DnnlPostOpsComposer(attrs.postOps,
-                                    context->getEngine(),
-                                    outputDims,
-                                    channelDimIdx,
-                                    isINT8,
-                                    weightScaleMask,
-                                    memory,
-                                    outputDataType,
-                                    attrs.dqScales,
-                                    false,
-                                    false)
-                    .compose()};
+        auto fcAttrs = DnnlPostOpsComposer(attrs.postOps,
+                                           context->getEngine(),
+                                           outputDims,
+                                           channelDimIdx,
+                                           isINT8,
+                                           weightScaleMask,
+                                           memory,
+                                           outputDataType,
+                                           attrs.dqScales,
+                                           PostOpsMode::Original,
+                                           false)
+                           .compose();
+        applyRelaxedF16Accumulation(fcAttrs);
+        return {fcAttrs};
     }
 
     DnnlPostOpsComposer legacyPostOpsLegacyZeroPoints(attrs.postOps,
@@ -483,10 +504,11 @@ static std::vector<DnnlPrimitiveAttrs> createPrimitiveAttrs(const ConvAttrs& att
                                                       memory,
                                                       outputDataType,
                                                       attrs.dqScales,
-                                                      true,
+                                                      PostOpsMode::Legacy,
                                                       true);
     // first try to compose using legacy post ops
     auto legacyCompose = legacyPostOpsLegacyZeroPoints.compose();
+    applyRelaxedF16Accumulation(legacyCompose);
 
     // check if legacy compose is enough
     auto attrContainsPostOp = [](const dnnl::primitive_attr& attr, const dnnl::impl::primitive_kind_t kind) -> bool {
@@ -513,7 +535,7 @@ static std::vector<DnnlPrimitiveAttrs> createPrimitiveAttrs(const ConvAttrs& att
     }
 
     // @todo avoid extra step of creating config to get the brgconv availability
-    auto config = GraphEmitter<ConvAttrs>::createConfig(memory, attrs);
+    auto config = createConfig(memory, attrs);
     if (!DnnlConvolutionPrimitive::isBrgConvAvailable(config)) {
         DEBUG_LOG("Brgconv is not available. Skip extra attribute");
         return {legacyCompose};
@@ -526,8 +548,7 @@ static std::vector<DnnlPrimitiveAttrs> createPrimitiveAttrs(const ConvAttrs& att
 
     std::vector<DnnlPrimitiveAttrs> attributeVariants{legacyCompose};
 
-    if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_amx) &&
-        attrs.inputZeroPointsType == ZeroPointsType::PerTensor) {
+    if (ov::with_cpu_x86_avx512_core_amx() && attrs.inputZeroPointsType == ZeroPointsType::PerTensor) {
         DnnlPostOpsComposer legacyPostOpsOriginalZeroPoints(attrs.postOps,
                                                             context->getEngine(),
                                                             outputDims,
@@ -537,7 +558,7 @@ static std::vector<DnnlPrimitiveAttrs> createPrimitiveAttrs(const ConvAttrs& att
                                                             memory,
                                                             outputDataType,
                                                             attrs.dqScales,
-                                                            true,
+                                                            PostOpsMode::Legacy,
                                                             false);
         attributeVariants.emplace_back(legacyPostOpsOriginalZeroPoints.compose());
 
@@ -553,9 +574,11 @@ static std::vector<DnnlPrimitiveAttrs> createPrimitiveAttrs(const ConvAttrs& att
                                                           memory,
                                                           outputDataType,
                                                           attrs.dqScales,
-                                                          false,
+                                                          PostOpsMode::Original,
                                                           false);
-    attributeVariants.emplace_back(originalPostOpsOriginalZeroPoints.compose());
+    auto originalZeroPointsCompose = originalPostOpsOriginalZeroPoints.compose();
+    applyRelaxedF16Accumulation(originalZeroPointsCompose);
+    attributeVariants.emplace_back(originalZeroPointsCompose);
 
     return attributeVariants;
 }
@@ -758,12 +781,14 @@ DnnlShapeAgnosticDataPtr DnnlConvolutionPrimitive::createShapeAgnosticData(const
     OPENVINO_ASSERT(!cacheWeightsWithUndefData,
                     "dnnl convolution weights caching for dynamic shapes is not implemented");
 
+    const bool hasBias = !memory.at(ARG_BIAS)->getDesc().empty();
+
     ConvAttrs attrs{{1},
                     {0},
                     {0},
                     {0},
                     AutoPaddingType::None,
-                    fcAttrs.withBias,
+                    hasBias,
                     fcAttrs.weightsNonTransposed,
                     false,
                     false,
@@ -856,13 +881,14 @@ std::shared_ptr<DnnlConvolutionPrimitive> DnnlConvolutionPrimitive::create(
                           paddingR,
                           shapeAgnosticData->m_primAttrs.attr,
                           attrs.fcSemantic,
-                          attrs.nonConstantWeights};
+                          attrs.constantWeights};
 
     const auto defaultImplType = shapeAgnosticData->m_implType;
 
     auto builder = [&context, defaultImplType](const Key& dnnlKey) {
         return std::make_shared<DnnlConvolutionPrimitive>(dnnlKey,
                                                           context->getEngine(),
+                                                          context->getThreadPool(),
                                                           context->getImplPriorities(),
                                                           defaultImplType);
     };
@@ -877,8 +903,17 @@ std::shared_ptr<DnnlConvolutionPrimitive> DnnlConvolutionPrimitive::create(
 
 DnnlMemoryDescPtr DnnlConvolutionPrimitive::makeTransposedWeightDescriptor(const DnnlMemoryDescPtr& srcDesc,
                                                                            const DnnlMemoryDescPtr& dstDesc,
-                                                                           bool weightsNonTransposed) {
-    return DnnlFCPrimitive::makeTransposedWeightDescriptor(srcDesc, dstDesc, weightsNonTransposed);
+                                                                           const ConvAttrs& attrs) {
+    FCAttrs fcAttrs{};
+    fcAttrs.weightsNonTransposed = attrs.weightsNonTransposed;
+
+    return DnnlFCPrimitive::makeTransposedWeightDescriptor(srcDesc, dstDesc, fcAttrs);
+}
+
+DnnlMemoryDescPtr DnnlConvolutionPrimitive::makeTransposedWeightDescriptor(const DnnlMemoryDescPtr& srcDesc,
+                                                                           const DnnlMemoryDescPtr& dstDesc,
+                                                                           const FCAttrs& attrs) {
+    return DnnlFCPrimitive::makeTransposedWeightDescriptor(srcDesc, dstDesc, attrs);
 }
 
 std::tuple<size_t, size_t, size_t, size_t> DnnlConvolutionPrimitive::getChannelParams(const ConvConfig& config) {
@@ -896,31 +931,28 @@ std::tuple<size_t, size_t, size_t, size_t> DnnlConvolutionPrimitive::getChannelP
 
 bool DnnlConvolutionPrimitive::isJitPlanarAvailable(const ConvConfig& config) {
     // Only apply this heuristic logic on FP32 IR. IC=1, OC=1 would disable brgconv on avx2.
-    const bool isAvx2FP32 = !dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core) &&
-                            dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx2) && !config.attrs.isGraphQuantized;
+    const bool isAvx2FP32 =
+        !ov::with_cpu_x86_avx512_core() && ov::with_cpu_x86_avx2() && !config.attrs.isGraphQuantized;
 
     const auto [groupNum, groupIC, IC, groupOC] = getChannelParams(config);
 
-    return (IC == 1 && groupOC * groupNum == 1) && isAvx2FP32;
+    return all_of(1U, IC, groupOC * groupNum) && isAvx2FP32;
 }
 
 bool DnnlConvolutionPrimitive::isBrgConvAvailable(const ConvConfig& config) {
     // When avx2 brgconv heuristic case,  disable brgconv to WA the regression.
-    const bool isBrgConvAvailable =
-        dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx2) && !isJitPlanarAvailable(config);
+    const bool isBrgConvAvailable = ov::with_cpu_x86_avx2() && !isJitPlanarAvailable(config);
 
     return isBrgConvAvailable;
 }
 
 bool DnnlConvolutionPrimitive::isNspcAvailable(const ConvConfig& config) {
-    using impl::cpu::x64::mayiuse;
-
     // do not use in non-quantized networks until it is enforced externally
     if (!config.attrs.isGraphQuantized) {
         return false;
         // @todo master implementation had the following logic as well:
         //     auto predicate = [](memory::format_tag tag) {
-        //         return one_of(tag, memory::format_tag::nwc, memory::format_tag::nhwc, memory::format_tag::ndhwc);
+        //         return any_of(tag, memory::format_tag::nwc, memory::format_tag::nhwc, memory::format_tag::ndhwc);
         //     };
         //     if (std::none_of(inputMemoryFormatsFilter.begin(), inputMemoryFormatsFilter.end(), predicate)) {
         //         return false;
@@ -967,7 +999,7 @@ bool DnnlConvolutionPrimitive::isNspcAvailable(const ConvConfig& config) {
 
     // if the activation field size is 1x1 the avx512 1x1 nspc convolution pollutes caches so that the layer after
     // the convolution performs slow
-    if (mayiuse(impl::cpu::x64::avx512_core) && is1x1) {
+    if (ov::with_cpu_x86_avx512_core() && is1x1) {
         auto end = inpDims.rbegin();
         std::advance(end, spatialRank);
         if (std::all_of(inpDims.rbegin(), end, [](size_t x) {
@@ -980,7 +1012,7 @@ bool DnnlConvolutionPrimitive::isNspcAvailable(const ConvConfig& config) {
     unsigned thresholdNumChannels = 128U;  // for avx and below
     if (is1x1) {
         thresholdNumChannels = 2048U;
-    } else if (mayiuse(impl::cpu::x64::avx512_core)) {
+    } else if (ov::with_cpu_x86_avx512_core()) {
         thresholdNumChannels = 512U;
     }
 
@@ -989,7 +1021,7 @@ bool DnnlConvolutionPrimitive::isNspcAvailable(const ConvConfig& config) {
         return false;
     }
 
-    if (!mayiuse(impl::cpu::x64::avx)) {
+    if (!ov::with_cpu_x86_avx()) {
         // SSE41 nspc convolutions do not support ic and oc tails yet
         // the blocked implementation is faster than gemm
         if ((IC % 8) || (OC % 8)) {
@@ -1002,9 +1034,10 @@ bool DnnlConvolutionPrimitive::isNspcAvailable(const ConvConfig& config) {
 
 DnnlConvolutionPrimitive::DnnlConvolutionPrimitive(const Key& key,
                                                    const dnnl::engine& engine,
+                                                   const std::shared_ptr<ThreadPool>& threadPool,
                                                    const std::vector<impl_desc_type>& implPriorities,
                                                    const impl_desc_type defaultImplType)
-    : m_stream(dnnl::stream(engine)),
+    : m_stream(make_stream(engine, threadPool)),
       m_primDesc(createPrimitiveDesc(key.src->getDnnlDesc(),
                                      key.wei->getDnnlDesc(),
                                      key.bias->getDnnlDesc(),

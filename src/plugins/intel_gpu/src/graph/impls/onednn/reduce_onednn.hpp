@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -67,6 +67,7 @@ struct ReduceImplementationManager : public ImplementationManager {
         static const std::vector<format::type> supported_formats = {
             format::any,
             format::bfyx,
+            format::byxf,
             format::bfzyx,
             format::bfwzyx,
             format::b_fs_yx_fsv16,
@@ -100,7 +101,7 @@ struct ReduceImplementationManager : public ImplementationManager {
             case reduce_mode::l1:
             case reduce_mode::l2:
                 // modes have a limitation of data type
-                if (one_of(in_dt, {data_types::f16, data_types::f32}))
+                if (one_of(in_dt, {data_types::f16, data_types::f32, data_types::bf16}))
                     break;
             default:
                 return false;
@@ -111,16 +112,9 @@ struct ReduceImplementationManager : public ImplementationManager {
             return false;
         }
 
-        // oneDNN reduction selects ref kernel for simple formats(bfyx..) which has perf regression with a decent tensor size.
-        if (format::is_simple_data_format(in_layout.format))
-            return false;
-
         // Onednn reduction does NOT support reordering of unreduced-axes.
         // Currently, an Onednn reduce layer which contains reduction of blocked axes(b-f) is expected to select planar format.
-        if (reduce_prim->keep_dims == false && is_reduce_blocked_axes(node))
-            return false;
-
-        return true;
+        return reduce_prim->keep_dims || !is_reduce_blocked_axes(node);
     }
 };
 

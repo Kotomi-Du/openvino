@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -51,7 +51,7 @@ std::shared_ptr<ov::Model> FuseSubtractToFakeQuantizeFunction::get(
 
     const auto fakeQuantize2 = makeFakeQuantize(split->output(1), ov::element::f32, fqOnData2);
     fakeQuantize2->set_friendly_name("fakeQuantize2");
-    const auto lastDequantization2 = makeDequantization(fakeQuantize2, dequantization);
+    const auto lastDequantization2 = makeDequantization(fakeQuantize2, dequantization2);
     lastDequantization2->set_friendly_name("output2");
 
     ov::ResultVector results{

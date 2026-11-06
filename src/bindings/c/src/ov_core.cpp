@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "openvino/c/ov_core.h"
@@ -209,7 +209,7 @@ ov_status_e ov_core_add_extension(const ov_core_t* core, const char* path) {
         return ov_status_e::INVALID_C_PARAM;
     }
     try {
-        core->object->add_extension(path);
+        core->object->add_extension(ov::util::make_path(path));
     }
     CATCH_OV_EXCEPTIONS
     return ov_status_e::OK;
@@ -236,6 +236,85 @@ ov_status_e ov_core_set_property(const ov_core_t* core, const char* device_name,
         } else {
             core->object->set_property(property);
         }
+    }
+    CATCH_OV_EXCEPTIONS
+    return ov_status_e::OK;
+}
+
+ov_status_e ov_core_set_properties(const ov_core_t* core,
+                                   const char* device_name,
+                                   const size_t num_properties,
+                                   const ov_property_t* properties) {
+    if (!core || !properties || num_properties == 0) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    try {
+        ov::AnyMap property = ov_build_property_map(properties, num_properties);
+        if (device_name) {
+            core->object->set_property(device_name, property);
+        } else {
+            core->object->set_property(property);
+        }
+    }
+    CATCH_OV_EXCEPTIONS
+    return ov_status_e::OK;
+}
+
+ov_status_e ov_core_compile_model_props(const ov_core_t* core,
+                                        const ov_model_t* model,
+                                        const char* device_name,
+                                        const size_t num_properties,
+                                        const ov_property_t* properties,
+                                        ov_compiled_model_t** compiled_model) {
+    if (!core || !model || !compiled_model) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    if (num_properties > 0 && !properties) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    try {
+        ov::AnyMap property = ov_build_property_map(properties, num_properties);
+        std::string dev_name = "";
+        ov::CompiledModel object;
+        if (device_name) {
+            dev_name = device_name;
+            object = core->object->compile_model(model->object, dev_name, property);
+        } else {
+            object = core->object->compile_model(model->object, property);
+        }
+        auto _compiled_model = std::make_unique<ov_compiled_model_t>();
+        _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
+        *compiled_model = _compiled_model.release();
+    }
+    CATCH_OV_EXCEPTIONS
+    return ov_status_e::OK;
+}
+
+ov_status_e ov_core_compile_model_from_file_props(const ov_core_t* core,
+                                                  const char* model_path,
+                                                  const char* device_name,
+                                                  const size_t num_properties,
+                                                  const ov_property_t* properties,
+                                                  ov_compiled_model_t** compiled_model) {
+    if (!core || !model_path || !compiled_model) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    if (num_properties > 0 && !properties) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    try {
+        ov::AnyMap property = ov_build_property_map(properties, num_properties);
+        ov::CompiledModel object;
+        std::string dev_name = "";
+        if (device_name) {
+            dev_name = device_name;
+            object = core->object->compile_model(model_path, dev_name, property);
+        } else {
+            object = core->object->compile_model(model_path, property);
+        }
+        auto _compiled_model = std::make_unique<ov_compiled_model_t>();
+        _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
+        *compiled_model = _compiled_model.release();
     }
     CATCH_OV_EXCEPTIONS
     return ov_status_e::OK;
@@ -297,9 +376,9 @@ ov_status_e ov_core_import_model(const ov_core_t* core,
         return ov_status_e::INVALID_C_PARAM;
     }
     try {
-        mem_istream model_stream(content, content_size);
+        const ov::Tensor model_blob(ov::element::u8, ov::Shape{content_size}, content);
         std::unique_ptr<ov_compiled_model_t> _compiled_model(new ov_compiled_model_t);
-        auto object = core->object->import_model(model_stream, device_name);
+        auto object = core->object->import_model(model_blob, device_name);
         _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
         *compiled_model = _compiled_model.release();
     }
@@ -357,16 +436,17 @@ void ov_core_versions_free(ov_core_version_list_t* versions) {
 
 #ifdef OPENVINO_ENABLE_UNICODE_PATH_SUPPORT
 ov_status_e ov_core_create_with_config_unicode(const wchar_t* xml_config_file_ws, ov_core_t** core) {
-    if (!xml_config_file_ws) {
+    if (!core || !xml_config_file_ws) {
         return ov_status_e::INVALID_C_PARAM;
     }
 
-    std::string xml_config_file;
     try {
-        xml_config_file = ov::util::wstring_to_string(std::wstring(xml_config_file_ws));
+        auto _core = std::make_unique<ov_core_t>();
+        _core->object = std::make_shared<ov::Core>(ov::util::make_path(xml_config_file_ws));
+        *core = _core.release();
     }
     CATCH_OV_EXCEPTIONS
-    return ov_core_create_with_config(xml_config_file.c_str(), core);
+    return ov_status_e::OK;
 }
 
 ov_status_e ov_core_read_model_unicode(const ov_core_t* core,
@@ -401,7 +481,6 @@ ov_status_e ov_core_compile_model_from_file_unicode(const ov_core_t* core,
     }
 
     try {
-        std::string model_path = ov::util::wstring_to_string(std::wstring(model_path_ws));
         ov::AnyMap property = {};
         size_t property_size = property_args_size / 2;
         va_list args_ptr;
@@ -415,11 +494,41 @@ ov_status_e ov_core_compile_model_from_file_unicode(const ov_core_t* core,
         std::string dev_name = "";
         if (device_name) {
             dev_name = device_name;
-            object = core->object->compile_model(model_path, dev_name, property);
+            object = core->object->compile_model(model_path_ws, dev_name, property);
         } else {
-            object = core->object->compile_model(model_path, property);
+            object = core->object->compile_model(model_path_ws, property);
         }
         std::unique_ptr<ov_compiled_model_t> _compiled_model(new ov_compiled_model_t);
+        _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
+        *compiled_model = _compiled_model.release();
+    }
+    CATCH_OV_EXCEPTIONS
+    return ov_status_e::OK;
+}
+
+ov_status_e ov_core_compile_model_from_file_unicode_props(const ov_core_t* core,
+                                                          const wchar_t* model_path_ws,
+                                                          const char* device_name,
+                                                          const size_t num_properties,
+                                                          const ov_property_t* properties,
+                                                          ov_compiled_model_t** compiled_model) {
+    if (!core || !model_path_ws || !compiled_model) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    if (num_properties > 0 && !properties) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    try {
+        ov::AnyMap property = ov_build_property_map(properties, num_properties);
+        ov::CompiledModel object;
+        std::string dev_name = "";
+        if (device_name) {
+            dev_name = device_name;
+            object = core->object->compile_model(model_path_ws, dev_name, property);
+        } else {
+            object = core->object->compile_model(model_path_ws, property);
+        }
+        auto _compiled_model = std::make_unique<ov_compiled_model_t>();
         _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
         *compiled_model = _compiled_model.release();
     }
@@ -450,6 +559,29 @@ ov_status_e ov_core_compile_model_with_context(const ov_core_t* core,
 
         ov::CompiledModel object = core->object->compile_model(model->object, *context->object, property);
         std::unique_ptr<ov_compiled_model_t> _compiled_model(new ov_compiled_model_t);
+        _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
+        *compiled_model = _compiled_model.release();
+    }
+    CATCH_OV_EXCEPTIONS
+    return ov_status_e::OK;
+}
+
+ov_status_e ov_core_compile_model_with_context_props(const ov_core_t* core,
+                                                     const ov_model_t* model,
+                                                     const ov_remote_context_t* context,
+                                                     const size_t num_properties,
+                                                     const ov_property_t* properties,
+                                                     ov_compiled_model_t** compiled_model) {
+    if (!core || !model || !context || !compiled_model) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    if (num_properties > 0 && !properties) {
+        return ov_status_e::INVALID_C_PARAM;
+    }
+    try {
+        ov::AnyMap property = ov_build_property_map(properties, num_properties);
+        ov::CompiledModel object = core->object->compile_model(model->object, *context->object, property);
+        auto _compiled_model = std::make_unique<ov_compiled_model_t>();
         _compiled_model->object = std::make_shared<ov::CompiledModel>(std::move(object));
         *compiled_model = _compiled_model.release();
     }

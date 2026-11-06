@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -47,8 +47,7 @@ static void CreateLoraSubgraphOp(ProgramBuilder& p, const std::shared_ptr<Lora>&
 
 static void CreateLoraSubgraphFusedOp(ProgramBuilder& p, const std::shared_ptr<op::LoraSubgraphFused>& op) {
     validate_inputs_count(op, {8, 11});
-    // TODO: Detect transposing in LoRASubgraphHorizontalFusion and forward to primitive
-    LoraSubgraphImpl(p, op, true);
+    LoraSubgraphImpl(p, op, op->is_transposed_states());
 }
 
 REGISTER_FACTORY_IMPL(internal, LoraSubgraph);

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,10 +8,7 @@
 #include "openvino/frontend/exception.hpp"
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
+namespace ov::frontend::onnx::ai_onnx {
 namespace opset_1 {
 ov::OutputVector roi_align(const ov::frontend::onnx::Node& node) {
     const auto inputs = node.get_ov_inputs();
@@ -79,7 +76,4 @@ ov::OutputVector roi_align(const ov::frontend::onnx::Node& node) {
 }
 ONNX_OP("RoiAlign", OPSET_SINCE(16), ai_onnx::opset_16::roi_align);
 }  // namespace opset_16
-}  // namespace ai_onnx
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::ai_onnx

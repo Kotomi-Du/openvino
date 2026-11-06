@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,7 +25,7 @@ class ExperimentalDetectronDetectionOutputKernelRef : public KernelBaseOpenCL {
 public:
     ExperimentalDetectronDetectionOutputKernelRef() : KernelBaseOpenCL("experimental_detectron_detection_output_ref") {}
 
-    ~ExperimentalDetectronDetectionOutputKernelRef() = default;
+    ~ExperimentalDetectronDetectionOutputKernelRef() override = default;
 
 protected:
     bool Validate(const Params& p) const override;

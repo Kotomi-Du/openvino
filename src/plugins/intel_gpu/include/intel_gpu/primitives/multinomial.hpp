@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #pragma once
@@ -53,8 +53,9 @@ struct multinomial : public primitive_base<multinomial> {
     }
 
     bool operator==(const primitive& rhs) const override {
-        if (!compare_common_params(rhs))
+        if (!compare_common_params(rhs)) {
             return false;
+        }
         const multinomial& rhs_casted = downcast<const multinomial>(rhs);
         return output_data_type == rhs_casted.output_data_type &&
             with_replacement == rhs_casted.with_replacement &&

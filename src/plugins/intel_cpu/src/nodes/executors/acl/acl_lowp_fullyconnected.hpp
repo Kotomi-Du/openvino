@@ -1,8 +1,10 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
+
+#include <vector>
 
 #include "acl_common_executor.hpp"
 #include "acl_fullyconnected_utils.hpp"
@@ -26,19 +28,18 @@ public:
         return impl_desc_type::gemm_acl;
     }
 
-protected:
-    std::shared_ptr<arm_compute::TensorInfo> initTensorInfo(const arm_compute::TensorShape& tensorShape,
-                                                            const arm_compute::DataType& dataType,
-                                                            const arm_compute::DataLayout& dataLayout) override;
-
 private:
     arm_compute::GEMMInfo gemmInfo;
-    arm_compute::WeightFormat expectedWeightFormat;
+    arm_compute::WeightFormat expectedWeightFormat = arm_compute::WeightFormat::UNSPECIFIED;
     arm_compute::TensorInfo weiTensorInfo;
 
     MemoryCPtr packedWeights;
     ACLFCAttrs aclfcAttrs;
     std::vector<float> dequantizationScales;
+
+    std::vector<float> fqInputScale;
+    std::vector<float> fqInputShift;
+    bool hasQuantizedDst = false;
 };
 
 using ACLLowpFullyConnectedExecutorPtr = std::shared_ptr<ACLLowpFullyConnectedExecutor>;

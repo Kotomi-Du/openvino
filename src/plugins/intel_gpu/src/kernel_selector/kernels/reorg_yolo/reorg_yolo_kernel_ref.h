@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -28,7 +28,7 @@ struct reorg_yolo_params : public base_params {
 class ReorgYoloKernelRef : public KernelBaseOpenCL {
 public:
     ReorgYoloKernelRef() : KernelBaseOpenCL("reorg_yolo_gpu_ref") {}
-    virtual ~ReorgYoloKernelRef() {}
+    ~ReorgYoloKernelRef() override = default;
 
     using DispatchData = CommonDispatchData;
     KernelsData GetKernelsData(const Params& params) const override;

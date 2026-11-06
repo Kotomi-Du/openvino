@@ -1,10 +1,12 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include "common_test_utils/test_assertions.hpp"
+#include "functional_test_utils/skip_tests_config.hpp"
+#include "openvino/op/scatter_update.hpp"
 #include "shared_test_classes/base/ov_subgraph.hpp"
 #include "utils/cpu_test_utils.hpp"
-#include "openvino/op/scatter_update.hpp"
 
 using namespace CPUTestUtils;
 
@@ -29,11 +31,8 @@ class ScatterUpdateLayerCPUTest : public testing::WithParamInterface<scatterUpda
                                   public SubgraphBaseTest,
                                   public CPUTestsBase {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<scatterUpdateParams> obj) {
-        ScatterUpdateLayerParams scatterParams;
-        ElementType inputPrecision;
-        ElementType idxPrecision;
-        std::tie(scatterParams, inputPrecision, idxPrecision) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<scatterUpdateParams>& obj) {
+        const auto& [scatterParams, inputPrecision, idxPrecision] = obj.param;
         const auto inputShapes = scatterParams.inputShapes;
         const auto indicesDescr = scatterParams.indicesDescriprion;
         const auto axis = scatterParams.axis;
@@ -60,10 +59,7 @@ public:
 protected:
     void SetUp() override {
         targetDevice = ov::test::utils::DEVICE_CPU;
-        ScatterUpdateLayerParams scatterParams;
-        ElementType inputPrecision;
-        ElementType idxPrecision;
-        std::tie(scatterParams, inputPrecision, idxPrecision) = this->GetParam();
+        const auto& [scatterParams, inputPrecision, idxPrecision] = this->GetParam();
         const auto inputShapes = scatterParams.inputShapes;
         const auto indicesDescr = scatterParams.indicesDescriprion;
         const auto axis = scatterParams.axis;
@@ -79,7 +75,7 @@ protected:
         auto axis_node = ov::op::v0::Constant::create(idxPrecision, {}, {axis});
         auto scatter = std::make_shared<ov::op::v3::ScatterUpdate>(params[0], indicesNode, params[1], axis_node);
 
-        function = makeNgraphFunction(inputPrecision, params, scatter, "ScatterUpdateLayerCPUTest");
+        function = create_ov_model(inputPrecision, params, scatter, "ScatterUpdateLayerCPUTest");
     }
 };
 
@@ -134,6 +130,45 @@ const std::vector<ElementType> constantPrecisions = {
 INSTANTIATE_TEST_SUITE_P(smoke_CompareWithRefs,
                          ScatterUpdateLayerCPUTest,
                          ::testing::Combine(::testing::ValuesIn(scatterParams),
+                                            ::testing::ValuesIn(inputPrecisions),
+                                            ::testing::ValuesIn(constantPrecisions)),
+                         ScatterUpdateLayerCPUTest::getTestCaseName);
+
+class ScatterUpdateLayerCPUErrorConditionTest : public ScatterUpdateLayerCPUTest {};
+
+TEST_P(ScatterUpdateLayerCPUErrorConditionTest, ThrowsOnOutOfRangeIndices) {
+    SKIP_IF_CURRENT_TEST_IS_DISABLED();
+    compile_model();
+    // Both CPU and TEMPLATE plugins should throw; a mismatch is a bug.
+    for (const auto& targetStaticShapeVec : targetStaticShapes) {
+        generate_inputs(targetStaticShapeVec);
+        OV_EXPECT_THROW(get_plugin_outputs(), ov::Exception, ::testing::_);
+        OV_EXPECT_THROW(calculate_refs(), ov::Exception, ::testing::_);
+    }
+}
+
+const std::vector<ScatterUpdateLayerParams> scatterUpdateOutOfRangeParams = {
+    ScatterUpdateLayerParams{ScatterUpdateShapes{{{8}, {{8}}}, {{1}, {{1}}}},
+                             IndicesDescription{{1}, {100000}},
+                             Axis{0}},
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_ScatterUpdate1DFastPathOutOfRangeIndices,
+                         ScatterUpdateLayerCPUErrorConditionTest,
+                         ::testing::Combine(::testing::ValuesIn(scatterUpdateOutOfRangeParams),
+                                            ::testing::Values(ElementType::i32),
+                                            ::testing::Values(ElementType::i32)),
+                         ScatterUpdateLayerCPUTest::getTestCaseName);
+
+const std::vector<ScatterUpdateLayerParams> scatterUpdateGeneralPathOutOfRangeParams = {
+    ScatterUpdateLayerParams{ScatterUpdateShapes{{{8, 4}, {{8, 4}}}, {{2, 4}, {{2, 4}}}},
+                             IndicesDescription{{2}, {0, 100000}},
+                             Axis{0}},
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_ScatterUpdateGeneralPathOutOfRangeIndices,
+                         ScatterUpdateLayerCPUErrorConditionTest,
+                         ::testing::Combine(::testing::ValuesIn(scatterUpdateGeneralPathOutOfRangeParams),
                                             ::testing::ValuesIn(inputPrecisions),
                                             ::testing::ValuesIn(constantPrecisions)),
                          ScatterUpdateLayerCPUTest::getTestCaseName);

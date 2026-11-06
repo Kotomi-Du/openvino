@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,10 +9,7 @@
 using namespace std;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 NamedOutputVector translate_top_k_base_op(const NodeContext& node,
                                           const ov::Output<ov::Node>& k_input,
                                           int min_input_size,
@@ -57,7 +54,4 @@ NamedOutputVector translate_top_k_v2_op(const NodeContext& node) {
     auto k_input = node.get_input(1);
     return translate_top_k_base_op(node, k_input, 1, index_type);
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

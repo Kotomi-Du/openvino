@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@ namespace kernel_selector {
 class ReduceKernelRef : public ReduceKernelBase {
 public:
     ReduceKernelRef() : ReduceKernelBase("reduce_ref") {}
-    virtual ~ReduceKernelRef() {}
+    ~ReduceKernelRef() override = default;
     CommonDispatchData SetDefault(const reduce_params& params) const override;
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

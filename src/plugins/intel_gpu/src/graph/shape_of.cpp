@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -50,8 +50,9 @@ std::string shape_of_inst::to_string(shape_of_node const& node) {
     std::stringstream primitive_description;
 
     json_composite shape_of_info;
-    if (desc->output_data_types[0].has_value())
+    if (desc->output_data_types[0].has_value()) {
         shape_of_info.add("out dt: ", dt_to_str(*desc->output_data_types[0]));
+    }
     node_info->add("shape_of info", shape_of_info);
     node_info->dump(primitive_description);
 

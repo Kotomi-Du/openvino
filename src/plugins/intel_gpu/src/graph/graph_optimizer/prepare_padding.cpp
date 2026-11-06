@@ -1,61 +1,113 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "pooling_inst.h"
-#include "fully_connected_inst.h"
-#include "program_node.h"
-#include "pass_manager.h"
-#include "convolution_inst.h"
-#include "mvn_inst.h"
-#include "sliding_window_utils.hpp"
 #include <algorithm>
+
+#include "col2im_inst.h"
+#include "convolution_inst.h"
+#include "fully_connected_inst.h"
+#include "mvn_inst.h"
+#include "pass_manager.h"
+#include "pooling_inst.h"
+#include "program_node.h"
+#include "sliding_window_utils.hpp"
 
 using namespace cldnn;
 using namespace ov::intel_gpu;
 
 void prepare_padding::run(program& p) {
-    if (p.get_config().get_use_onednn()) {
-        const auto allow_new_shape_infer = p.get_config().get_allow_new_shape_infer();
-        for (const auto& node : p.get_processing_order()) {
-            if (!node->is_type<fully_connected>())
-                continue;
+    for (const auto& node : p.get_processing_order()) {
+        if (!node->is_type<fully_connected>()) {
+            continue;
+        }
 
-            if (node->get_preferred_impl_type() != impl_types::onednn)
-                continue;
+        auto& weight_node = node->get_dependency(1);
+        if (weight_node.is_constant()) {
+            auto weight_layout = weight_node.get_output_layout(false);
+            const auto const_shape = weight_layout.get_partial_shape().to_shape();
+            OPENVINO_ASSERT(!const_shape.empty(), "Data padding for int4 type data with an odd innermost dimension does not support zero dimension.");
+            auto inner_most_idx = node->as<fully_connected>().get_primitive()->weights_rank - 1;
+            bool is_k_odd = const_shape[inner_most_idx] % 2 != 0;
+            const bool is_onednn_int4 = node->get_preferred_impl_type() == impl_types::onednn &&
+                                        weight_node.is_type<data>() &&
+                                        (weight_layout.data_type == cldnn::data_types::u4 ||
+                                         weight_layout.data_type == cldnn::data_types::i4);
 
-            auto& weight_node = node->get_dependency(1);
-            if (weight_node.is_type<data>()
-                && weight_node.is_constant()
-                && (weight_node.get_output_layout(0).data_type == cldnn::data_types::u4
-                    || weight_node.get_output_layout(0).data_type == cldnn::data_types::i4)) {
-                const size_t alignment = 2;
-                auto weight_layout = weight_node.get_output_layout(0);
-                const auto const_shape = weight_layout.get_partial_shape().to_shape();
-                OPENVINO_ASSERT(const_shape.size() > 0, "Data padding for int4 type data with an odd innermost dimension does not support zero dimension.");
-                int32_t inner_most_idx = static_cast<int32_t>(const_shape.size()) - 1;
-                if (!allow_new_shape_infer) {
-                    // Get the innermost index after trimming trailing elements in the canonicalized legacy shape such as [4, 64, 1, 1].
-                    while (inner_most_idx > 0 && const_shape[inner_most_idx] == 1) {
-                        --inner_most_idx;
-                    }
-                    OPENVINO_ASSERT(const_shape[inner_most_idx] % alignment == 0, "inner most dimension for the legacy shape should be even.");
-                }
+            if (is_onednn_int4) {
+                // Align odd packed int4 weight rows to 4 bytes for oneDNN FC performance.
+                const size_t weight_alignment = 8;
+                const auto weight_padding = (weight_alignment - const_shape[inner_most_idx] % weight_alignment) % weight_alignment;
+                if (is_k_odd) {
+                    std::vector<ov::Dimension::value_type> new_paddings(const_shape.size(), 0);
+                    new_paddings[inner_most_idx] = static_cast<ov::Dimension::value_type>(weight_padding);
 
-                if (const_shape[inner_most_idx] % alignment != 0) {
-                    auto weight_in_layout  = weight_layout.convert_to_weights_layout(false);
+                    auto weight_in_layout = weight_layout.convert_to_weights_layout(false);
                     auto weight_out_layout = weight_in_layout;
-                    std::vector<int32_t> new_paddings(const_shape.size(), 0);
-                    new_paddings[inner_most_idx] = 1;
                     weight_out_layout.data_padding = padding::max(weight_out_layout.data_padding, padding({0}, new_paddings));
                     auto weights_reorder_params = std::make_shared<WeightsReorderParams>(weight_in_layout, weight_out_layout, false, false);
-
-                    auto new_reorder = std::make_shared<reorder>("padding_reorder_for_" + weight_node.id(),
-                                                                    weight_node.id(), weights_reorder_params);
+                    auto new_reorder = std::make_shared<reorder>("padding_reorder_for_" + weight_node.id(), weight_node.id(), weights_reorder_params);
                     auto& new_reorder_node = p.get_or_create(new_reorder);
-                    p.add_intermediate(new_reorder_node, *node, weight_node);
-
+                    p.add_intermediate(new_reorder_node, *node, weight_node, new_reorder_node.get_dependencies().empty());
                     new_reorder_node.recalc_output_layouts(false);
+
+                    // Align activation rows to 4 bytes alongside the int4 weights.
+                    // This will cause some amount of runtime performance overhead.
+                    // However, this is necessary to avoid ref kernel selection, and to take advantage of block loading instruction of xe2+ architecture.
+                    // In the future, we may back-propagate padding information to the producer so that it generates padded result directly.
+                    const auto input_layout = node->get_input_layout(0);
+                    const auto input_shape = input_layout.get_partial_shape();
+                    const auto input_element_size = data_type_traits::size_of(input_layout.data_type);
+                    bool activation_aligned = input_element_size % 4 == 0;
+                    if (!activation_aligned && input_shape.size() == 2) {  // Limited to 2d activation only, because it is the only validated path.
+                        const auto input_feature_idx = input_shape.size() - 1;
+                        if (input_shape[input_feature_idx].is_static()) {
+                            const auto input_alignment = 4 / input_element_size;
+                            const auto row_size = input_shape[input_feature_idx].get_length() +
+                                                  input_layout.data_padding._lower_size[input_feature_idx] +
+                                                  input_layout.data_padding._upper_size[input_feature_idx];
+                            const auto input_padding = (input_alignment - row_size % input_alignment) % input_alignment;
+                            activation_aligned = input_padding == 0;
+                            if (!activation_aligned) {
+                                auto input0_new_layout = input_layout;
+                                std::vector<ov::Dimension::value_type> input_paddings(input_shape.size(), 0);
+                                input_paddings[input_feature_idx] = input_layout.data_padding._upper_size[input_feature_idx] + input_padding;
+                                input0_new_layout.data_padding = padding::max(input0_new_layout.data_padding, padding({0}, input_paddings));
+                                auto new_input_reorder = std::make_shared<reorder>("padding_reorder_for_" + node->get_dependency(0).id(),
+                                                                                   input_info(node->get_dependency(0).id()),
+                                                                                   input0_new_layout);
+                                auto& new_input_reorder_node = p.get_or_create(new_input_reorder);
+                                p.add_intermediate(new_input_reorder_node, *node, node->get_dependency(0), new_input_reorder_node.get_dependencies().empty());
+                                new_input_reorder_node.recalc_output_layouts(false);
+                                activation_aligned = true;
+                            }
+                        }
+                    }
+                    if (!activation_aligned) {
+                        GPU_DEBUG_INFO << "[WARNING] " << node->id() << ": INT4 weights were padded, but activation padding was not added. Input layout: "
+                                       << input_layout.to_short_string() << std::endl;
+                    }
+                }
+            } else if (is_k_odd) {
+                std::vector<ov::Dimension::value_type> new_paddings(const_shape.size(), 0);
+                new_paddings[inner_most_idx] = 1;
+
+                if (node->get_preferred_impl_type() == impl_types::ocl &&
+                           p.get_config().get_force_implementations().find(node->id()) == p.get_config().get_force_implementations().end() &&
+                           node->get_input_layout(0).data_type == cldnn::data_types::f16 && node->get_input_layout(0).format == cldnn::format::bfyx &&
+                           node->get_input_layout(0).get_partial_shape()[1].is_static() &&  // feature dim of input should be static
+                           node->as<fully_connected>().get_primitive()->input_size == 2 &&  // only 2D fc is supported
+                           node->as<fully_connected>().get_primitive()->weights_rank == 2 &&
+                           weight_node.get_output_layout(false).data_type == cldnn::data_types::f16) {
+                    // fully_connected_bf_tiled_opt requires 4-bytes aligned input.
+                    auto input0_new_layout = node->get_input_layout(0);
+                    input0_new_layout.data_padding = padding::max(input0_new_layout.data_padding, padding({0}, new_paddings));
+                    auto new_input_reorder = std::make_shared<reorder>("padding_reorder_for_" + node->get_dependency(0).id(),
+                                                                       input_info(node->get_dependency(0).id()),
+                                                                       input0_new_layout);
+                    auto& new_input_reorder_node = p.get_or_create(new_input_reorder);
+                    p.add_intermediate(new_input_reorder_node, *node, node->get_dependency(0), new_input_reorder_node.get_dependencies().empty());
+                    new_input_reorder_node.recalc_output_layouts(false);
                 }
             }
         }
@@ -64,26 +116,30 @@ void prepare_padding::run(program& p) {
     if (output_size_handling_enabled) {
         // Prepare upper padding for primitives that support output_size parameter.
         for (const auto& node : p.get_processing_order()) {
-            if (node->get_dependencies().empty())
+            if (node->get_dependencies().empty()) {
                 continue;
+            }
 
-            if (node->get_dependency(0).is_type<data>())
+            if (node->get_dependency(0).is_type<data>()) {
                 continue;
+            }
 
             // Padded offsets aren't supported by onednn kernels
-            if (node->get_preferred_impl_type() == impl_types::onednn)
+            if (node->get_preferred_impl_type() == impl_types::onednn) {
                 continue;
+            }
 
             auto add_required_padding = [&p](program_node& node, padding& needed_padding) {
                 // Add extra reorder for cldnn primitive to handle required padding if needed
                 auto& input = node.get_dependency(0);
                 bool is_usr_onednn = false;
-                for (auto& input_usr : input.get_users())
-                    if (input_usr->get_preferred_impl_type() == impl_types::onednn)
+                for (const auto& input_usr : input.get_users()) {
+                    if (input_usr->get_preferred_impl_type() == impl_types::onednn) {
                         is_usr_onednn = true;
+                    }
+                }
 
-                if ((input.get_preferred_impl_type() == impl_types::onednn || is_usr_onednn) &&
-                    node.get_preferred_impl_type() == impl_types::ocl &&
+                if ((input.get_preferred_impl_type() == impl_types::onednn || is_usr_onednn) && node.get_preferred_impl_type() == impl_types::ocl &&
                     static_cast<bool>(needed_padding)) {
                     auto new_reorder = std::make_shared<reorder>(node.id() + "_padding_reorder_for_" + input.id(), input.id(), input.get_output_layout());
                     auto& new_reorder_node = p.get_or_create(new_reorder);
@@ -99,32 +155,31 @@ void prepare_padding::run(program& p) {
                 const auto& prim = prim_node.get_primitive();
 
                 auto format = node->get_output_layout().format;
-                if (format == format::b_fs_zyx_fsv16 ||
-                    format == format::bs_fs_zyx_bsv16_fsv16 ||
-                    format == format::bs_fs_yx_bsv16_fsv16 ||
-                    format == format::bs_fs_yx_bsv32_fsv32 ||
-                    format == format::b_fs_zyx_fsv32)
+                if (format == format::b_fs_zyx_fsv16 || format == format::bs_fs_zyx_bsv16_fsv16 || format == format::bs_fs_yx_bsv16_fsv16 ||
+                    format == format::bs_fs_yx_bsv32_fsv32 || format == format::b_fs_zyx_fsv32) {
                     continue;
+                }
 
                 auto in_layout = prim_node.get_input_layout();
                 const auto spatial_rank = in_layout.get_spatial_rank();
-                if (spatial_rank > 3 || spatial_rank < 1) continue;     // FIXME: should support spatial_rank > 3?
+                if (spatial_rank > 3 || spatial_rank < 1)
+                    continue;  // FIXME: should support spatial_rank > 3?
 
                 auto padding_begin = prim->padding_begin;
                 auto padding_end = prim->padding_end;
 
-                tensor::value_type pb_z = std::max<std::ptrdiff_t>(padding_begin.size() >= 3 ? padding_begin[padding_begin.size() - 3] : 0, 0);
-                tensor::value_type pb_y = std::max<std::ptrdiff_t>(padding_begin.size() >= 2 ? padding_begin[padding_begin.size() - 2] : 0, 0);
-                tensor::value_type pb_x = std::max<std::ptrdiff_t>(padding_begin.size() >= 1 ? padding_begin[padding_begin.size() - 1] : 0, 0);
+                ov::Dimension::value_type pb_z = std::max<std::ptrdiff_t>(padding_begin.size() >= 3 ? padding_begin[padding_begin.size() - 3] : 0, 0);
+                ov::Dimension::value_type pb_y = std::max<std::ptrdiff_t>(padding_begin.size() >= 2 ? padding_begin[padding_begin.size() - 2] : 0, 0);
+                ov::Dimension::value_type pb_x = std::max<std::ptrdiff_t>(!padding_begin.empty() ? padding_begin[padding_begin.size() - 1] : 0, 0);
 
-                tensor::value_type pe_z = std::max<std::ptrdiff_t>(padding_end.size() >= 3 ? padding_end[padding_end.size() - 3] : 0, 0);
-                tensor::value_type pe_y = std::max<std::ptrdiff_t>(padding_end.size() >= 2 ? padding_end[padding_end.size() - 2] : 0, 0);
-                tensor::value_type pe_x = std::max<std::ptrdiff_t>(padding_end.size() >= 1 ? padding_end[padding_end.size() - 1] : 0, 0);
+                ov::Dimension::value_type pe_z = std::max<std::ptrdiff_t>(padding_end.size() >= 3 ? padding_end[padding_end.size() - 3] : 0, 0);
+                ov::Dimension::value_type pe_y = std::max<std::ptrdiff_t>(padding_end.size() >= 2 ? padding_end[padding_end.size() - 2] : 0, 0);
+                ov::Dimension::value_type pe_x = std::max<std::ptrdiff_t>(!padding_end.empty() ? padding_end[padding_end.size() - 1] : 0, 0);
 
                 const auto& lower_sizes = in_layout.data_padding._lower_size;
                 const auto& upper_sizes = in_layout.data_padding._upper_size;
 
-                std::vector<int32_t> needed_lpad, needed_upad;
+                std::vector<ov::Dimension::value_type> needed_lpad, needed_upad;
                 needed_lpad.push_back(lower_sizes[0]);
                 needed_lpad.push_back(lower_sizes[1]);
 
@@ -156,8 +211,9 @@ void prepare_padding::run(program& p) {
                 auto& prim_node = node->as<deconvolution>();
                 const auto& prim = prim_node.get_primitive();
 
-                if (!prim->with_output_size)
+                if (!prim->with_output_size) {
                     continue;
+                }
 
                 auto filter_size = prim_node.weights().get_output_layout().get_tensor();
 
@@ -175,17 +231,18 @@ void prepare_padding::run(program& p) {
                 auto& prim_node = node->as<pooling>();
                 const auto& prim = prim_node.get_primitive();
 
-                if (!prim->with_output_size)
+                if (!prim->with_output_size) {
                     continue;
+                }
 
                 padding needed_padding;
                 // WA for this format. sliding window needs to be fixed --perf degradation for IncepctionV1 type models
                 tensor size(1);
                 for (size_t i = 0; i < prim->size.size(); i++) {
-                    size.spatial[i] = static_cast<tensor::value_type>(prim->size[prim->size.size() - i - 1]);
+                    size.spatial[i] = static_cast<ov::Dimension::value_type>(prim->size[prim->size.size() - i - 1]);
                 }
 
-                if (node->get_output_layout().format == format::b_fs_yx_fsv16)
+                if (node->get_output_layout().format == format::b_fs_yx_fsv16) {
                     needed_padding = calc_sliding_window_needed_input_padding(prim_node.get_input_layout(),
                                                                               prim->output_size,
                                                                               size,
@@ -194,8 +251,9 @@ void prepare_padding::run(program& p) {
                                                                               ov::Strides(prim->size.size(), 1),
                                                                               false,
                                                                               1);
-                else
+                } else {
                     needed_padding = prim_node.get_input_layout().data_padding;
+                }
 
                 add_required_padding(prim_node, needed_padding);
             }
@@ -204,26 +262,26 @@ void prepare_padding::run(program& p) {
 
     // Prepare optimized padding for bfyx convolution.
     for (auto& pair : p.nodes_map) {
-        if (pair.second->type() != convolution::type_id())
+        if (pair.second->type() != convolution::type_id()) {
             continue;
+        }
 
         auto& node = pair.second->as<convolution>();
-        if (node.get_dependencies().empty())
+        if (node.get_dependencies().empty()) {
             continue;
+        }
 
-        if (node.is_dynamic() && !node.use_explicit_padding())
+        if (node.is_dynamic() && !node.use_explicit_padding()) {
             continue;
+        }
 
         auto& conv_input_node = node.get_dependency(0);
         auto conv_layout = node.get_output_layout();
 
         // right now output padding optimization is only available for bfyx format and data type = float32
-        if (conv_layout.format != cldnn::format::bfyx &&
-            conv_layout.format != cldnn::format::b_fs_yx_fsv16 &&
-            conv_layout.format != cldnn::format::b_fs_zyx_fsv16 &&
-            conv_layout.format != cldnn::format::bs_fs_yx_bsv16_fsv16 &&
-            conv_layout.format != cldnn::format::b_fs_yx_fsv4 &&
-            conv_layout.format != cldnn::format::fs_b_yx_fsv32) {
+        if (conv_layout.format != cldnn::format::bfyx && conv_layout.format != cldnn::format::b_fs_yx_fsv16 &&
+            conv_layout.format != cldnn::format::b_fs_zyx_fsv16 && conv_layout.format != cldnn::format::bs_fs_yx_bsv16_fsv16 &&
+            conv_layout.format != cldnn::format::b_fs_yx_fsv4 && conv_layout.format != cldnn::format::fs_b_yx_fsv32) {
             continue;
         }
 
@@ -232,32 +290,38 @@ void prepare_padding::run(program& p) {
 
         // For 3d convolution padding is needed only for int8 case
         // FP16/32 kernels can work w/o physical padding
-        if (prev_prim_output_layout.format == cldnn::format::b_fs_zyx_fsv16 &&
-            prev_prim_output_layout.data_type != data_types::i8 && prev_prim_output_layout.data_type != data_types::u8)
+        if (prev_prim_output_layout.format == cldnn::format::b_fs_zyx_fsv16 && prev_prim_output_layout.data_type != data_types::i8 &&
+            prev_prim_output_layout.data_type != data_types::u8) {
             continue;
+        }
 
         // We shoudn't apply any padding to nodes which are marked as outputs or have type as data
-        if (conv_input_node.is_output() || conv_input_node.is_type<data>())
+        if (conv_input_node.is_output() || conv_input_node.is_type<data>()) {
             continue;
+        }
 
         // Padded offsets aren't supported by onednn kernels
-        if (conv_input_node.get_preferred_impl_type() == impl_types::onednn)
+        if (conv_input_node.get_preferred_impl_type() == impl_types::onednn) {
             continue;
+        }
 
-        if (node.get_preferred_impl_type() == impl_types::onednn)
+        if (node.get_preferred_impl_type() == impl_types::onednn) {
             continue;
+        }
 
         auto needed_padding = get_needed_padding_for_convolution(node);
 
-        auto& input = node.get_dependency(0);
-        // WA to add reorder between MVN and Conv because Conv need input data with padding but MVN opt kernel with default format does not support padding.
-        // TODO: MVN opt kernel should support padding.
-        if (node.get_preferred_impl_type() == impl_types::ocl && input.is_type<mvn>()
-            && format::is_default_format(input.get_output_layout().format)) { // check the allowed format to avoid perf drop by unnecessary reorder addition.
-            auto new_reorder = std::make_shared<reorder>(node.id() + "_padding_reorder_for_" + input.id(), input.id(), input.get_output_layout());
-            auto& new_reorder_node = p.get_or_create(new_reorder);
-            p.add_intermediate(new_reorder_node, node, input);
-            new_reorder_node.recalc_output_layouts(false);
+        // WA to add reorder between MVN and Convolution or between col2im and Convolution
+        // because Conv need input_node data with padding but MVN opt with default format and col2im do not support padding.
+        if (node.get_preferred_impl_type() == impl_types::ocl && format::is_default_format(conv_input_node.get_output_layout().format)) {
+            if (conv_input_node.is_type<mvn>() || conv_input_node.is_type<col2im>()) {
+                auto new_reorder = std::make_shared<reorder>(node.id() + "_padding_reorder_for_" + conv_input_node.id(),
+                                                             conv_input_node.id(),
+                                                             conv_input_node.get_output_layout());
+                auto& new_reorder_node = p.get_or_create(new_reorder);
+                p.add_intermediate(new_reorder_node, node, conv_input_node);
+                new_reorder_node.recalc_output_layouts(false);
+            }
         }
 
         p.apply_needed_padding(node, node.get_dependency(0), needed_padding);
@@ -285,60 +349,58 @@ cldnn::padding prepare_padding::get_needed_padding_for_convolution(convolution_n
     auto dilation = conv->dilation;
     uint32_t stride_z = stride.size() >= 3 ? static_cast<uint32_t>(stride[stride.size() - 3]) : 1;
     uint32_t stride_y = stride.size() >= 2 ? static_cast<uint32_t>(stride[stride.size() - 2]) : 1;
-    uint32_t stride_x = stride.size() >= 1 ? static_cast<uint32_t>(stride[stride.size() - 1]) : 1;
+    uint32_t stride_x = !stride.empty() ? static_cast<uint32_t>(stride[stride.size() - 1]) : 1;
 
     uint32_t dilation_z = dilation.size() >= 3 ? static_cast<uint32_t>(dilation[dilation.size() - 3]) : 1;
     uint32_t dilation_y = dilation.size() >= 2 ? static_cast<uint32_t>(dilation[dilation.size() - 2]) : 1;
-    uint32_t dilation_x = dilation.size() >= 1 ? static_cast<uint32_t>(dilation[dilation.size() - 1]) : 1;
+    uint32_t dilation_x = !dilation.empty() ? static_cast<uint32_t>(dilation[dilation.size() - 1]) : 1;
 
-    tensor::value_type pad_z = padding_begin.size() >= 3 ? padding_begin[padding_begin.size() - 3] : 0;
-    tensor::value_type pad_y = padding_begin.size() >= 2 ? padding_begin[padding_begin.size() - 2] : 0;
-    tensor::value_type pad_x = padding_begin.size() >= 1 ? padding_begin[padding_begin.size() - 1] : 0;
+    ov::Dimension::value_type pad_z = padding_begin.size() >= 3 ? padding_begin[padding_begin.size() - 3] : 0;
+    ov::Dimension::value_type pad_y = padding_begin.size() >= 2 ? padding_begin[padding_begin.size() - 2] : 0;
+    ov::Dimension::value_type pad_x = !padding_begin.empty() ? padding_begin[padding_begin.size() - 1] : 0;
 
-    tensor::value_type padding_begin_x, padding_begin_y, padding_begin_z;
-    tensor::value_type padding_end_x, padding_end_y, padding_end_z;
+    ov::Dimension::value_type padding_begin_x, padding_begin_y, padding_begin_z;
+    ov::Dimension::value_type padding_end_x, padding_end_y, padding_end_z;
 
     if (node.get_program().is_new_shape_infer() && node.use_explicit_padding()) {
-        padding_begin_x = std::max(pad_x, 0);
-        padding_begin_y = std::max(pad_y, 0);
-        padding_begin_z = std::max(pad_z, 0);
+        padding_begin_x = std::max<ov::Dimension::value_type>(pad_x, 0);
+        padding_begin_y = std::max<ov::Dimension::value_type>(pad_y, 0);
+        padding_begin_z = std::max<ov::Dimension::value_type>(pad_z, 0);
 
         pad_z = padding_end.size() >= 3 ? padding_end[padding_end.size() - 3] : 0;
         pad_y = padding_end.size() >= 2 ? padding_end[padding_end.size() - 2] : 0;
-        pad_x = padding_end.size() >= 1 ? padding_end[padding_end.size() - 1] : 0;
+        pad_x = !padding_end.empty() ? padding_end[padding_end.size() - 1] : 0;
 
-        padding_end_x = std::max(pad_x, 0);
-        padding_end_y = std::max(pad_y, 0);
-        padding_end_z = std::max(pad_z, 0);
+        padding_end_x = std::max<ov::Dimension::value_type>(pad_x, 0);
+        padding_end_y = std::max<ov::Dimension::value_type>(pad_y, 0);
+        padding_end_z = std::max<ov::Dimension::value_type>(pad_z, 0);
     } else {
-        auto input_limit_x = -pad_x + (conv_layout.spatial(0) - 1) * stride_x +
-                            (filter_layout.spatial(0) - 1) * dilation_x + 1;
-        auto input_limit_y = -pad_y + (conv_layout.spatial(1) - 1) * stride_y +
-                            (filter_layout.spatial(1) - 1) * dilation_y + 1;
-        auto input_limit_z = -pad_z + (conv_layout.spatial(2) - 1) * stride_z +
-                            (filter_layout.spatial(2) - 1) * dilation_z + 1;
+        auto input_limit_x = -pad_x + (conv_layout.spatial(0) - 1) * stride_x + (filter_layout.spatial(0) - 1) * dilation_x + 1;
+        auto input_limit_y = -pad_y + (conv_layout.spatial(1) - 1) * stride_y + (filter_layout.spatial(1) - 1) * dilation_y + 1;
+        auto input_limit_z = -pad_z + (conv_layout.spatial(2) - 1) * stride_z + (filter_layout.spatial(2) - 1) * dilation_z + 1;
 
-        padding_begin_x = std::max(pad_x, 0);
-        padding_begin_y = std::max(pad_y, 0);
-        padding_begin_z = std::max(pad_z, 0);
-        padding_end_x = std::max<tensor::value_type>(input_limit_x - prev_prim_output_layout.spatial(0), 0);
-        padding_end_y = std::max<tensor::value_type>(input_limit_y - prev_prim_output_layout.spatial(1), 0);
-        padding_end_z = std::max<tensor::value_type>(input_limit_z - prev_prim_output_layout.spatial(2), 0);
+        padding_begin_x = std::max<ov::Dimension::value_type>(pad_x, 0);
+        padding_begin_y = std::max<ov::Dimension::value_type>(pad_y, 0);
+        padding_begin_z = std::max<ov::Dimension::value_type>(pad_z, 0);
+        padding_end_x = std::max<ov::Dimension::value_type>(input_limit_x - prev_prim_output_layout.spatial(0), 0);
+        padding_end_y = std::max<ov::Dimension::value_type>(input_limit_y - prev_prim_output_layout.spatial(1), 0);
+        padding_end_z = std::max<ov::Dimension::value_type>(input_limit_z - prev_prim_output_layout.spatial(2), 0);
     }
 
     // Adjust right padding, so entire buffer size in X dimension is properly aligned.
     // TODO: NOTE: Will be reenabled with next check-in once heuristic for line-aligned algorithm will be added.
-    // auto needed_buffer_size_x = static_cast<cldnn::tensor::value_type>(
+    // auto needed_buffer_size_x = static_cast<cldnn::ov::Dimension::value_type>(
     //    round_up_to(left_padding + prev_prim_output_layout.spatial(0) + right_padding, 16));
     // right_padding = needed_buffer_size_x - left_padding - prev_prim_output_layout.spatial(0);
 
     cldnn::padding needed_padding = padding();
-    if (padding_begin.size() >= 3)
+    if (padding_begin.size() >= 3) {
         needed_padding = padding({0, 0, padding_begin_z, padding_begin_y, padding_begin_x}, {0, 0, padding_end_z, padding_end_y, padding_end_x}, 0);
-    else if (padding_begin.size() >= 2)
+    } else if (padding_begin.size() >= 2) {
         needed_padding = padding({0, 0, padding_begin_y, padding_begin_x}, {0, 0, padding_end_y, padding_end_x}, 0);
-    else if (padding_begin.size() >= 1)
+    } else if (!padding_begin.empty()) {
         needed_padding = padding({0, 0, padding_begin_x}, {0, 0, padding_end_x}, 0);
+    }
     needed_padding = padding::max(prev_prim_output_layout.data_padding, needed_padding);
 
     return needed_padding;

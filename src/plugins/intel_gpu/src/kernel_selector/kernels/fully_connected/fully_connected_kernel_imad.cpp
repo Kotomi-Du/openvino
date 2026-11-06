@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -83,7 +83,7 @@ FullyConnectedKernelIMAD::Parent::DispatchData FullyConnectedKernelIMAD::SetDefa
 
 bool FullyConnectedKernelIMAD::Validate(const Params& params) const {
     if (!Parent::Validate(params)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     const auto& fc_params = static_cast<const fully_connected_params&>(params);
@@ -94,24 +94,26 @@ bool FullyConnectedKernelIMAD::Validate(const Params& params) const {
     // Dynamic kernel doesn't support dynamic weights
     if (fc_params.is_shape_agnostic && in.is_dynamic()) {
         if ((out_l == DataLayout::bfyx && in.Y().v == 0) ||
-            (out_l == DataLayout::bf && in.Feature().v == 0))
-            return false;
+            (out_l == DataLayout::bf && in.Feature().v == 0)) {
+            DO_NOT_USE_THIS_KERNEL(params.layerID);
+        }
     }
 
     if ((in.X().pad.before != 0) || (in.X().pad.after != 0) ||
         (in.Y().pad.before != 0) || (in.Y().pad.after != 0)) {
         // Padding is not supported
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     if (out_l == DataLayout::bfyx) {
         // We don't support 4d output
-        if (in.X().v > 1)
-            return false;
+        if (in.X().v > 1) {
+            DO_NOT_USE_THIS_KERNEL(params.layerID);
+        }
     } else {
         if (in.X().v * in.Y().v * wei.X().v * wei.Y().v != 1) {
             // Currently only Input = F x 1 x 1 with Filter = 1 x 1 is supported
-            return false;
+            DO_NOT_USE_THIS_KERNEL(params.layerID);
         }
     }
 
@@ -176,8 +178,9 @@ FullyConnectedKernelIMAD::FullyConnectedTuningData FullyConnectedKernelIMAD::Get
 
     tuning_data.tile_batch = tuning_data.sub_group_size == 8 ? 16 : 8;
     if (!params.has_dynamic_tensors()) {
-        while (tile_batch_max_size % tuning_data.tile_batch != 0)
+        while (tile_batch_max_size % tuning_data.tile_batch != 0) {
             tuning_data.tile_batch--;
+        }
     }
 
     size_t sub_group_pack_size = tuning_data.sub_group_size * tuning_data.pack_size;

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ class Convolution_kernel_b_fs_yx_fsv16_imad_1x1 : public ConvolutionKernelBase {
 public:
     using Parent = ConvolutionKernelBase;
     Convolution_kernel_b_fs_yx_fsv16_imad_1x1();
-    virtual ~Convolution_kernel_b_fs_yx_fsv16_imad_1x1() {}
+    ~Convolution_kernel_b_fs_yx_fsv16_imad_1x1() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsData GetKernelsDataForAutoTune(const Params & params) const override;

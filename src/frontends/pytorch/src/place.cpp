@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,9 +10,7 @@
 #include "openvino/util/log.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
+namespace ov::frontend::pytorch {
 
 Place::Place(const ov::frontend::InputModel& input_model, size_t tensor_index)
     : m_input_model(input_model),
@@ -52,7 +50,7 @@ Place::Place(const ov::frontend::InputModel& input_model, size_t tensor_index)
         }
     }
     if (m_is_input && m_is_output) {
-        OPENVINO_DEBUG("[WARNING] Place ", tensor_index, " is input and output at a same time.");
+        OPENVINO_DEBUG("[WARNING] Place ", tensor_index, " is input and output at the same time.");
     }
 }
 
@@ -81,6 +79,4 @@ bool Place::is_equal(const Ptr& another) const {
     return this == another.get();
 }
 
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -41,7 +41,7 @@ public:
     [[nodiscard]] virtual bool isSupported(const TransposeParams& transposeParams,
                                            const std::vector<MemoryDescPtr>& srcDescs,
                                            const std::vector<MemoryDescPtr>& dstDescs) const = 0;
-    [[nodiscard]] virtual TransposeExecutorPtr makeExecutor(const ExecutorContext::CPtr context) const = 0;
+    [[nodiscard]] virtual TransposeExecutorPtr makeExecutor(ExecutorContext::CPtr context) const = 0;
 };
 
 using TransposeExecutorBuilderPtr = std::shared_ptr<TransposeExecutorBuilder>;

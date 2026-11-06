@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,9 +10,7 @@
 
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 /// \brief      GraphCache stores and provides access to ONNX graph initializers.
 class GraphCache {
 public:
@@ -20,29 +18,29 @@ public:
     ///
     /// \note       GraphCache takes ownership of the node.
     ///
-    /// \param[in]  name       The name of node added to the cache.
+    /// \param[in]  name       The name of the node added to the cache.
     /// \param[in]  node       The node added to the cache.
     void emplace_node(const std::string& name, ov::Output<ov::Node>&& node);
 
     /// \brief      Remove node from the cache
     ///
-    /// \param[in]  name       The name of node to be removed
+    /// \param[in]  name       The name of the node to be removed
     void remove_node(const std::string& name);
 
     /// \brief      Get the node from the cache
     ///
-    /// \note       If the node is not found the ov::Exception is thrown.
+    /// \note       If the node is not found, an ov::Exception is thrown.
     ///
     /// \param[in]  name       The name of the node.
     ///
     /// \return     The node named `name`.
     virtual ov::Output<ov::Node> get_node(const std::string& name) const;
 
-    /// \brief      Return true if the node named `name` exist in the cache.
+    /// \brief      Return true if the node named `name` exists in the cache.
     ///
     /// \param[in]  name       The name of the node.
     ///
-    /// \return     true if the node named `name` exist in the cache, false otherwise.
+    /// \return     true if the node named `name` exists in the cache, false otherwise.
     virtual bool contains(const std::string& name) const;
 
     virtual ~GraphCache() = default;
@@ -50,6 +48,4 @@ public:
 private:
     std::map<std::string, ov::Output<ov::Node>> m_graph_cache_map;
 };
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

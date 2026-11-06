@@ -28,9 +28,10 @@ using namespace std;
 
 namespace {
 void mockPlugin(ov::Core& core, std::shared_ptr<ov::IPlugin>& plugin, std::shared_ptr<void>& m_so) {
-    std::string libraryPath = ov::test::utils::get_mock_engine_path();
-    if (!m_so)
-        m_so = ov::util::load_shared_object(libraryPath.c_str());
+    if (!m_so) {
+        const auto libraryPath = ov::test::utils::get_mock_engine_path();
+        m_so = ov::util::load_shared_object(libraryPath);
+    }
     std::function<void(ov::IPlugin*)> injectProxyEngine =
         ov::test::utils::make_std_function<void(ov::IPlugin*)>(m_so, "InjectPlugin");
 
@@ -41,6 +42,24 @@ void clearMockPlugin(const std::shared_ptr<void>& m_so) {
     ASSERT_TRUE(m_so);
     ov::test::utils::make_std_function<void()>(m_so, "ClearTargets")();
 }
+
+// InjectPlugin stores a raw pointer to a test-local plugin in a mock_engine global, so it MUST be
+// cleared before the test returns - a fatal assertion that skips it leaves the next test a dangler.
+class InjectedMockPlugin {
+public:
+    InjectedMockPlugin(ov::Core& core, std::shared_ptr<ov::IPlugin>& plugin) {
+        mockPlugin(core, plugin, m_so);
+    }
+    InjectedMockPlugin(const InjectedMockPlugin&) = delete;
+    InjectedMockPlugin& operator=(const InjectedMockPlugin&) = delete;
+    ~InjectedMockPlugin() {
+        if (m_so)
+            ov::test::utils::make_std_function<void()>(m_so, "ClearTargets")();
+    }
+
+private:
+    std::shared_ptr<void> m_so;
+};
 }  // namespace
 
 TEST(RegisterPluginTests, getVersionforRegisteredPluginThrows) {
@@ -88,6 +107,84 @@ TEST(RegisterPluginTests, getVersionforNoRegisteredPluginNoThrows) {
     OV_ASSERT_NO_THROW(core.get_versions("MOCK_HARDWARE"));
 }
 
+namespace {
+int get_mock_extension_counter(const std::filesystem::path& so_path) {
+    auto so = ov::util::load_shared_object(so_path);
+    using CreateFunction = int();
+    auto extension_count = reinterpret_cast<CreateFunction*>(ov::util::get_symbol(so, "get_mock_extension_counter"))();
+    return extension_count;
+}
+}  // namespace
+
+TEST(RegisterPluginTests, removeExtensionOnPluginUnload) {
+    ov::Core core;
+    std::string mock_plugin_name{"MOCK_HARDWARE"};
+
+    auto mock_plugin_path = ov::test::utils::get_mock_engine_path();
+    EXPECT_EQ(get_mock_extension_counter(mock_plugin_path), 0);
+
+    OV_ASSERT_NO_THROW(core.register_plugin(mock_plugin_path, mock_plugin_name));
+
+    // call get_versions to force plugin loading
+    OV_ASSERT_NO_THROW(core.get_versions("MOCK_HARDWARE"));
+
+    const std::string model = R"V0G0N(
+<net name="Network" version="11">
+    <layers>
+        <layer name="in1" type="Parameter" id="0" version="opset1">
+            <data element_type="f32" shape="2,2,2,1"/>
+            <output>
+                <port id="0" precision="FP32">
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>1</dim>
+                </port>
+            </output>
+        </layer>
+        <layer name="operation" id="1" type="MockOp" version="custom_opset">
+            <input>
+                <port id="0" precision="FP32">
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>1</dim>
+                </port>
+            </input>
+            <output>
+                <port id="1" precision="FP32">
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>1</dim>
+                </port>
+            </output>
+        </layer>
+        <layer name="output" type="Result" id="2" version="opset1">
+            <input>
+                <port id="0" precision="FP32">
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>2</dim>
+                    <dim>1</dim>
+                </port>
+            </input>
+        </layer>
+    </layers>
+    <edges>
+        <edge from-layer="0" from-port="0" to-layer="1" to-port="0"/>
+        <edge from-layer="1" from-port="1" to-layer="2" to-port="0"/>
+    </edges>
+</net>
+)V0G0N";
+    EXPECT_NO_THROW(core.read_model(model, ov::Tensor()));
+    EXPECT_EQ(get_mock_extension_counter(mock_plugin_path), 1);
+
+    core.unload_plugin(mock_plugin_name);
+    EXPECT_THROW(core.read_model(model, ov::Tensor()), ov::Exception);
+    EXPECT_EQ(get_mock_extension_counter(mock_plugin_path), 0);
+}
+
 TEST(RegisterPluginTests, registerNewPluginNoThrows) {
     ov::Core core;
     auto plugin = std::make_shared<ov::test::utils::MockPlugin>();
@@ -105,23 +202,56 @@ TEST(RegisterPluginTests, registerNewPluginNoThrows) {
     core.unload_plugin(mock_plugin_name);
 }
 
+class RegisterPluginTestP : public ::testing::TestWithParam<ov::test::utils::StringPathVariant> {};
+
+INSTANTIATE_TEST_SUITE_P(paths_variants, RegisterPluginTestP, ::testing::Values("mock_engine", L"mock_engine"));
+
+TEST_P(RegisterPluginTestP, registerNewPluginNoThrows) {
+    ov::Core core;
+    std::shared_ptr<ov::IPlugin> base_plugin = std::make_shared<ov::test::utils::MockPlugin>();
+    std::shared_ptr<void> m_so;
+    mockPlugin(core, base_plugin, m_so);
+
+    std::string mock_plugin_name{"MOCK_HARDWARE_FS"};
+    const auto dir_path = ov::test::utils::to_fs_path(ov::test::utils::getExecutableDirectory());
+
+    const auto plugin_path =
+        ov::util::make_plugin_library_name(dir_path, ov::test::utils::to_fs_path(GetParam()).concat(OV_BUILD_POSTFIX));
+
+    OV_ASSERT_NO_THROW(core.register_plugin(plugin_path, mock_plugin_name));
+    OV_ASSERT_NO_THROW(core.get_property(mock_plugin_name, ov::supported_properties));
+
+    core.unload_plugin(mock_plugin_name);
+}
+
+// Re-registering the SAME library under an existing device name still throws: only a different
+// library forms a dispatch group, so idempotent registration keeps working as before.
 TEST(RegisterPluginTests, registerExistingPluginThrows) {
     ov::Core core;
     auto plugin = std::make_shared<ov::test::utils::MockPlugin>();
     std::shared_ptr<ov::IPlugin> base_plugin = plugin;
-    std::shared_ptr<void> m_so;
-    mockPlugin(core, base_plugin, m_so);
+    InjectedMockPlugin injected(core, base_plugin);
 
+    const auto lib = ov::util::make_plugin_library_name(ov::test::utils::getExecutableDirectory(),
+                                                        std::string("mock_engine") + OV_BUILD_POSTFIX);
     std::string mock_plugin_name{"MOCK_HARDWARE"};
-    OV_ASSERT_NO_THROW(
-        core.register_plugin(ov::util::make_plugin_library_name(ov::test::utils::getExecutableDirectory(),
-                                                                std::string("mock_engine") + OV_BUILD_POSTFIX),
-                             mock_plugin_name));
-    ASSERT_THROW(core.register_plugin(ov::util::make_plugin_library_name(ov::test::utils::getExecutableDirectory(),
-                                                                         std::string("mock_engine") + OV_BUILD_POSTFIX),
-                                      mock_plugin_name),
-                 ov::Exception);
-    clearMockPlugin(m_so);
+    OV_ASSERT_NO_THROW(core.register_plugin(lib, mock_plugin_name));
+    OV_EXPECT_THROW(core.register_plugin(lib, mock_plugin_name),
+                    ov::Exception,
+                    ::testing::HasSubstr("is already registered as device \"" + mock_plugin_name + "\""));
+}
+
+// A dispatch group caches its resolved member under "<device>#<candidate>", so a device literally
+// named that way would share the instance slot. Both separators are rejected in a device name.
+TEST(RegisterPluginTests, registerPluginWithReservedSymbolInNameThrows) {
+    ov::Core core;
+    const auto lib = ov::util::make_plugin_library_name(ov::test::utils::getExecutableDirectory(),
+                                                        std::string("mock_engine") + OV_BUILD_POSTFIX);
+    for (const std::string name : {"MOCK_HARDWARE#1", "MOCK_HARDWARE.1"}) {
+        OV_EXPECT_THROW(core.register_plugin(lib, name),
+                        ov::Exception,
+                        ::testing::HasSubstr("Device name must not contain"));
+    }
 }
 
 inline std::string getPluginFile() {

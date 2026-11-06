@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,10 +20,7 @@
 #include "openvino/op/unsqueeze.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
 
@@ -57,7 +54,7 @@ OutputVector translate_repeat_interleave(const NodeContext& context) {
     auto repeats_ext = context.get_input_from_visible_context(1);
     auto repeats_const = ov::as_type_ptr<v0::Constant>(repeats_ext.get_node_shared_ptr());
     if (repeats_const && repeats_const->cast_vector<int32_t>().size() > 1) {
-        // repeats is Constant with more then 1 element
+        // repeats is Constant with more than 1 element
         auto repeats = repeats_const->cast_vector<int32_t>();
         if (context.input_is_none(2)) {
             // case (repeats=tensor, dim=None)
@@ -124,7 +121,4 @@ OutputVector translate_repeat_interleave(const NodeContext& context) {
     return {context.mark_node(result)};
 };
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

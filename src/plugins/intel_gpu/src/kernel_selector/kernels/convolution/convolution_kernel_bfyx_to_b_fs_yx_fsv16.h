@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,7 +15,7 @@ public:
     using Parent = ConvolutionKernelBase;
 
     explicit ConvolutionKernel_bfyx_to_bfyx_f16(std::string kernel_name = "convolution_gpu_bfyx_to_bfyx_f16");
-    virtual ~ConvolutionKernel_bfyx_to_bfyx_f16() {}
+    ~ConvolutionKernel_bfyx_to_bfyx_f16() override = default;
 
     KernelsData GetKernelsDataForAutoTune(const Params& params) const override;
     KernelsData GetKernelsData(const Params& params) const override;

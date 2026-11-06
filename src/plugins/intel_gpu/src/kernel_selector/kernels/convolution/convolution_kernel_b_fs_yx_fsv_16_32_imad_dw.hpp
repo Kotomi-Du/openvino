@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class ConvolutionKernel_b_fs_yx_fsv_16_32_imad_dw : public ConvolutionKernelBase
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_b_fs_yx_fsv_16_32_imad_dw();
-    virtual ~ConvolutionKernel_b_fs_yx_fsv_16_32_imad_dw() {}
+    ~ConvolutionKernel_b_fs_yx_fsv_16_32_imad_dw() override = default;
 
     ParamsKey GetSupportedKey() const override;
     DeviceFeaturesKey get_required_device_features_key(const Params& params) const override;

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,7 @@ namespace kernel_selector {
 class LSTMCellAndSeqKernelRef : public LSTMKernelBase {
 public:
     LSTMCellAndSeqKernelRef() : LSTMKernelBase("lstm_cell_and_seq_ref") {}
-    virtual ~LSTMCellAndSeqKernelRef() {}
+    ~LSTMCellAndSeqKernelRef() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -17,7 +17,7 @@ class FullyConnectedKernelBase : public WeightBiasKernelBase {
 public:
     using WeightBiasKernelBase::WeightBiasKernelBase;
     using FusedOpDesc = fused_operation_desc;
-    virtual ~FullyConnectedKernelBase() {}
+    ~FullyConnectedKernelBase() override = default;
 
     struct DispatchData : public CommonDispatchData {
         uint32_t unit_byte_size = 0;

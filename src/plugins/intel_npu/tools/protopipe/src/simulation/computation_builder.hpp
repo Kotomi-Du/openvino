@@ -1,5 +1,4 @@
-//
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -31,6 +30,13 @@ struct GOperation {
     F on;
 };
 
+struct InferOutput {};
+
+struct DualDeviceDump {
+    std::filesystem::path reference_path;
+    std::filesystem::path target_path;
+};
+
 struct Dump {
     std::filesystem::path path;
 };
@@ -39,6 +45,12 @@ struct Validate {
     using F = std::function<Result(const cv::Mat& lhs, const cv::Mat& rhs)>;
     F validator;
     std::vector<cv::Mat> reference;
+};
+
+// NB: Carries the layer identity for accuracy mode, where both operands are produced at runtime.
+struct AccuracyValidate {
+    using F = std::function<Result(const cv::Mat& lhs, const cv::Mat& rhs)>;
+    F validator;
 };
 
 struct InferDesc {

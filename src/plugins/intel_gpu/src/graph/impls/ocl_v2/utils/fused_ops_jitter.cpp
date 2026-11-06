@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,9 +9,12 @@
 #include "eltwise_inst.h"
 #include "intel_gpu/graph/fused_primitive_desc.hpp"
 #include "intel_gpu/graph/kernel_impl_params.hpp"
+#include "intel_gpu/op/swoosh.hpp"
 #include "intel_gpu/primitives/activation.hpp"
+#include "intel_gpu/primitives/dynamic_quantize.hpp"
 #include "intel_gpu/primitives/reorder.hpp"
 #include "jitter.hpp"
+#include "kernel_selector/jitter.h"
 #include "openvino/core/type/element_type.hpp"
 #include "quantize_inst.h"
 
@@ -88,7 +91,7 @@ JitConstants make_fused_ops_jit_constants(const RuntimeParams& params, const std
 
     const auto& fused_ops_descs = params.fused_desc;
     if (std::all_of(fused_ops_descs.cbegin(), fused_ops_descs.cend(), [](const fused_primitive_desc& desc) {
-            return desc.is_type<reorder>();
+            return desc.is_type<reorder>() || desc.is_type<dynamic_quantize>();
         })) {
         return jit;
     }
@@ -105,7 +108,7 @@ JitConstants make_fused_ops_jit_constants(const RuntimeParams& params, const std
 
             for (size_t i = 0; i < fused_ops_descs.size(); i++) {
                 // Reorder is not processed by jitter
-                if (fused_ops_descs[i].is_type<reorder>()) {
+                if (fused_ops_descs[i].is_type<reorder>() || fused_ops_descs[i].is_type<dynamic_quantize>()) {
                     continue;
                 }
 
@@ -191,9 +194,11 @@ bool FusedOpsCodeGenerator::can_preload_data(const FusedOpsConfiguration& conf) 
 JitTerm FusedOpsCodeGenerator::get_op_type() const {
     if (desc.is_type<eltwise>()) {
         return JitTerm{"eltwise"};
-    } else if (desc.is_type<quantize>()) {
+    }
+    if (desc.is_type<quantize>()) {
         return JitTerm{"quantize"};
-    } else if (desc.is_type<activation>()) {
+    }
+    if (desc.is_type<activation>()) {
         return JitTerm{"activation"};
     }
     return {};
@@ -210,8 +215,9 @@ JitConstants FusedOpsCodeGenerator::make_fused_tensor_jit_constants(const FusedO
         std::string name = get_input_tensor_name(in_idx).str();
         jit.add(make_layout_jit_constants(name, params.get_input_layout(in_idx), params.in_port_to_shape_info_offset.at(in_idx)));
     }
+    OPENVINO_ASSERT(desc.output_layouts.size() == 1, "Design changed to allow multiple layouts, this path is not expected to be impacted.");
     // Use shape_ids from output tensor as won't support fused ops which changes out shape for now
-    jit.add(make_layout_jit_constants(get_output_tensor_name().str(), desc.output_layout, params.out_port_to_shape_info_offset.at(0)));
+    jit.add(make_layout_jit_constants(get_output_tensor_name().str(), desc.get_output_layout(), params.out_port_to_shape_info_offset.at(0)));
     return jit;
 }
 
@@ -261,8 +267,9 @@ JitConstants FusedOpsCodeGenerator::make_load_jit_constants(const FusedOpsConfig
     if (desc.is_type<eltwise>() && conf.load_type == FusedOpsConfiguration::LoadType::FEATURE_SHUFFLE) {
         std::string sub_group_local_id_str = "get_sub_group_local_id()";
         size_t found_sub = conf.bfzyx_idx_order[1].rfind(sub_group_local_id_str);
-        if (found_sub != std::string::npos)
+        if (found_sub != std::string::npos) {
             fused_op_config.bfzyx_idx_order[1].replace(found_sub, sub_group_local_id_str.length(), fused_op_config.shuffle_var_name);
+        }
     }
 
     for (auto op_input_id : get_required_inputs()) {
@@ -297,7 +304,7 @@ JitConstants FusedOpsCodeGenerator::make_op_jit_constants(const FusedOpsConfigur
     std::vector<JitTerm> input_vars;
 
     out_var = get_output_var_name(in_var, op_idx);
-    const auto& out_type = desc.output_layout.data_type;
+    const auto& out_type = desc.get_output_layout().data_type;
 
     if (conf.load_type == FusedOpsConfiguration::LoadType::FEATURE_SHUFFLE && desc.is_type<quantize>()) {
         is_shuffled = true;
@@ -314,7 +321,7 @@ JitConstants FusedOpsCodeGenerator::make_op_jit_constants(const FusedOpsConfigur
     }
 
     auto get_acc_t = [&]() -> ov::element::Type {
-        std::vector<ov::element::Type> input_types = {desc.output_layout.data_type};
+        std::vector<ov::element::Type> input_types = {desc.get_output_layout().data_type};
         for (const auto& dep : dep_data) {
             input_types.emplace_back(params.input_layouts[dep.m_idx].data_type);
         }
@@ -439,8 +446,9 @@ JitConstants FusedOpsCodeGenerator::make_op_jit_constants(const FusedOpsConfigur
                 op_decls += make_statement(tmp_var.assign(tmp_var + pre_shift)).str();
             }
 
+            OPENVINO_ASSERT(desc.output_layouts.size() == 1, "Design changed to allow multiple layouts, this path is not expected to be impacted.");
             // Round operation isn't needed if output type is int8/uint8 and scale coefficient in all output channels is equal to 1.0
-            bool output_type_is_int8 = desc.output_layout.data_type == ov::element::u8 || desc.output_layout.data_type == ov::element::i8;
+            bool output_type_is_int8 = desc.get_output_layout().data_type == ov::element::u8 || desc.get_output_layout().data_type == ov::element::i8;
             if (((p->_need_post_scale || p->_need_post_shift) && output_type_is_int8) || !output_type_is_int8) {
                 op_decls += make_statement(tmp_var.assign(round(tmp_var))).str();
             }
@@ -497,11 +505,12 @@ JitConstants FusedOpsCodeGenerator::make_op_jit_constants(const FusedOpsConfigur
 
             // Input shift
             if (p->_need_pre_shift) {
-                op_decls += make_statement(tmp_var.assign(tmp_var + pre_scale)).str();
+                op_decls += make_statement(tmp_var.assign(tmp_var + pre_shift)).str();
             }
 
+            OPENVINO_ASSERT(desc.output_layouts.size() == 1, "Design changed to allow multiple layouts, this path is not expected to be impacted.");
             // Round operation isn't needed if output type is int8/uint8 and scale coefficient in all output channels is equal to 1.0
-            bool output_type_is_int8 = desc.output_layout.data_type == ov::element::u8 || desc.output_layout.data_type == ov::element::i8;
+            bool output_type_is_int8 = desc.get_output_layout().data_type == ov::element::u8 || desc.get_output_layout().data_type == ov::element::i8;
             if (((p->_need_post_scale || p->_need_post_shift) && output_type_is_int8) || !output_type_is_int8) {
                 op_decls += make_statement(tmp_var.assign(round(tmp_var))).str();
             }
@@ -541,10 +550,18 @@ JitConstants FusedOpsCodeGenerator::make_op_jit_constants(const FusedOpsConfigur
             }
 
             if (dep_data.size() == 2) {
-                if (dep_data[1].m_element_type != out_type) {
-                    nl_m = convert_to_output_type(get_input_var_name(0), vec_size);
+                // The slope must be referenced the same way make_load_jit_constants()
+                // names it (get_input_var_name(m_idx), keyed by the graph input index),
+                // not by its position in dep_data - otherwise the generated kernel uses
+                // an undeclared variable and fails with CL_BUILD_PROGRAM_FAILURE.
+                const auto& slope_dep = dep_data[1];
+                auto slope_name = (slope_dep.m_type == FusedInputType::ORIGINAL)   ? in_var
+                                  : (slope_dep.m_type == FusedInputType::INTERNAL) ? get_output_var_name(in_var, slope_dep.m_idx)
+                                                                                   : get_input_var_name(slope_dep.m_idx, is_shuffled, shuffle_var);
+                if (slope_dep.m_element_type != out_type) {
+                    nl_m = convert_to_output_type(slope_name, vec_size);
                 } else {
-                    nl_m = get_input_var_name(0);
+                    nl_m = slope_name;
                 }
             } else {
                 nl_m = broadcast(nl_m, out_type, vec_size);
@@ -613,10 +630,15 @@ JitTerm FusedOpsCodeGenerator::get_jit_load(const FusedOpsConfiguration& conf,
     JitTerm in_ptr = get_input_ptr_name(input_id);
     JitTerm in_var = get_input_var_name(input_id);
 
-    const auto in_f = extract_channel(ChannelName::FEATURE, input_tensor);
-    const auto out_f = extract_channel(ChannelName::FEATURE, prim_output);
+    const auto in_f = extract_dim(ChannelName::FEATURE, input_tensor);
+    const auto out_f = extract_dim(ChannelName::FEATURE, prim_output);
 
-    bool valid_broadcast_case = input_tensor.count() == out_f || input_tensor.count() == 1;
+    bool valid_broadcast_case = true;
+    if (input_tensor.is_static() && out_f.is_static()) {
+        if (input_tensor.count() != static_cast<size_t>(out_f.get_length()) && input_tensor.count() != 1ul) {
+            valid_broadcast_case = false;
+        }
+    }
 
     // Eltwise fused op can't have full tensor argument when requested vec_size > 1, since it might require
     // splitting load into several parts and some kind of index recalculation which is not supported
@@ -628,7 +650,7 @@ JitTerm FusedOpsCodeGenerator::get_jit_load(const FusedOpsConfiguration& conf,
                                  input_tensor.to_string() + "\noutput: " + prim_output.to_string());
     }
 
-    if (conf.vec_axis != ChannelName::UNKNOWN && extract_channel(conf.vec_axis, input_tensor) != 1) {
+    if (conf.vec_axis != ChannelName::UNKNOWN && extract_dim(conf.vec_axis, input_tensor) != 1) {
         vec_size = conf.vec_size;
     }
 
@@ -646,7 +668,7 @@ JitTerm FusedOpsCodeGenerator::get_jit_load(const FusedOpsConfiguration& conf,
     if (desc.is_type<eltwise>() && conf.load_type == FusedOpsConfiguration::LoadType::LT_ALIGNED_READ &&
         ((format::is_simple_data_format(input_tensor.format) && input_tensor.format != orig_output_format) || f_axis_broadcast) &&
         (!format::is_simple_data_format(input_tensor.format) && (input_tensor.get_partial_shape() == prim_output.get_partial_shape() || f_axis_broadcast)) &&
-        input_tensor.count() != 1) {
+        (input_tensor.is_dynamic() || input_tensor.count() != 1)) {
         std::string sub_group_local_id_str = "get_sub_group_local_id";
         size_t found_sub = conf.bfzyx_idx_order[1].rfind(sub_group_local_id_str);
         OPENVINO_ASSERT(found_sub == std::string::npos, "[GPU] LT_ALIGNED_READ LoadType is used with get_sub_group_local_id.");
@@ -675,7 +697,15 @@ JitTerm FusedOpsCodeGenerator::get_jit_load(const FusedOpsConfiguration& conf,
     if (conf.index_type == FusedOpsConfiguration::IndexType::LINEAR_OFFSET) {
         JitTerm offset{conf.bfzyx_idx_order[0]};
         if (safe_load) {
-            offset = offset % JitTerm{to_code_string(input_tensor.count())};
+            JitTerm input_tensor_count;
+            if (input_tensor.is_dynamic()) {
+                LayoutJitter input_jitter(input_tensor, params.in_port_to_shape_info_offset.at(input_id));
+                input_tensor_count =
+                    JitTerm{input_jitter.stride(ov::intel_gpu::ChannelName::BATCH) + " * " + input_jitter.dim(ov::intel_gpu::ChannelName::BATCH)};
+            } else {
+                input_tensor_count = JitTerm{to_code_string(input_tensor.count())};
+            }
+            offset = offset % input_tensor_count;
         }
 
         if (vec_size > 1) {
@@ -688,18 +718,14 @@ JitTerm FusedOpsCodeGenerator::get_jit_load(const FusedOpsConfiguration& conf,
     // 2. If in given configuration data can't be loaded by a simple UNIT_BLOCK_READx call or load from casted ptr,
     //    we can gather the data to vector
     if (conf.load_type == FusedOpsConfiguration::LoadType::LT_ALIGNED_READ) {
-        bool multiple_elements = false;
-        // For dynamic shape input tensor, check any one of static dimension has more than one element.
         if (input_tensor.is_dynamic()) {
-            for (const auto& dim : input_tensor.get_partial_shape()) {
-                if (dim.is_static() && dim.get_length() > 1) {
-                    multiple_elements = true;
-                    break;
-                }
-            }
+            const auto has_multiple_elements = kernel_selector::GetTensorHasMultipleElementsCondition(get_input_tensor_name(input_id).str());
+            auto block_load = make_block_read(input_dt, vec_size, in_ptr + index_func_call);
+            auto scalar_load = broadcast(in_ptr[index_func_call], input_dt, vec_size);
+            return ternary(JitTerm{"(" + has_multiple_elements + ")"}, block_load, scalar_load);
         }
 
-        if (input_tensor.count() > 1 || multiple_elements) {
+        if (input_tensor.count() > 1) {
             // Currently we assume that in such scenario we can safely load sub_group_size elements from the pointer
             return make_block_read(input_dt, vec_size, in_ptr + index_func_call);
         }
@@ -741,16 +767,16 @@ JitTerm FusedOpsCodeGenerator::get_output_var_name(const JitTerm& input_var, siz
 }
 
 JitTerm FusedOpsCodeGenerator::get_output_type(size_t vec_size) const {
-    return make_type(desc.output_layout.data_type, vec_size);
+    return make_type(desc.get_output_layout().data_type, vec_size);
 }
 
 JitTerm FusedOpsCodeGenerator::convert_to_output_type(const JitTerm& var, size_t vec_size) const {
-    return convert_to_type(var, desc.output_layout.data_type, vec_size);
+    return convert_to_type(var, desc.get_output_layout().data_type, vec_size);
 }
 
 JitTerm FusedOpsCodeGenerator::convert_to_output_type_sat(const JitTerm& var, size_t vec_size) const {
-    if (desc.output_layout.data_type == ov::element::f32 || desc.output_layout.data_type == ov::element::f16) {
-        return convert_to_type(var, desc.output_layout.data_type, vec_size);
+    if (desc.get_output_layout().data_type == ov::element::f32 || desc.get_output_layout().data_type == ov::element::f16) {
+        return convert_to_type(var, desc.get_output_layout().data_type, vec_size);
     }
 
     return concat("convert_", get_output_type(vec_size), "_sat_rte")(var);
@@ -827,7 +853,14 @@ JitConstants make_activation_jit_constants(const std::string& suffix,
         break;
     case activation_func::relu_negative_slope: {
         const JitTerm slope = convert_to_type("m"_jit, calc_dt);
-        jit.add(make_jit_constant(macro_def, ternary(isinf(slope), ternary(input.ge(zero), input, neg(slope)), max(input, zero) + (slope * min(input, zero)))));
+        // OpenCL max/min may drop the NaN operand, so select on the input
+        // explicitly to keep NaN propagating instead of turning into zero.
+        // A ternary is used for the NaN branch instead of select(): select()
+        // requires the condition to be a signed integer of the same width as
+        // the operands (short for half), while isnan() returns int, so f16
+        // kernels do not compile with select().
+        const JitTerm prelu_body = ternary(isinf(slope), ternary(input.ge(zero), input, neg(slope)), max(input, zero) + (slope * min(input, zero)));
+        jit.add(make_jit_constant(macro_def, ternary(isnan(input), input, prelu_body)));
         break;
     }
     case activation_func::elu: {
@@ -955,7 +988,18 @@ JitConstants make_activation_jit_constants(const std::string& suffix,
         break;
     }
     case activation_func::softplus: {
-        jit.add(make_jit_constant(macro_def, log(exp(input) + one)));
+        const auto threshold = (calc_dt == ov::element::f32) ? "20.0f"_jit : "11.0h"_jit;
+        jit.add(make_jit_constant(macro_def, ternary(input.lt(threshold), log(exp(input) + one), input)));
+        break;
+    }
+    case activation_func::swoosh: {
+        const JitTerm offset = convert_to_type("m"_jit, calc_dt);
+        const JitTerm bias = convert_to_type("n"_jit, calc_dt);
+        const JitTerm slope_literal{std::to_string(ov::intel_gpu::op::swoosh_constants::slope)};
+        const JitTerm slope = convert_to_type(slope_literal, calc_dt);
+        const JitTerm shifted = input - offset;
+        const JitTerm softplus = max(shifted, zero) + log(one + exp(neg(abs(shifted))));
+        jit.add(make_jit_constant(macro_def, softplus - slope * input - bias));
         break;
     }
     case activation_func::softsign: {
@@ -1004,6 +1048,58 @@ JitConstants make_activation_jit_constants(const std::string& suffix,
     case activation_func::round_half_away_from_zero:
         jit.add(make_jit_constant(macro_def, round(input)));
         break;
+    case activation_func::erfinv: {
+        // NOTE: exactly the same implementation can be found
+        // in jitter.cpp - ideally both should be defined
+        // in common place, but that would require deeper refactoring
+        // (e.g. class JitTerm is also defined in multiple places and
+        // it is a different implementation in different jitters)
+        // which is out of scope for the current change....
+        const bool is_f32 = (out_dt == ov::element::f32);
+        const JitTerm elem_inf{is_f32 ? "INFINITY" : "((half)INFINITY)"};
+        auto cf = [&](const char* lit) {
+            return concat(lit, type_suffix);
+        };
+        auto horner = [&](const JitTerm& s, std::initializer_list<JitTerm> coefs) {
+            const auto* it = coefs.begin();
+            JitTerm r = *it++;
+            for (; it != coefs.end(); ++it) {
+                r = r * s + *it;
+            }
+            return r;
+        };
+        const JitTerm& x = input;
+        const JitTerm w = neg(log((cf("1.0") - x) * (cf("1.0") + x)));
+        const JitTerm s_lo = w - cf("2.5");
+        const JitTerm s_hi = sqrt(w) - cf("3.0");
+        const JitTerm p_lo = horner(s_lo,
+                                    {cf("2.81022636e-08"),
+                                     cf("3.43273939e-07"),
+                                     cf("-3.5233877e-06"),
+                                     cf("-4.39150654e-06"),
+                                     cf("0.00021858087"),
+                                     cf("-0.00125372503"),
+                                     cf("-0.00417768164"),
+                                     cf("0.246640727"),
+                                     cf("1.50140941")});
+        const JitTerm p_hi = horner(s_hi,
+                                    {cf("-0.000200214257"),
+                                     cf("0.000100950558"),
+                                     cf("0.00134934322"),
+                                     cf("-0.00367342844"),
+                                     cf("0.00573950773"),
+                                     cf("-0.0076224613"),
+                                     cf("-0.00943887047"),
+                                     cf("1.00167406"),
+                                     cf("2.83297682")});
+        const JitTerm poly = x * ternary(w.lt(cf("5.0")), p_lo, p_hi);
+        // x = 0     -> poly yields 0 naturally.
+        // |x| > 1   -> log of a negative produces NaN, propagated by poly.
+        // x = +/-1  -> log(0) blows up the polynomial; force +/-inf via x *
+        // INFINITY.
+        jit.add(make_jit_constant(macro_def, ternary(fabs(x).eq(cf("1.0")), x * elem_inf, poly)));
+        break;
+    }
     case activation_func::none:
     default:
         jit.add(make_jit_constant(macro_def, input));

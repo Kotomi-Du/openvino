@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,8 +6,7 @@
 
 #include "openvino/frontend/exception.hpp"
 
-namespace ov {
-namespace frontend {
+namespace ov::frontend {
 void ProgressReporterExtension::report_progress(float progress,
                                                 unsigned int total_steps,
                                                 unsigned int completed_steps) const {
@@ -18,5 +17,4 @@ void ProgressReporterExtension::report_progress(float progress,
                             "The reported progress needs to be a value between 0.0 and 1.0");
     m_callback(progress, total_steps, completed_steps);
 }
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend

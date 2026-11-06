@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,9 +9,7 @@
 #include "openvino/util/log.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace jax {
+namespace ov::frontend::jax {
 
 Place::Place(const ov::frontend::InputModel& input_model, size_t tensor_index)
     : m_input_model(input_model),
@@ -54,6 +52,4 @@ Place::Place(const ov::frontend::InputModel& input_model, size_t tensor_index)
     }
 }
 
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax

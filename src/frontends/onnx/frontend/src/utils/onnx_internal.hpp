@@ -1,9 +1,10 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -15,10 +16,7 @@ namespace ONNX_NAMESPACE {
 class ModelProto;
 }
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace detail {
+namespace ov::frontend::onnx::detail {
 
 using ::ONNX_NAMESPACE::ModelProto;
 
@@ -26,7 +24,7 @@ using ::ONNX_NAMESPACE::ModelProto;
 ///             to an ov::Model representation.
 ///
 /// \note       The function can be used only internally by OV components!
-///             Passing ModelProto between componets which use different protobuf
+///             Passing ModelProto between components which use different protobuf
 ///             library can cause segfaults. If stream parsing fails or the ONNX model
 ///             contains unsupported ops, the function throws an ov::Exception.
 ///
@@ -38,7 +36,7 @@ using ::ONNX_NAMESPACE::ModelProto;
 /// \return     An ov::Model that represents a single output from the created
 /// graph.
 std::shared_ptr<ov::Model> import_onnx_model(std::shared_ptr<ModelProto> model_proto,
-                                             const std::string& model_path,
+                                             const std::filesystem::path& model_path,
                                              detail::MappedMemoryHandles mmap_cache,
                                              ov::frontend::ExtensionHolder extensions = {});
 
@@ -51,7 +49,7 @@ std::shared_ptr<ov::Model> import_onnx_model(std::shared_ptr<ModelProto> model_p
 /// \param      extensions An object containing a collection of frontend extensions to use during the import process
 /// \return     A ov::Model with ONNXFrameworkNodes
 std::shared_ptr<ov::Model> decode_to_framework_nodes(std::shared_ptr<ModelProto> model_proto,
-                                                     const std::string& model_path,
+                                                     const std::filesystem::path& model_path,
                                                      detail::MappedMemoryHandles mmap_cache,
                                                      ov::frontend::ExtensionHolder extensions = {});
 
@@ -59,7 +57,4 @@ std::shared_ptr<ov::Model> decode_to_framework_nodes(std::shared_ptr<ModelProto>
 ///            to a complete function with actual compute operations
 void convert_decoded_model(std::shared_ptr<ov::Model> model);
 
-}  // namespace detail
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::detail

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -33,8 +33,8 @@ constexpr size_t boxes_port = 0;
 constexpr size_t scores_port = 1;
 
 PartialShape infer_selected_indices_shape(const TensorVector& inputs, size_t max_output_boxes_per_class) {
-    const auto boxes_shape = inputs[boxes_port].get_shape();
-    const auto scores_shape = inputs[scores_port].get_shape();
+    const auto& boxes_shape = inputs[boxes_port].get_shape();
+    const auto& scores_shape = inputs[scores_port].get_shape();
 
     // NMSRotated produces triplets
     // that have the following format: [batch_index, class_index, box_index]

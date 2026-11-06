@@ -1,6 +1,10 @@
 # type: ignore
 from __future__ import annotations
+from collections.abc import ItemsView
+from collections.abc import Iterator
+from collections.abc import KeysView
 from collections.abc import Mapping
+from collections.abc import ValuesView
 from functools import singledispatchmethod
 from openvino._pyopenvino import ConstOutput
 from openvino._pyopenvino import InferRequest as InferRequestBase
@@ -10,7 +14,7 @@ import numpy
 import numpy as np
 import openvino._pyopenvino
 import typing
-__all__ = ['ConstOutput', 'InferRequestBase', 'Mapping', 'OVDict', 'Tensor', 'np', 'singledispatchmethod', 'tensor_from_file']
+__all__: list[str] = ['ConstOutput', 'InferRequestBase', 'ItemsView', 'Iterator', 'KeysView', 'Mapping', 'OVDict', 'Tensor', 'ValuesView', 'np', 'singledispatchmethod', 'tensor_from_file']
 class OVDict(collections.abc.Mapping):
     """
     Custom OpenVINO dictionary with inference results.
@@ -51,6 +55,7 @@ class OVDict(collections.abc.Mapping):
         
     """
     __abstractmethods__: typing.ClassVar[frozenset]  # value = frozenset()
+    __slots__: typing.ClassVar[tuple] = ('_dict', '_names', '__weakref__')
     _abc_impl: typing.ClassVar[_abc._abc_data]  # value = <_abc._abc_data object>
     @staticmethod
     def _OVDict__getitem_impl(*args, **kwargs) -> numpy.ndarray:
@@ -59,7 +64,7 @@ class OVDict(collections.abc.Mapping):
         ...
     def _OVDict__get_key(self, index: int) -> openvino._pyopenvino.ConstOutput:
         ...
-    def _OVDict__get_names(self) -> typing.Dict[openvino._pyopenvino.ConstOutput, typing.Set[str]]:
+    def _OVDict__get_names(self) -> dict[openvino._pyopenvino.ConstOutput, set[str]]:
         """
         Return names of every output key.
         
@@ -68,28 +73,28 @@ class OVDict(collections.abc.Mapping):
         """
     def __getitem__(self, key: typing.Union[openvino._pyopenvino.ConstOutput, int, str]) -> numpy.ndarray:
         ...
-    def __init__(self, _dict: typing.Dict[openvino._pyopenvino.ConstOutput, numpy.ndarray]) -> None:
+    def __init__(self, _dict: dict[openvino._pyopenvino.ConstOutput, numpy.ndarray]) -> None:
         ...
-    def __iter__(self) -> typing.Iterator:
+    def __iter__(self) -> collections.abc.Iterator:
         ...
     def __len__(self) -> int:
         ...
     def __repr__(self) -> str:
         ...
-    def items(self) -> typing.ItemsView[openvino._pyopenvino.ConstOutput, numpy.ndarray]:
+    def items(self) -> collections.abc.ItemsView[openvino._pyopenvino.ConstOutput, numpy.ndarray]:
         ...
-    def keys(self) -> typing.KeysView[openvino._pyopenvino.ConstOutput]:
+    def keys(self) -> collections.abc.KeysView[openvino._pyopenvino.ConstOutput]:
         ...
-    def names(self) -> typing.Tuple[typing.Set[str], ...]:
+    def names(self) -> tuple[set[str], ...]:
         """
         Return names of every output key.
         
                 Insert empty set if key has no name.
                 
         """
-    def to_dict(self) -> typing.Dict[openvino._pyopenvino.ConstOutput, numpy.ndarray]:
+    def to_dict(self) -> dict[openvino._pyopenvino.ConstOutput, numpy.ndarray]:
         """
-        Return underlaying native dictionary.
+        Return a shallow copy of the underlying native dictionary.
         
                 Function performs shallow copy, thus any modifications to
                 returned values may affect this class as well.
@@ -99,7 +104,7 @@ class OVDict(collections.abc.Mapping):
         """
         Convert values of this dictionary to a tuple.
         """
-    def values(self) -> typing.ValuesView[numpy.ndarray]:
+    def values(self) -> collections.abc.ValuesView[numpy.ndarray]:
         ...
 class _InferRequestWrapper(openvino._pyopenvino.InferRequest):
     """

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,7 +25,7 @@ public:
     KernelGenerator(KernelGenerator&&) = delete;
     KernelGenerator& operator=(const KernelGenerator&) = delete;
     KernelGenerator& operator=(KernelGenerator&&) = delete;
-    virtual ~KernelGenerator() = default;
+    ~KernelGenerator() override = default;
 
     [[nodiscard]] KernelData get_kernel_data(const RuntimeParams& params) const override;
 

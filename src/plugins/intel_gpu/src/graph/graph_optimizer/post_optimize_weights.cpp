@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -45,9 +45,19 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
     auto offsets = get_weights_bias_offset(node);
     auto impl = node.get_selected_impl();
 
-    // Skip load-time weights reordering if impl is not selected
-    if (!impl)
+    if (!impl && node.type() == gru_seq::type_id() && node.is_dynamic()) {
+        for (auto i = offsets.weights_offset; i < offsets.bias_offset; i++) {
+            auto& prev_node = node.get_dependency(i);
+            add_gru_weights_reorder(prev_node.id(), p, prev_node, node, i);
+            node.get_dependency(i).get_output_layout(false);
+        }
         return;
+    }
+
+    // Skip load-time weights reordering if impl is not selected
+    if (!impl) {
+        return;
+    }
 
     if (impl->is_dynamic()) {
         // TODO: To relax current limitation w.r.t the future optimization of weight reorder process
@@ -56,12 +66,15 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
         // Also we skip weight reorder for onednn impl because onednn fully connected layer is using simple format, therefore
         // reordering to cldnn shape_agnostic_kernel's preferred blocked format at build time does not helpful for the performance.
         // This situation might be changed once onednn shape agnostic kernel is used in the future.
-        if (p.is_internal_program())
+        if (p.is_internal_program()) {
             return;
-        if (node.get_preferred_impl_type() == impl_types::onednn)
+        }
+        if (node.get_preferred_impl_type() == impl_types::onednn) {
             return;
-        if (node.type() != fully_connected::type_id())
+        }
+        if (node.type() != fully_connected::type_id()) {
             return;
+        }
     }
     // Don't run impl selection to avoid double compilation of reorder kernels
     // in main program and internal program for constant propagation
@@ -72,7 +85,7 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
             auto reorder_impl = weights_reorder_node.type()->create_impl(weights_reorder_node);
 
             weights_reorder_node.set_selected_impl(std::move(reorder_impl));
-            if (auto impl = weights_reorder_node.get_selected_impl()) {
+            if (auto* impl = weights_reorder_node.get_selected_impl()) {
                 auto params = weights_reorder_node.get_kernel_impl_params();
                 p.get_kernels_cache().add_kernels_source(*params, impl->get_kernels_source());
             }
@@ -107,9 +120,11 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
                 // Need to update WeightsReorderParamsOneDNN of fc onednn imple when input layout data_type/format is different
                 auto onednn_weights_params = std::dynamic_pointer_cast<onednn::WeightsReorderParamsOneDNN>(weights_reorder_params);
                 if (onednn_weights_params &&
-                   (updated_input_layout.format != onednn::find_data_format(onednn_weights_params->_in_desc) ||
-                    onednn::convert_data_type(updated_input_layout.data_type) != onednn_weights_params->_in_desc.get_data_type())) {
-                    onednn_weights_params->_in_desc = onednn::layout_to_memory_desc(updated_input_layout);
+                   (updated_input_layout.format != onednn::find_data_format(*onednn_weights_params->_in_desc) ||
+                    onednn::convert_data_type(updated_input_layout.data_type) != onednn_weights_params->_in_desc->get_data_type())) {
+                    auto shape_consistent = onednn::keep_weights_reorder_shape_consistent(updated_input_layout, *onednn_weights_params->_out_desc);
+                    OPENVINO_ASSERT(shape_consistent, "[GPU] Input shape and output shape of weight reorder should be same.");
+                    onednn_weights_params->_in_desc = std::make_shared<dnnl::memory::desc>(onednn::layout_to_memory_desc(updated_input_layout));
                 }
 #endif // ENABLE_ONEDNN_FOR_GPU
                 auto weights_reorder = _rf.get_weights_reorder(prev_node.get_primitive()->input[0].pid,
@@ -125,7 +140,7 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
                 if (node.type() == lstm_seq::type_id()) {
                     program_node& prev_node = node.get_dependency(i);
                     if (i == 5) {
-                        add_lstm_bias_reorder(prev_node.id(), weights_reorder_params, p, prev_node, node);
+                        add_lstm_bias_reorder(prev_node.id(), weights_reorder_params, p, prev_node, node, i);
                     } else {
                         add_lstm_weights_reorder(prev_node.id(), weights_reorder_params, p, prev_node, node, i);
                     }
@@ -134,7 +149,7 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
                 } else if (node.type() == gru_seq::type_id()) {
                     program_node& prev_node = node.get_dependency(i);
                     if (i == 2 || i == 3) {
-                        add_gru_weights_reorder(prev_node.id(), weights_reorder_params, p, prev_node, node, i);
+                        add_gru_weights_reorder(prev_node.id(), p, prev_node, node, i);
                     }
                     auto& weights_reorder_node = node.get_dependency(i);
                     weights_reorder_node.get_output_layout(false);
@@ -159,16 +174,19 @@ void post_optimize_weights::optimize_weights(T& node, program& p) {
 
 void post_optimize_weights::select_implementation(program& p, program_node& node) {
     node.set_selected_impl(node.type()->create_impl(node));
-    if (auto impl = node.get_selected_impl()) {
+    if (auto* impl = node.get_selected_impl()) {
         auto params = node.get_kernel_impl_params();
         p.get_kernels_cache().add_kernels_source(*params, impl->get_kernels_source());
     }
 }
 
-void post_optimize_weights::add_gru_weights_reorder(primitive_id input_id, std::shared_ptr<WeightsReorderParams> reorder_params, program& p, \
-    cldnn::program_node& prev, cldnn::program_node& node, size_t i) {
-    OPENVINO_ASSERT(reorder_params != nullptr, "[GPU] WeightsReorderParams is not initialized.");
-    std::string permute_id = input_id + "_permute" + to_string(i);
+void post_optimize_weights::add_gru_weights_reorder(primitive_id input_id,
+                                                    program& p,
+                                                    cldnn::program_node& prev,
+                                                    cldnn::program_node& node,
+                                                    size_t i) {
+    // Id is consumer specific so two sequences sharing one weight node do not reuse a connected permute.
+    std::string permute_id = input_id + "_" + node.id() + "_permute" + to_string(i);
     std::vector<uint16_t> ord{0, 2, 1};
     auto permute = std::make_shared<cldnn::permute>(permute_id, input_info{input_id}, ord);
     auto& permute_node = p.get_or_create(permute);
@@ -185,6 +203,17 @@ void post_optimize_weights::add_gru_weights_reorder(primitive_id input_id, std::
 void post_optimize_weights::add_lstm_weights_reorder(primitive_id input_id, std::shared_ptr<WeightsReorderParams> reorder_params, program& p, \
                                                      cldnn::program_node& prev, cldnn::program_node& node, size_t i) {
     OPENVINO_ASSERT(reorder_params != nullptr, "[GPU] WeightsReorderParams is not initialized.");
+
+    reorder_cache_key ckey{prev.id(), reorder_params->get_output_layout()};
+    auto itr = _cached_lstm_weights_reorder.find(ckey);
+
+    // If we already did the lstm weight optimization, reuse existing node.
+    if (itr != _cached_lstm_weights_reorder.end()) {
+            node.replace_dependency(i, *itr->second, false);
+            return;
+    }
+
+    // This is first time. Run lstm weight optimization.
     std::string reorder_id = input_id + "_reo_" + std::to_string(i);
     const auto dir_num = static_cast<int>(reorder_params->get_input_layout().get_shape()[0]);
     auto hiddenSize = reorder_params->get_input_layout().get_shape()[1] / 4;
@@ -236,11 +265,24 @@ void post_optimize_weights::add_lstm_weights_reorder(primitive_id input_id, std:
     set_implementation_and_output(crop2_node);
     set_implementation_and_output(con_node);
     set_implementation_and_output(permute_node);
+
+    _cached_lstm_weights_reorder[ckey] = &permute_node;
 }
 
 void post_optimize_weights::add_lstm_bias_reorder(primitive_id input_id, std::shared_ptr<WeightsReorderParams> reorder_params, program& p, \
-                                                  cldnn::program_node& prev, cldnn::program_node& node) {
+                                                  cldnn::program_node& prev, cldnn::program_node& node, size_t i) {
     OPENVINO_ASSERT(reorder_params != nullptr, "[GPU] WeightsReorderParams is not initialized.");
+
+    reorder_cache_key ckey{prev.id(), reorder_params->get_output_layout()};
+    auto itr = _cached_lstm_bias_reorder.find(ckey);
+
+    // If we already did the lstm bias optimization, reuse existing node.
+    if (itr != _cached_lstm_bias_reorder.end()) {
+            node.replace_dependency(i, *itr->second, false);
+            return;
+    }
+
+    // This is first time. Run lstm bias optimization.
     const auto dir_num = static_cast<int>(reorder_params->get_input_layout().get_shape()[0]);
     auto hiddenSize = reorder_params->get_output_layout().get_shape()[1] / 4;
     auto cropSize = cldnn::tensor{dir_num, static_cast<int>(hiddenSize), 1, 1};
@@ -276,11 +318,13 @@ void post_optimize_weights::add_lstm_bias_reorder(primitive_id input_id, std::sh
     set_implementation_and_output(crop1_node);
     set_implementation_and_output(crop2_node);
     set_implementation_and_output(con_node);
+
+    _cached_lstm_bias_reorder[ckey] = &con_node;
 }
 
 void post_optimize_weights::run(program& p) {
     bool found_lstm = false;
-    for (auto& node : p.get_processing_order()) {
+    for (const auto& node : p.get_processing_order()) {
         if (node->is_type<convolution>()) {
             optimize_weights(node->as<convolution>(), p);
         } else if (node->is_type<deconvolution>()) {
@@ -294,8 +338,8 @@ void post_optimize_weights::run(program& p) {
             optimize_weights(node->as<gru_seq>(), p);
         }
     }
-    if (found_lstm)
+    if (found_lstm) {
         p.get_processing_order().calc_processing_order(p);
+    }
 }
-
 }  // namespace cldnn

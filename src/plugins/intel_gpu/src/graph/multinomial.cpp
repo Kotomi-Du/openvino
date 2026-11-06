@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "intel_gpu/runtime/memory.hpp"
@@ -31,13 +31,10 @@ layout multinomial_inst::calc_output_layout(multinomial_node const& node, kernel
             tensor{std::vector<tensor::value_type>{
                 static_cast<tensor::value_type>(primitive->num_samples)
             }}};
-    } else {
-        return {primitive->output_data_type, input_layout.format,
-            tensor{std::vector<tensor::value_type>{
-                input_layout.batch(),
-                static_cast<tensor::value_type>(primitive->num_samples)
-            }}};
     }
+    return {primitive->output_data_type,
+            input_layout.format,
+            tensor{std::vector<tensor::value_type>{input_layout.batch(), static_cast<tensor::value_type>(primitive->num_samples)}}};
 }
 
 multinomial_inst::typed_primitive_inst(network& network, multinomial_node const& node)

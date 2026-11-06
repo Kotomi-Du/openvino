@@ -16,11 +16,12 @@ from openvino.utils.types import as_nodes
 import functools
 import numpy as np
 import openvino._pyopenvino
+import types
 import typing
 """
 Factory functions for all openvino ops.
 """
-__all__ = ['Constant', 'Node', 'NodeInput', 'Parameter', 'TensorShape', 'UserInputError', 'adaptive_avg_pool', 'adaptive_max_pool', 'as_node', 'as_nodes', 'check_valid_attributes', 'deformable_convolution', 'detection_output', 'gather', 'gather_nd', 'i420_to_bgr', 'i420_to_rgb', 'if_op', 'is_non_negative_value', 'is_positive_value', 'matrix_nms', 'max_pool', 'multiclass_nms', 'nameable_op', 'np', 'nv12_to_bgr', 'nv12_to_rgb', 'partial', 'prior_box', 'random_uniform', 'slice', 'softmax']
+__all__: list[str] = ['Constant', 'Node', 'NodeInput', 'Parameter', 'TensorShape', 'UserInputError', 'adaptive_avg_pool', 'adaptive_max_pool', 'as_node', 'as_nodes', 'check_valid_attributes', 'deformable_convolution', 'detection_output', 'gather', 'gather_nd', 'i420_to_bgr', 'i420_to_rgb', 'if_op', 'is_non_negative_value', 'is_positive_value', 'matrix_nms', 'max_pool', 'multiclass_nms', 'nameable_op', 'np', 'nv12_to_bgr', 'nv12_to_rgb', 'partial', 'prior_box', 'random_uniform', 'slice', 'softmax']
 def adaptive_avg_pool(*args, **kwargs) -> openvino._pyopenvino.Node:
     """
     Return a node which performs AdaptiveAvgPool operation.
@@ -449,5 +450,5 @@ def softmax(*args, **kwargs) -> openvino._pyopenvino.Node:
         
     """
 NodeInput: typing._UnionGenericAlias  # value = typing.Union[openvino._pyopenvino.Node, int, float, numpy.ndarray]
-TensorShape: typing._GenericAlias  # value = typing.List[int]
+TensorShape: types.GenericAlias  # value = list[int]
 _get_node_factory_opset8: functools.partial  # value = functools.partial(<function _get_node_factory at memory_address>, 'opset8')

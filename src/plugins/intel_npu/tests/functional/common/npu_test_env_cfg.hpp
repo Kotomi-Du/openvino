@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,25 +7,36 @@
 #include <gtest/gtest.h>
 
 #include <openvino/runtime/device_id_parser.hpp>
+#include <optional>
 #include <string>
 
-#include "base/ov_behavior_test_utils.hpp"
 #include "intel_npu/npu_private_properties.hpp"
+#include "shared_test_classes/base/ov_behavior_test_utils.hpp"
 
 using namespace ov::test::behavior;
 
 namespace ov::test::utils {
 
+enum class DriverType { PV, RELEASE, LATEST };
+
+std::string driverTypeToString(DriverType type);
+
+std::optional<DriverType> parseDriverType(const std::string& str);
+
 /**
- * Reads configuration environment variables
+ * Reads configuration environment variables and CLI arguments
  */
 class NpuTestEnvConfig {
 public:
+    // CLI argument: --driver_release={pv|release|latest}
+    // Defaults to LATEST when not provided. Set in main.cpp before tests run
+    mutable DriverType driver_release = DriverType::LATEST;
+
     std::string IE_NPU_TESTS_DEVICE_NAME;
     std::string IE_NPU_TESTS_DUMP_PATH;
     std::string IE_NPU_TESTS_LOG_LEVEL;
     std::string IE_NPU_TESTS_PLATFORM;
-    std::string OV_NPU_TESTS_SKIP_CONFIG_FILE;
+    std::string OV_NPU_TESTS_SKIP_CONFIG_FILE = "npu_skip_func_tests.xml";
     mutable std::string OV_NPU_TESTS_BLOBS_PATH;  // mutable because it may have a default value set in main.cpp
 
     bool IE_NPU_TESTS_RUN_COMPILER = true;
@@ -54,12 +65,13 @@ std::string getTestsPlatformFromEnvironmentOr(const std::string& instead);
 std::string getDeviceNameTestCase(const std::string& str);
 std::string getDeviceName();
 std::string getDeviceNameID(const std::string& str);
+std::string getTestPlatform();
 
 }  // namespace ov::test::utils
 
 namespace InferRequestParamsAnyMapTestName {
 
-std::string getTestCaseName(testing::TestParamInfo<ov::test::behavior::InferRequestParams> obj);
+std::string getTestCaseName(const testing::TestParamInfo<ov::test::behavior::InferRequestParams>& obj);
 
 }  // namespace InferRequestParamsAnyMapTestName
 
@@ -69,6 +81,6 @@ typedef std::tuple<std::string,                        // Device name
                    std::map<std::string, std::string>  // Config
                    >
     InferRequestParams;
-std::string getTestCaseName(testing::TestParamInfo<InferRequestParams> obj);
+std::string getTestCaseName(const testing::TestParamInfo<InferRequestParams>& obj);
 
 }  // namespace InferRequestParamsMapTestName

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -73,10 +73,7 @@ using namespace ov;
 using namespace ov::op;
 using namespace ov::frontend::tensorflow;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 #define TF_OP_CONVERTER(op)       OutputVector op(const ov::frontend::tensorflow::NodeContext& node)
 #define TF_OP_CONVERTER_NAMED(op) NamedOutputVector op(const ov::frontend::tensorflow::NodeContext& node)
@@ -430,6 +427,7 @@ const std::map<std::string, CreatorFunction> get_supported_ops() {
         {"UniqueWithCounts", CreatorFunction(translate_unique_with_counts_op)},
         {"Unpack", CreatorFunction(translate_unpack_op)},
         {"UnravelIndex", CreatorFunction(translate_unravel_index_op)},
+        {"UnsortedSegmentMax", CreatorFunction(translate_unsorted_segment_max_op)},
         {"UnsortedSegmentSum", CreatorFunction(translate_unsorted_segment_sum_op)},
         {"While", CreatorFunction(translate_while_op)},
         {"Where", CreatorFunction(translate_where_op)},
@@ -489,7 +487,4 @@ const std::vector<std::string> get_supported_ops_via_tokenizers() {
             "StringSplitV2",
             "StringToHashBucketFast"};
 }
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

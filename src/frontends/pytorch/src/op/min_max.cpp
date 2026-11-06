@@ -1,7 +1,8 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include "openvino/core/validation_util.hpp"
 #include "openvino/frontend/pytorch/node_context.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
@@ -14,12 +15,20 @@
 #include "openvino/op/util/framework_node.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
+
+// Returns true when the output is an empty list
+static bool is_empty_axes(const Output<Node>& dims_input) {
+    if (is_empty_list(dims_input)) {
+        return true;
+    }
+    if (const auto constant_src = ov::util::get_constant_from_source(dims_input)) {
+        return constant_src->get_shape() == Shape{0};
+    }
+    return false;
+}
 
 OutputVector translate_max(const NodeContext& context) {
     // torch.max (same for torch.min) actually has two interfaces smashed together:
@@ -52,34 +61,6 @@ OutputVector translate_max(const NodeContext& context) {
     return {values, indices};
 };
 
-OutputVector translate_max_dim(const NodeContext& context) {
-    // torch.max.dim(x, dim, keepdim)
-    num_inputs_check(context, 2, 3);
-    auto x = context.get_input(0);
-    auto axes_node = context.get_input(1);
-    auto axis_const = context.const_input<int64_t>(1);
-
-    bool keepdims = false;
-    if (!context.input_is_none(2)) {
-        keepdims = context.const_input<bool>(2);
-    }
-
-    auto values = context.mark_node(std::make_shared<v1::ReduceMax>(x, axes_node, keepdims));
-    auto k = context.mark_node(std::make_shared<v0::Constant>(element::i32, Shape{}, 1));
-    auto topk = context.mark_node(
-        std::make_shared<v11::TopK>(x, k, axis_const, TopKMode::MAX, TopKSortType::NONE, element::i64));
-    auto indices = topk->output(1);
-    if (!keepdims) {
-        indices = context.mark_node(std::make_shared<v0::Squeeze>(indices, axes_node));
-    }
-    return {values, indices};
-};
-
-OutputVector translate_max_dim_fx(const NodeContext& context) {
-    ov::OutputVector out_vec = translate_max_dim(context);
-    return {context.mark_node(make_list_construct(out_vec))};
-};
-
 OutputVector translate_min(const NodeContext& context) {
     // torch.min (same for torch.max) actually has two interfaces smashed together:
     // torch.min(x, dim, keepdim) and torch.min(x, y)
@@ -109,34 +90,6 @@ OutputVector translate_min(const NodeContext& context) {
         indices = context.mark_node(std::make_shared<v0::Squeeze>(indices, axes_node));
     }
     return {values, indices};
-};
-
-OutputVector translate_min_dim(const NodeContext& context) {
-    // torch.min.dim(x, dim, keepdim)
-    num_inputs_check(context, 2, 3);
-    auto x = context.get_input(0);
-    auto axes_node = context.get_input(1);
-    auto axis_const = context.const_input<int64_t>(1);
-
-    bool keepdims = false;
-    if (!context.input_is_none(2)) {
-        keepdims = context.const_input<bool>(2);
-    }
-
-    auto values = context.mark_node(std::make_shared<v1::ReduceMin>(x, axes_node, keepdims));
-    auto k = context.mark_node(std::make_shared<v0::Constant>(element::i32, Shape{}, 1));
-    auto topk = context.mark_node(
-        std::make_shared<v11::TopK>(x, k, axis_const, TopKMode::MIN, TopKSortType::NONE, element::i64));
-    auto indices = topk->output(1);
-    if (!keepdims) {
-        indices = context.mark_node(std::make_shared<v0::Squeeze>(indices, axes_node));
-    }
-    return {values, indices};
-};
-
-OutputVector translate_min_dim_fx(const NodeContext& context) {
-    ov::OutputVector out_vec = translate_min_dim(context);
-    return {context.mark_node(make_list_construct(out_vec))};
 };
 
 OutputVector translate_maximum(const NodeContext& context) {
@@ -175,14 +128,16 @@ OutputVector translate_amin(const NodeContext& context) {
     // aten::amin(Tensor self, int[1] dim=[], bool keepdim=False) -> Tensor
 
     // aten::amin.out(Tensor self, int[1] dim=[], bool keepdim=False, *, Tensor(a!) out) -> Tensor(a!)
-    num_inputs_check(context, 2, 4);
+    num_inputs_check(context, 1, 4);
     auto x = context.get_input(0);
-    auto dims = context.get_input(1);
+    // From torch 2.8, amin dim input is optional; an empty list also means reduce all dims
+    auto dim_input = !context.input_is_none(1) ? context.get_input(1) : Output<Node>{};
+    auto dim = (dim_input.get_node() == nullptr || is_empty_axes(dim_input)) ? get_axes_range(context, 0) : dim_input;
     bool keep_dims = false;
     if (!context.input_is_none(2)) {
         keep_dims = context.const_input<bool>(2);
     }
-    auto res = context.mark_node(std::make_shared<v1::ReduceMin>(x, dims, keep_dims));
+    auto res = context.mark_node(std::make_shared<v1::ReduceMin>(x, dim, keep_dims));
     if (!context.input_is_none(3)) {
         context.mutate_input(3, res);
     }
@@ -193,14 +148,16 @@ OutputVector translate_amax(const NodeContext& context) {
     // aten::amax(Tensor self, int[1] dim=[], bool keepdim=False) -> Tensor
 
     // aten::amax.out(Tensor self, int[1] dim=[], bool keepdim=False, *, Tensor(a!) out) -> Tensor(a!)
-    num_inputs_check(context, 2, 4);
+    num_inputs_check(context, 1, 4);
     auto x = context.get_input(0);
-    auto dims = context.get_input(1);
+    // From torch 2.8, amax dim input is optional; an empty list also means reduce all dims
+    auto dim_input = !context.input_is_none(1) ? context.get_input(1) : Output<Node>{};
+    auto dim = (dim_input.get_node() == nullptr || is_empty_axes(dim_input)) ? get_axes_range(context, 0) : dim_input;
     bool keep_dims = false;
     if (!context.input_is_none(2)) {
         keep_dims = context.const_input<bool>(2);
     }
-    auto res = context.mark_node(std::make_shared<v1::ReduceMax>(x, dims, keep_dims));
+    auto res = context.mark_node(std::make_shared<v1::ReduceMax>(x, dim, keep_dims));
     if (!context.input_is_none(3)) {
         context.mutate_input(3, res);
     }
@@ -213,11 +170,13 @@ OutputVector translate_aminmax(const NodeContext& context) {
 
     auto input = context.get_input(0);
 
-    // check if dim is provided, if not, get the range of axes to compute min and max
-    auto dim = !context.input_is_none(1) ? context.get_input(1) : get_axes_range(context, 0);
+    // From torch 2.8, amax dim input is optional; an empty list also means reduce all dims
+    auto dim_input = context.has_attribute("dim") ? context.get_input("dim")
+                                                  : (!context.input_is_none(1) ? context.get_input(1) : Output<Node>{});
+    auto dim = (dim_input.get_node() == nullptr || is_empty_axes(dim_input)) ? get_axes_range(context, 0) : dim_input;
 
     // check if keepdim is provided, if not, set it to false like PyTorch
-    bool keep_dims = !context.input_is_none(2) ? context.const_input<bool>(2) : false;
+    bool keep_dims = get_const_input_or_attribute(context, 2, "keepdim", false);
 
     auto amin = context.mark_node(std::make_shared<v1::ReduceMin>(input, dim, keep_dims));
     auto amax = context.mark_node(std::make_shared<v1::ReduceMax>(input, dim, keep_dims));
@@ -227,7 +186,4 @@ OutputVector translate_aminmax(const NodeContext& context) {
     return {amin, amax};
 }
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

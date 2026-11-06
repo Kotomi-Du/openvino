@@ -1,30 +1,64 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <cstdint>
 #include <set>
+#include <vector>
 
 #include "emitters/utils.hpp"
 #include "node.h"
 #include "nodes/kernels/riscv64/cpu_isa_traits.hpp"
 #include "nodes/kernels/riscv64/jit_generator.hpp"
 #include "snippets/generator.hpp"
-#include "snippets/snippets_isa.hpp"
+
+#ifdef SNIPPETS_DEBUG_CAPS
+#    include "emitters/snippets/common/jit_debug_emitter_base.hpp"
+#    include "emitters/snippets/riscv64/verbose.hpp"
+#endif
 
 namespace ov::intel_cpu::riscv64 {
 
-enum emitter_in_out_map {
+enum emitter_in_out_map : uint8_t {
     vec_to_vec,
     vec_to_gpr,
     gpr_to_vec,
     gpr_to_gpr,
 };
 
+inline void set_vector_length(ov::intel_cpu::riscv64::jit_generator_t* h,
+                              const size_t vector_length,
+                              const Xbyak_riscv::SEW sew,
+                              const std::vector<size_t>& aux_gpr_idxs,
+                              const Xbyak_riscv::LMUL lmul = Xbyak_riscv::LMUL::m1,
+                              const Xbyak_riscv::Reg* avl = nullptr) {
+    // RVV exposes two ways to program VL:
+    // - `vsetivli` for small compile-time AVL values encoded directly in the instruction
+    // - `vsetvli` for runtime AVL values, or constants that do not fit that immediate field
+    if (avl != nullptr) {
+        h->vsetvli(Xbyak_riscv::zero, *avl, sew, lmul, Xbyak_riscv::VTA::tu, Xbyak_riscv::VMA::mu);
+        return;
+    }
+
+    OV_CPU_JIT_EMITTER_ASSERT(vector_length > 0, "set_vector_length requires either vector_length or avl register");
+    if (vector_length <= 31) {
+        h->vsetivli(Xbyak_riscv::zero, vector_length, sew, lmul, Xbyak_riscv::VTA::tu, Xbyak_riscv::VMA::mu);
+        return;
+    }
+
+    // `vsetivli` only has a 5-bit AVL immediate, so larger fixed lengths still need the
+    // register-based form and therefore a temporary GPR.
+    OV_CPU_JIT_EMITTER_ASSERT(!aux_gpr_idxs.empty(), "Large vector length requires an auxiliary GPR register");
+    const auto vector_length_reg = Xbyak_riscv::Reg(static_cast<int>(aux_gpr_idxs.back()));
+    h->uni_li(vector_length_reg, vector_length);
+    h->vsetvli(Xbyak_riscv::zero, vector_length_reg, sew, lmul, Xbyak_riscv::VTA::tu, Xbyak_riscv::VMA::mu);
+}
+
 class jit_emitter : public ov::snippets::Emitter {
 public:
-    jit_emitter(ov::intel_cpu::riscv64::jit_generator* host,
+    jit_emitter(ov::intel_cpu::riscv64::jit_generator_t* host,
                 ov::intel_cpu::riscv64::cpu_isa_t host_isa,
                 ov::element::Type exec_prc = ov::element::f32,
                 emitter_in_out_map in_out_type = emitter_in_out_map::vec_to_vec);
@@ -55,6 +89,15 @@ public:
     static std::set<std::vector<element::Type>> get_supported_precisions(
         const std::shared_ptr<ov::Node>& node = nullptr);
 
+#ifdef SNIPPETS_DEBUG_CAPS
+    const char* info() const {
+        if (!info_.is_initialized()) {
+            info_.init(this);
+        }
+        return info_.c_str();
+    }
+#endif
+
     // TODO: RV64 supports vector multiplier.
     // However, currently not all JIT emitter support LMUL > 1:
     //   - if aux_vec registers are needed - preamble/postamble support only m1.
@@ -65,13 +108,16 @@ public:
     }
 
 protected:
-    size_t get_max_gpr_count() const {
+    // In the standard RISC-V calling convention, the stack pointer is always kept 16-byte aligned
+    static constexpr size_t sp_alignment = 16;
+
+    static size_t get_max_gpr_count() {
         return 32;
     }
-    size_t get_max_fp_gpr_count() const {
+    static size_t get_max_fp_gpr_count() {
         return 32;
     }
-    size_t get_max_vecs_count() const {
+    static size_t get_max_vecs_count() {
         return 32;
     }
 
@@ -79,14 +125,14 @@ protected:
     size_t get_fp_gpr_length() const;
     size_t get_vec_length() const;
 
-    Xbyak_riscv::VReg mask_vreg() const {
+    static Xbyak_riscv::VReg mask_vreg() {
         return Xbyak_riscv::v0;
     }
 
     void emit_code_impl(const std::vector<size_t>& in_idxs,
                         const std::vector<size_t>& out_idxs,
                         const std::vector<size_t>& pool_vec_idxs,
-                        const std::vector<size_t>& pool_gpr_idxs) const override {
+                        const std::vector<size_t>& pool_gpr_idxs) const override final {
         emit_code_impl(in_idxs, out_idxs, pool_vec_idxs, pool_gpr_idxs, {});
     }
 
@@ -121,7 +167,8 @@ protected:
                         const std::vector<size_t>& exclude_fp_gpr_regs,
                         const std::vector<size_t>& exclude_vec_regs) const;
 
-    virtual void validate_arguments(const std::vector<size_t>&, const std::vector<size_t>&) const {}
+    virtual void validate_arguments([[maybe_unused]] const std::vector<size_t>& in,
+                                    [[maybe_unused]] const std::vector<size_t>& out) const {}
 
     // we accept only 32bit hexadecimal table values to avoid any rounding
     using table_entry_val_t = uint32_t;
@@ -141,9 +188,9 @@ protected:
     }
 
     void push_entries_of(const table_t& t) {
-        for (auto it = t.begin(); it != t.end(); it++) {
-            auto key = (*it).first;
-            auto te = (*it).second;  // copy values from table
+        for (const auto& it : t) {
+            auto key = it.first;
+            auto te = it.second;  // copy values from table
             push_arg_entry_of(key, te);
         }
     }
@@ -152,36 +199,39 @@ protected:
     virtual void register_table_entries() {}
 
     void load_table_addr() const {
-        const auto address = reinterpret_cast<uintptr_t>(l_table->getAddress());
-        OPENVINO_ASSERT(address != 0, "Address of data section is missed!");
-        h->uni_li(p_table, address);
+        // Use a local literal pool with a forward label reference so we don't require the data
+        // label to be defined before code emission.
+        constexpr int32_t literal_offset = 16;  // 4 insns * 4 bytes -> 8-byte aligned literal
+        Xbyak_riscv::Label after_literal;
+        h->auipc(p_table, 0);
+        h->ld(p_table, p_table, literal_offset);
+        h->nop();
+        h->j_(after_literal);
+        h->putL(*l_table);
+        h->L(after_literal);
     }
 
-    inline void load_table_val(const std::string& key,
-                               const Xbyak_riscv::FReg& freg,
-                               size_t key_off_val_shift = 0) const {
+    void load_table_val(const std::string& key, const Xbyak_riscv::FReg& freg, size_t key_off_val_shift = 0) const {
         auto off = table_off(key, key_off_val_shift);
         h->flw(freg, p_table, off);
     }
 
-    inline void load_table_val(const std::string& key,
-                               const Xbyak_riscv::Reg& reg,
-                               size_t key_off_val_shift = 0) const {
+    void load_table_val(const std::string& key, const Xbyak_riscv::Reg& reg, size_t key_off_val_shift = 0) const {
         auto off = table_off(key, key_off_val_shift);
         h->lw(reg, p_table, off);
     }
 
     // Load scalar to vector with broadcast
-    inline void load_table_val(const std::string& key,
-                               const Xbyak_riscv::VReg& vreg,
-                               const Xbyak_riscv::Reg& tmp,
-                               size_t key_off_val_shift = 0) const {
+    void load_table_val(const std::string& key,
+                        const Xbyak_riscv::VReg& vreg,
+                        const Xbyak_riscv::Reg& tmp,
+                        size_t key_off_val_shift = 0) const {
         auto off = table_off(key, key_off_val_shift);
         h->lw(tmp, p_table, off);
         h->vmv_v_x(vreg, tmp);
     }
 
-    ov::intel_cpu::riscv64::jit_generator* h;
+    ov::intel_cpu::riscv64::jit_generator_t* h;
     ov::intel_cpu::riscv64::cpu_isa_t host_isa_;
     ov::element::Type exec_prc_;
 
@@ -199,14 +249,24 @@ private:
     mutable std::vector<size_t> preserved_gpr_idxs;
     mutable std::vector<size_t> preserved_fp_gpr_idxs;
 
-    // In the standard RISC-V calling convention, the stack pointer is always kept 16-byte aligned
-    const size_t sp_aligment = 16;
+#ifdef SNIPPETS_DEBUG_CAPS
+    template <typename>
+    friend class ov::intel_cpu::jit_debug_emitter_base_common;
+    template <typename>
+    friend class jit_debug_emitter_riscv_base;
+    friend class jit_debug_emitter;
+#endif
+
     // integer gpr byte size
     const size_t xlen = Xbyak_riscv::CPU().getXlen() / 8;
     // fp gpr byte size
     const size_t flen = Xbyak_riscv::CPU().getFlen() / 8;
     // vector register byte size
     const size_t vlen = Xbyak_riscv::CPU().getVlen() / 8;
+
+#ifdef SNIPPETS_DEBUG_CAPS
+    mutable jit_emitter_info_t info_;
+#endif
 
     size_t table_off(const std::string& key, size_t key_off_val_shift = 0) const {
         const auto it = entry_map_.find(key);  // search an entry for a key

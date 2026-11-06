@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class ConvolutionKernel_Winograd_2x3_s1_fused : public ConvolutionKernelBase {
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_Winograd_2x3_s1_fused() : ConvolutionKernelBase("convolution_gpu_winograd_2x3_s1_fused") {}
-    virtual ~ConvolutionKernel_Winograd_2x3_s1_fused() {}
+    ~ConvolutionKernel_Winograd_2x3_s1_fused() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

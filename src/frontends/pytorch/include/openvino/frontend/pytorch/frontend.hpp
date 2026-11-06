@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,9 +10,7 @@
 #include "openvino/frontend/pytorch/node_context.hpp"
 #include "openvino/frontend/pytorch/visibility.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
+namespace ov::frontend::pytorch {
 
 class PYTORCH_FRONTEND_API FrontEnd : public ov::frontend::FrontEnd {
 public:
@@ -49,7 +47,7 @@ public:
 
     /// \brief Gets name of this FrontEnd. Can be used by clients
     /// if frontend is selected automatically by FrontEndManager::load_by_model
-    /// \return Paddle frontend name.
+    /// \return PyTorch frontend name.
     std::string get_name() const override {
         return "pytorch";
     }
@@ -69,6 +67,4 @@ protected:
     TelemetryExtension::Ptr m_telemetry;
 };
 
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch

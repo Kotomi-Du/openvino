@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -49,20 +49,23 @@ MatrixNmsKernelRef::DispatchData SetDefault(const matrix_nms_params& params, siz
 }
 
 std::tuple<int, int> GetMaxBoxes(const matrix_nms_params& params) {
-    const int classes_num = static_cast<const int>(params.inputs[1].Feature().v);
-    const int boxes_num = static_cast<const int>(params.inputs[0].Feature().v);
+    const int classes_num = static_cast<int>(params.inputs[1].Feature().v);
+    const int boxes_num = static_cast<int>(params.inputs[0].Feature().v);
 
     int max_boxes_per_class{boxes_num};
-    if (params.nms_top_k >= 0)
+    if (params.nms_top_k >= 0) {
         max_boxes_per_class = std::min(max_boxes_per_class, params.nms_top_k);
+    }
 
     auto classes_num_adj = classes_num;
-    if (params.background_class >= 0 && params.background_class < classes_num)
+    if (params.background_class >= 0 && params.background_class < classes_num) {
         classes_num_adj = std::max(1, classes_num - 1);
+    }
 
     auto max_boxes_per_batch = max_boxes_per_class * classes_num_adj;
-    if (params.keep_top_k >= 0)
+    if (params.keep_top_k >= 0) {
         max_boxes_per_batch = std::min(max_boxes_per_batch, params.keep_top_k);
+    }
 
     return {max_boxes_per_class, max_boxes_per_batch};
 }
@@ -79,20 +82,30 @@ KernelsData MatrixNmsKernelRef::GetKernelsData(const Params& params) const {
 
     constexpr size_t BOX_INFO_SIZE{16};
 
-    const int batches_num = static_cast<const int>(new_params.inputs[1].Batch().v);
-    const int classes_num = static_cast<const int>(new_params.inputs[1].Feature().v);
+    const int batches_num = static_cast<int>(new_params.inputs[1].Batch().v);
+    const int classes_num = static_cast<int>(new_params.inputs[1].Feature().v);
 
     int max_boxes_per_class, max_boxes_per_batch;
     std::tie(max_boxes_per_class, max_boxes_per_batch) = GetMaxBoxes(new_params);
+    max_boxes_per_class = std::min(max_boxes_per_class, batches_num * max_boxes_per_batch);
 
     const size_t box_info_num = batches_num * classes_num * max_boxes_per_class;
 
     const size_t box_info_buffer_size = box_info_num * BOX_INFO_SIZE;
     const size_t sel_boxes_num_buffer_size = batches_num * classes_num * sizeof(int);
 
+    size_t datatype_size = BytesPerElement(new_params.inputs[1].GetDType());
+
+    const size_t iou_matrix_buffer_size = batches_num * classes_num * max_boxes_per_class * datatype_size;
+    const size_t iou_max_buffer_size = iou_matrix_buffer_size;
+    const size_t min_decays_buffer_size = iou_matrix_buffer_size;
+
     kernel_data.internalBuffers.push_back(box_info_buffer_size);
     kernel_data.internalBuffers.push_back(sel_boxes_num_buffer_size);
-    kernel_data.internalBufferDataType = Datatype::F32;
+    kernel_data.internalBuffers.push_back(iou_matrix_buffer_size);
+    kernel_data.internalBuffers.push_back(iou_max_buffer_size);
+    kernel_data.internalBuffers.push_back(min_decays_buffer_size);
+    kernel_data.internalBufferDataType = new_params.inputs[1].GetDType(); // input_scores
 
     for (size_t i{}; i < kernels_num; ++i) {
         auto entry_point = GetEntryPoint(kernelName, new_params.layerID, params, i);
@@ -105,7 +118,7 @@ KernelsData MatrixNmsKernelRef::GetKernelsData(const Params& params) const {
 
         DispatchData dispatch_data = SetDefault(new_params, i);
         auto& kernel = kernel_data.kernels[i];
-        KernelBase::CheckDispatchData(kernelName, dispatch_data, params.engineInfo.maxWorkGroupSize);
+        KernelBase::CheckDispatchData(kernelName, dispatch_data, params.engineInfo);
         kernel.params.workGroups.global = dispatch_data.gws;
         kernel.params.workGroups.local = dispatch_data.lws;
         kernel.code.kernelString = GetKernelString(kernelName, jit, entry_point, params.engineInfo);
@@ -122,7 +135,7 @@ float MatrixNmsKernelRef::GetKernelsPriority(const Params& params) const {
 
 bool MatrixNmsKernelRef::Validate(const Params& p) const {
     if (p.GetType() != KernelType::MATRIX_NMS) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     return true;
@@ -167,6 +180,9 @@ void MatrixNmsKernelRef::SetKernelArguments(const matrix_nms_params& params, clK
         kernel.params.arguments.push_back({ArgumentDescriptor::Types::INPUT, 1});
         kernel.params.arguments.push_back({ArgumentDescriptor::Types::INTERNAL_BUFFER, 0});
         kernel.params.arguments.push_back({ArgumentDescriptor::Types::INTERNAL_BUFFER, 1});
+        kernel.params.arguments.push_back({ArgumentDescriptor::Types::INTERNAL_BUFFER, 2});
+        kernel.params.arguments.push_back({ArgumentDescriptor::Types::INTERNAL_BUFFER, 3});
+        kernel.params.arguments.push_back({ArgumentDescriptor::Types::INTERNAL_BUFFER, 4});
         break;
 
     case 1:

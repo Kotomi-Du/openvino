@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,14 +12,11 @@
 
 namespace ov {
 
-namespace op {
-namespace util {
+namespace op::util {
 class FrameworkNode;
-}  // namespace util
-}  // namespace op
+}  // namespace op::util
 
-namespace frontend {
-namespace jax {
+namespace frontend::jax {
 
 const std::string jax_prefix = "[JAX Frontend] ";
 
@@ -29,7 +26,7 @@ const std::string& get_jax_prefix();
 /// \param COND Condition to check
 /// \param ... Additional error message info to be added to the error message via the `<<`
 ///            stream-insertion operator. Note that the expressions here will be evaluated lazily,
-///            i.e., only if the `cond` evalutes to `false`.
+///            i.e., only if the `cond` evaluates to `false`.
 /// \throws ::ov::frontend::OpConversionFailure if `cond` is false.
 #ifndef JAX_OP_CONVERSION_CHECK
 #    define JAX_OP_CONVERSION_CHECK(COND, ...) \
@@ -79,6 +76,5 @@ ov::Output<ov::Node> create_same_type_const_scalar(const ov::Output<ov::Node>& s
 
 }  // namespace op
 
-}  // namespace jax
-}  // namespace frontend
+}  // namespace frontend::jax
 }  // namespace ov

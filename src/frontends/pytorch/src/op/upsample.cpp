@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,10 +9,7 @@
 #include "openvino/op/multiply.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
 
@@ -21,7 +18,7 @@ OutputVector base_translate_upsample(const NodeContext& context,
                                      v11::Interpolate::InterpolateMode interpolate_mode,
                                      size_t dims,
                                      bool antialias = false) {
-    num_inputs_check(context, 1, 4);
+    num_inputs_check(context, 1, 5);
     auto data = context.get_input(0);
     std::vector<size_t> pad(dims, 0);
     auto size_mode = v11::Interpolate::ShapeCalcMode::SIZES;
@@ -121,7 +118,4 @@ OutputVector translate_upsample_bicubic2d_aa(const NodeContext& context) {
     return base_translate_upsample(context, v11::Interpolate::InterpolateMode::BICUBIC_PILLOW, 2);
 };
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

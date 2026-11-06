@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,9 +8,7 @@
 #include "place.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace jax {
+namespace ov::frontend::jax {
 
 InputModel::InputModel(const std::shared_ptr<JaxDecoder>& model_decoder) : m_model_decoder(model_decoder) {
     const auto& inputs = m_model_decoder->inputs();
@@ -112,6 +110,4 @@ std::shared_ptr<JaxDecoder> InputModel::get_decoder() const {
     return m_model_decoder;
 }
 
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax

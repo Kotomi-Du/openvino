@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class DeconvolutionKernel_imad_ref : public DeconvolutionKernelBase {
 public:
     using Parent = DeconvolutionKernelBase;
     DeconvolutionKernel_imad_ref() : DeconvolutionKernelBase("deconvolution_gpu_imad_ref") {}
-    virtual ~DeconvolutionKernel_imad_ref() = default;
+    ~DeconvolutionKernel_imad_ref() override = default;
 
     ParamsKey GetSupportedKey() const override;
 

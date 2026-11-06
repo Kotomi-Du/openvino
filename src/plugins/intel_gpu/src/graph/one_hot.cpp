@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,15 +15,15 @@
 namespace cldnn {
 GPU_DEFINE_PRIMITIVE_TYPE_ID(one_hot)
 
-static bool is_output_bfzyx(const layout& input, int32_t axis) {
-    if (input.format == format::bfzyx)
+static bool is_output_bfzyx(const layout& input, int64_t axis) {
+    if (input.format == format::bfzyx) {
         return true;
-    if (axis == 4)
+    }
+    if (axis == 4) {
         return true;
+    }
     auto in_dims = input.get_tensor().sizes(format::bfyx);
-    if (in_dims[3] != 1)
-        return true;
-    return false;
+    return in_dims[3] != 1;
 }
 
 layout one_hot_inst::calc_output_layout(one_hot_node const& node, kernel_impl_params const& impl_param) {
@@ -38,8 +38,9 @@ layout one_hot_inst::calc_output_layout(one_hot_node const& node, kernel_impl_pa
                             "Incorrect parameters configuration: one_hot_axis should be less or equal to 4.");
     }
 
-    if (is_output_bfzyx(input_layout, desc->one_hot_axis))
+    if (is_output_bfzyx(input_layout, desc->one_hot_axis)) {
         format = format::bfzyx;
+    }
 
     return {dt, format, desc->shape};
 }
@@ -50,7 +51,7 @@ std::vector<layout> one_hot_inst::calc_output_layouts(const one_hot_node& /*node
     auto input_layout = impl_param.get_input_layout(0);
     auto dt = desc->output_data_types[0].value_or(input_layout.data_type);
 
-    ov::op::v1::OneHot op;
+    ov::op::util::OneHotBase op;
     try {
         // set_axis also calls resolve_axis method which tries to get input0 partial shape
         // thus wrap this call with try/catch.
@@ -66,7 +67,7 @@ std::vector<layout> one_hot_inst::calc_output_layouts(const one_hot_node& /*node
     };
 
     int64_t depth = desc->depth;
-    auto& memory_deps = impl_param.memory_deps;
+    const auto& memory_deps = impl_param.memory_deps;
 
     std::unordered_map<size_t, ov::Tensor> const_data = {};
     if (depth != 0) {
@@ -76,7 +77,7 @@ std::vector<layout> one_hot_inst::calc_output_layouts(const one_hot_node& /*node
         auto depth_mem = memory_deps.at(1);
 
         cldnn::mem_lock<uint8_t, mem_lock_type::read> depth_lock(depth_mem, impl_param.get_stream());
-        auto depth_ptr = depth_lock.data();
+        auto* depth_ptr = depth_lock.data();
 
         // update depth_tensor if depth value comes from memory_deps instead of Constant node
         auto depth_tensor = make_tensor(depth_mem->get_layout(), depth_ptr);
@@ -84,7 +85,7 @@ std::vector<layout> one_hot_inst::calc_output_layouts(const one_hot_node& /*node
     }
 
     std::vector<ShapeType> output_shapes =
-        ov::op::v1::shape_infer(&op, input_shapes, ov::make_tensor_accessor(const_data));
+        ov::op::util::shape_infer_base(&op, input_shapes, ov::make_tensor_accessor(const_data));
     return {{output_shapes[0], dt, format::get_default_format(output_shapes[0].size())}};
 }
 
@@ -113,8 +114,9 @@ std::string one_hot_inst::to_string(one_hot_node const& node) {
 one_hot_inst::typed_primitive_inst(network& network, one_hot_node const& node) : parent(network, node) {
     auto input_layout = node.get_input_layout();
 
-    if (input_layout.is_dynamic())
+    if (input_layout.is_dynamic()) {
         return;
+    }
 
     const auto& input_sizes = input_layout.get_tensor();
     const auto& output_sizes = argument->shape;
@@ -135,8 +137,9 @@ one_hot_inst::typed_primitive_inst(network& network, one_hot_node const& node) :
     const auto& one_hot_axis = node.get_primitive()->one_hot_axis;
 
     for (int64_t i = 0, j = 0; j < static_cast<int64_t>(output_dims.size()) - 1; ++i, ++j) {
-        if (j == one_hot_axis)
+        if (j == one_hot_axis) {
             ++j;
+        }
         if (input_dims[i] != output_dims[j]) {
             CLDNN_ERROR_MESSAGE(node.id(), "Incorrect parameters configuration: shape does not fit input size.");
         }

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@ class SoftmaxKernel_fb : public SoftmaxKernelBaseBF {
 public:
     using Parent = SoftmaxKernelBaseBF;
     SoftmaxKernel_fb() : SoftmaxKernelBaseBF("softmax_gpu_fb") {}
-    virtual ~SoftmaxKernel_fb() {}
+    ~SoftmaxKernel_fb() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

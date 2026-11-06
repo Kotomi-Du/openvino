@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -118,14 +118,14 @@ KernelsPriority ConvolutionKernel_Winograd_2x3_s1_fused::GetKernelsPriority(cons
 
 bool ConvolutionKernel_Winograd_2x3_s1_fused::Validate(const Params& p) const {
     if (!Parent::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const convolution_params& params = static_cast<const convolution_params&>(p);
 
     if ((params.weights.X().v != 3) || (params.weights.Y().v != 3) || (params.stride.x != 1) ||
         (params.stride.y != 1) || (params.filterSize.x != 3) || (params.filterSize.y != 3) ||
-        (params.outputs[0].Feature().v % 32) || (params.inputs[0].Feature().v % 32) ||
+        ((params.outputs[0].Feature().v % 32) != 0u) || ((params.inputs[0].Feature().v % 32) != 0u) ||
         (params.outputs[0].Feature().pad.before != 0) || (params.outputs[0].Feature().pad.after != 0) ||
         (params.outputs[0].Batch().pad.before != 0) || (params.outputs[0].Batch().pad.after != 0) ||
         // TODO: add support to batch > 1

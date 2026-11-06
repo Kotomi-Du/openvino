@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,11 +11,12 @@ namespace kernel_selector {
 namespace {
 
 size_t getTileXY(const concatenation_params& params) {
-    auto& input = params.inputs[0];
+    const auto& input = params.inputs[0];
     size_t tileXY =  1;
     if (params.isAligned) {
         switch (input.GetDType()) {
         case Datatype::F16:
+        case Datatype::BF16:
         case Datatype::INT8:
         case Datatype::UINT8:
             tileXY = 4;
@@ -29,6 +30,7 @@ size_t getTileXY(const concatenation_params& params) {
             tileXY = 2;
             break;
         case Datatype::F16:
+        case Datatype::BF16:
             tileXY = 4;
             break;
         case Datatype::INT8:
@@ -43,11 +45,13 @@ size_t getTileXY(const concatenation_params& params) {
     auto tileXYMultiple = input.X().v;
     bool noInputPad = input.X().pad.Total() == 0;
     bool noOutputPad = params.outputs[0].X().pad.Total() == 0;
-    if (noInputPad && noOutputPad)
+    if (noInputPad && noOutputPad) {
         tileXYMultiple = input.X().v * input.Y().v;
+    }
 
-    while (tileXYMultiple % tileXY != 0)
+    while (tileXYMultiple % tileXY != 0) {
         tileXY /= 2;
+    }
 
     return tileXY;
 }
@@ -58,6 +62,8 @@ ParamsKey ConcatenationKernel_b_fs_yx_fsv16::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableInputDataType(Datatype::INT8);
@@ -83,7 +89,7 @@ DeviceFeaturesKey ConcatenationKernel_b_fs_yx_fsv16::get_required_device_feature
 
 bool ConcatenationKernel_b_fs_yx_fsv16::Validate(const Params& p) const {
     if (!ConcatenationKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     const concatenation_params& params = static_cast<const concatenation_params&>(p);
@@ -92,12 +98,13 @@ bool ConcatenationKernel_b_fs_yx_fsv16::Validate(const Params& p) const {
     auto same_layout = params.inputs[0].GetLayout();
     for (const auto& lt : params.inputs) {
         if (lt.GetLayout() != same_layout) {
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 
-    if (params.axis != ConcatAxis::FEATURE)
-        return false;
+    if (params.axis != ConcatAxis::FEATURE) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

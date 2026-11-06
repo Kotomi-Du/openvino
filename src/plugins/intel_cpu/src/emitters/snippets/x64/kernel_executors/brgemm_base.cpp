@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -15,8 +15,10 @@
 #include <cstdint>
 #include <memory>
 #include <oneapi/dnnl/dnnl.hpp>
-#include <sstream>
-#include <string>
+#ifdef SNIPPETS_DEBUG_CAPS
+#    include <sstream>
+#    include <string>
+#endif
 
 #include "common/primitive_hashing_utils.hpp"
 #include "common/utils.hpp"
@@ -118,11 +120,9 @@ std::string BrgemmBaseKernelConfig::to_string() const {
 void BrgemmBaseKernelExecutor::update_config(const ov::snippets::lowered::ExpressionPtr& expr,
                                              const ov::snippets::lowered::LinearIRCPtr& linear_ir,
                                              BrgemmBaseKernelConfig& config) {
-    // update M/N/K/beta
-    auto [M, N, K, beta] = BrgemmKernelExecutorHelper::get_runtime_brgemm_params(expr, linear_ir);
+    const auto [M, N, K, beta, LDC] = BrgemmKernelExecutorHelper::get_runtime_brgemm_params(expr, linear_ir);
 
     const auto LDA = snippets::utils::get_dim_stride(expr->get_input_port(0));
-    const auto LDC = snippets::utils::get_dim_stride(expr->get_output_port(0));
     auto LDB = snippets::utils::get_dim_stride(expr->get_input_port(1));
 
     const auto& brgemm_node = as_type_ptr<ov::intel_cpu::BrgemmCPU>(expr->get_node());
@@ -130,7 +130,9 @@ void BrgemmBaseKernelExecutor::update_config(const ov::snippets::lowered::Expres
     // In case of data repacking LDB is chosen in accordance with repacking buffer size
     const auto& brgemm_config = brgemm_node->get_config();
     if (brgemm_config.with_wei_repacking()) {
-        LDB = brgemm_utils::repacking::compute_LDB(LDB, brgemm_config.wei_n_blk(), brgemm_config.are_wei_blocked());
+        LDB = brgemm_utils::repacking::compute_K_blocked_stride(LDB,
+                                                                brgemm_config.wei_n_blk(),
+                                                                brgemm_config.are_wei_blocked());
     }
 
     config.update(M, N, K, LDA, LDB, LDC, beta);

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -30,9 +30,6 @@ struct border_impl : typed_primitive_impl_ocl<border> {
 
         size_t rank = impl_param.get_input_layout(0).get_rank();
         format pads_format = format::adjust_to_rank(format::bfyx, rank);
-
-        std::vector<int32_t> begin(primitive->pads_begin.begin(), primitive->pads_begin.end());
-        std::vector<int32_t> end(primitive->pads_end.begin(), primitive->pads_end.end());
 
         size_t input_offset = 1;
         if (!(primitive->non_constant_input_mask & border::PAD_NON_CONST_INPUT::BEGIN)) {
@@ -127,7 +124,7 @@ struct border_impl : typed_primitive_impl_ocl<border> {
     void load(BinaryInputBuffer& ib) override {
         parent::load(ib);
         ib >> zero_input;
-        if (is_dynamic() && _kernel_data.kernelName.length() != 0) {
+        if (is_dynamic() && !_kernel_data.kernelName.empty()) {
             auto& kernel_selector = kernel_selector_t::Instance();
             auto kernel_impl = kernel_selector.GetImplementation(_kernel_data.kernelName);
             kernel_impl->GetUpdateDispatchDataFunc(_kernel_data);
@@ -154,8 +151,9 @@ protected:
         std::vector<BufferDescriptor> internal_buffers;
         if (_kernel_data.params != nullptr) {
             const auto& prim_params = static_cast<const kernel_selector::border_params&>(*_kernel_data.params);
-            if (prim_params.inputs[0].LogicalSize() == 0)
+            if (prim_params.inputs[0].LogicalSize() == 0) {
                 internal_buffers.emplace_back(1, ov::element::u8);
+            }
         }
 
         return internal_buffers;
@@ -165,7 +163,7 @@ protected:
 namespace detail {
 
 attach_border_impl::attach_border_impl() {
-    auto types = {data_types::f32, data_types::f16, data_types::i32, data_types::i8, data_types::u8};
+    auto types = {data_types::f32, data_types::f16, data_types::bf16, data_types::i32, data_types::i8, data_types::u8};
 
     auto formats = {
         format::yxfb,

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ using namespace cldnn;
 
 void add_onednn_optimization_attributes::run(program& p) {
 #ifdef ENABLE_ONEDNN_FOR_GPU
-    for (auto& node : p.get_processing_order()) {
+    for (const auto& node : p.get_processing_order()) {
         if (node->get_preferred_impl_type() == impl_types::onednn
             && !node->is_dynamic()) {
             node->init_onednn_primitive_attributes();

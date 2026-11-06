@@ -1,25 +1,28 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 
+#include <fstream>
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "concatenation_inst.h"
+#include "convolution_inst.h"
+#include "eltwise_inst.h"
 #include "intel_gpu/graph/program.hpp"
 #include "layout_optimizer.h"
+#include "lora_inst.h"
+#include "program_helpers.h"
 #include "quantize_inst.h"
-#include "eltwise_inst.h"
-#include "convolution_inst.h"
 #include "read_value_inst.h"
-#include <string>
-#include <vector>
-#include <memory>
-#include <list>
-#include <utility>
-#include <set>
 
-#include <fstream>
-
-#define GPU_DEBUG_LOG_PASS    GPU_DEBUG_LOG << "[" << get_name() << "] "
+#define GPU_DEBUG_LOG_PASS GPU_DEBUG_LOG << "[" << get_name() << "] "
 
 namespace cldnn {
 class base_pass {
@@ -28,7 +31,9 @@ class base_pass {
 public:
     explicit base_pass(const std::string& pass_name) : name(pass_name) {}
     virtual void run(program& p) = 0;
-    std::string get_name() { return name; }
+    std::string get_name() {
+        return name;
+    }
 
 private:
     const std::string name;
@@ -40,7 +45,7 @@ public:
     void run(program& p, base_pass& pass);
     uint32_t get_pass_count() { return pass_count; }
     uint32_t inc_pass_count() { return ++pass_count; }
-    ~pass_manager() {}
+    ~pass_manager() = default;
 
 private:
     uint32_t pass_count;
@@ -133,8 +138,8 @@ private:
     void handle_quantize_node(program& p, quantize_node& quantize_node);
     void prepare_dequantize_merge(program& p, eltwise_node& eltwise_node);
     void remove_fake_reorders(program& p, reorder_node& reorder_node);
-    void prepare_scale_shift_opt(program &p, quantize_node& quantize_node);
-    bool optimize_quantize(program &p, quantize_node& quantize_node);
+    void prepare_scale_shift_opt(program& p, quantize_node& quantize_node);
+    bool optimize_quantize(program& p, quantize_node& quantize_node);
 };
 
 // TODO: Remove this pass once no unexpected reshapes/reorders are added during ov::Model -> cldnn::topology conversion
@@ -150,19 +155,18 @@ public:
 
 private:
     void run(program& p) override;
-    void fuse_bias(program &p);
-    void fuse_swiglu(program &p);
+    void fuse_bias(program& p);
+    void fuse_swiglu(program& p);
     void fuse_reorders(program& p);
-    void fuse_simple_primitives(program &p);
-    void fuse_constant_transposes(program &p);
-    void optimize_fused_ops(program &p);
-    void remove_redundant_reshape(program &p);
+    void fuse_simple_primitives(program& p);
+    void fuse_constant_transposes(program& p);
+    void optimize_fused_ops(program& p);
+    void remove_redundant_reshape(program& p);
 };
 
 class pre_replace_deconv : public base_pass {
 public:
-    explicit pre_replace_deconv() :
-        base_pass("pre_replace_deconv") {}
+    explicit pre_replace_deconv() : base_pass("pre_replace_deconv") {}
 
 private:
     void run(program& p) override;
@@ -171,8 +175,10 @@ private:
 class prepare_padding : public base_pass {
 public:
     explicit prepare_padding(bool output_size_handling_enabled_switch)
-        : base_pass("prepare_padding"), output_size_handling_enabled(output_size_handling_enabled_switch) {}
+        : base_pass("prepare_padding"),
+          output_size_handling_enabled(output_size_handling_enabled_switch) {}
     static cldnn::padding get_needed_padding_for_convolution(convolution_node& node);
+
 private:
     void run(program& p) override;
     bool output_size_handling_enabled;
@@ -197,25 +203,36 @@ private:
         size_t bias_offset;
 
         // When using this ctor weights offset is added to the bias_offset
-        weights_bias_offset(const size_t w_offset, const size_t b_offset)
-            : weights_offset(w_offset)
-            , bias_offset(weights_offset + b_offset)
-        {}
+        weights_bias_offset(const size_t w_offset, const size_t b_offset) : weights_offset(w_offset), bias_offset(weights_offset + b_offset) {}
     };
 
     void run(program& p) override;
-    template<typename T>
+    template <typename T>
     weights_bias_offset get_weights_bias_offset(const T& node);
-    template<typename T>
+    template <typename T>
     void optimize_weights(T& node, program& p);
     void select_implementation(program& p, program_node& node);
-    void add_lstm_weights_reorder(primitive_id input_id, std::shared_ptr<WeightsReorderParams> reorder_params, program& p, cldnn::program_node&, \
-                                  cldnn::program_node&, size_t);
-    void add_gru_weights_reorder(primitive_id input_id, std::shared_ptr<WeightsReorderParams> reorder_params, program& p, cldnn::program_node&, \
-        cldnn::program_node&, size_t);
-    void add_lstm_bias_reorder(primitive_id input_id, std::shared_ptr<WeightsReorderParams> reorder_params, program& p, cldnn::program_node&, \
-                               cldnn::program_node&);
+    void add_lstm_weights_reorder(primitive_id input_id,
+                                  std::shared_ptr<WeightsReorderParams> reorder_params,
+                                  program& p,
+                                  cldnn::program_node&,
+                                  cldnn::program_node&,
+                                  size_t);
+    void add_gru_weights_reorder(primitive_id input_id,
+                                 program& p,
+                                 cldnn::program_node&,
+                                 cldnn::program_node&,
+                                 size_t);
+    void add_lstm_bias_reorder(primitive_id input_id,
+                               std::shared_ptr<WeightsReorderParams> reorder_params,
+                               program& p,
+                               cldnn::program_node&,
+                               cldnn::program_node&,
+                               size_t);
     reorder_factory& _rf;
+
+    std::map<reorder_cache_key, program_node*> _cached_lstm_weights_reorder;
+    std::map<reorder_cache_key, program_node*> _cached_lstm_bias_reorder;
 };
 
 class propagate_constants : public base_pass {
@@ -224,13 +241,9 @@ public:
 
 private:
     void run(program& p) override;
-    std::list<std::tuple<
-        primitive_id,
-        memory::ptr,
-        std::tuple<std::shared_ptr<weightless_cache_manager>, std::shared_ptr<layout>, std::shared_ptr<reorder>>>>
-    calculate(engine& engine,
-              const ExecutionConfig& config,
-              std::shared_ptr<ov::threading::IStreamsExecutor> task_executor);
+    std::list<std::tuple<primitive_id, memory::ptr, std::tuple<std::shared_ptr<weightless_cache_manager>, std::shared_ptr<layout>, std::shared_ptr<reorder>>>>
+    calculate(engine& engine, const ExecutionConfig& config, std::shared_ptr<ov::threading::IStreamsExecutor> task_executor,
+              const std::map<primitive_type_id, bool>& onednn_impls);
     bool has_non_const_user(program_node& node) const;
     void handle_constant(program& prog, program_node& node);
     void add_constant(program& prog, program_node& node);
@@ -244,8 +257,7 @@ private:
 
 class remove_redundant_reorders : public base_pass {
 public:
-    explicit remove_redundant_reorders(bool enable_reorder_fusing = false, bool update_implementations = false,
-        bool remove_output_reorders = false);
+    explicit remove_redundant_reorders(bool enable_reorder_fusing = false, bool update_implementations = false, bool remove_output_reorders = false);
     void run(program& p) override;
 
 private:
@@ -322,8 +334,40 @@ public:
             return;
         }
 
-        if ((!dep->can_be_optimized() || !dep->is_runtime_skippable()) && ((node->can_be_optimized() && !node->is_runtime_skippable())
-            || !dep->can_be_optimized())) {
+        // If this dependency is already there, exit early
+        if (node->has_memory_dependency(static_cast<uint32_t>(dep->get_unique_id()))) {
+            return;
+        }
+
+        // Concat can be optimized out by in-place concat, so in this case, the output buffer
+        // of this concat node must not overlap with its dependencies' input buffers.
+        const bool dep_is_direct_pred =
+            std::any_of(node->get_dependencies().begin(), node->get_dependencies().end(), [&](const std::pair<program_node*, int32_t>& d) {
+                return d.first == dep;
+            });
+
+        if (node->is_type<concatenation>() && node->can_be_optimized() && node->is_runtime_skippable() && dep_is_direct_pred) {
+            for (const auto& subdep : dep->get_dependencies()) {
+                add_memory_dependency(node, subdep.first);
+                add_memory_dependency(subdep.first, node);
+            }
+        }
+
+        // LoRA can reuse the memory of the previous node, but not be optimized
+        // Therefore, the dependency of LoRA must also be the dependency of the current node
+        if (dep->is_type<lora>()) {
+            node->add_memory_dependency(dep->get_dependency(0));
+            dep->get_dependency(0).add_memory_dependency(*node);
+        }
+
+        // oneDNN in-place post-op (sum or binary_mul_inplace): dep's output aliases the buffer of its eltwise input
+        if (auto idx = onednn_eltwise_fusing_helpers::get_reused_eltwmem_idx(*dep); idx != -1) {
+            add_memory_dependency(node, &dep->get_dependency(idx));
+            add_memory_dependency(&dep->get_dependency(idx), node);
+        }
+
+        if ((!dep->can_be_optimized() || !dep->is_runtime_skippable()) &&
+            ((node->can_be_optimized() && !node->is_runtime_skippable()) || !dep->can_be_optimized())) {
             node->add_memory_dependency(*dep);
         } else {
             if (node->is_runtime_skippable() || dep->is_runtime_skippable() || dep->can_be_optimized()) {

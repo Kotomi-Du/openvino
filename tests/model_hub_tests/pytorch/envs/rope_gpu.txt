@@ -1,0 +1,4 @@
+# GPU-only RoPE test dependencies, installed on top of transformations_actual.txt by the iGPU RoPE flow
+# (.github/workflows/job_gpu_rope_tests.yml). diffusers is only needed for the Flux test, which is skipped
+# on CPU (test_transformations.py:run_flux_test).
+diffusers==0.34.0

@@ -13,7 +13,8 @@ cmake-build*
 
 # developer tools
 *.idea
-.vscode
+.clangd
+.vscode/
 .vs/
 .vsconan/
 .DS_Store
@@ -57,6 +58,8 @@ __tests__/runner/*
 node_modules
 # Coverage directory used by tools like istanbul
 coverage
+!.github/coverage/
+!.github/coverage/**
 *.lcov
 # Optional npm cache directory
 .npm
@@ -64,5 +67,5 @@ coverage
 # Artifacts
 /tools/commit_slider/*.json
 /tools/commit_slider/slider_cache/*
-/src/plugins/intel_cpu/thirdparty/ComputeLibrary/build/*
+/src/plugins/intel_cpu/thirdparty/ComputeLibrary/build/arm_compute_version.embed
 .github/GITHUB_OUTPUT

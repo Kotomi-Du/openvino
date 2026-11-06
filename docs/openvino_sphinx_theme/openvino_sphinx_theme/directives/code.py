@@ -1,16 +1,13 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 import os.path
-from pathlib import Path
-import sys
 from sphinx.directives.code import LiteralInclude, LiteralIncludeReader, container_wrapper
 from sphinx.util import logging
 from docutils.parsers.rst import Directive, directives
-from typing import List, Tuple
 from docutils.nodes import Node
 from docutils import nodes
 from sphinx.util import parselinenos
-import requests
-import re
-import json
 import html
 import csv
 
@@ -21,7 +18,7 @@ class DoxygenSnippet(LiteralInclude):
 
     option_spec = dict({'fragment': directives.unchanged_required}, **LiteralInclude.option_spec)
 
-    def run(self) -> List[Node]:
+    def run(self) -> list[Node]:
         if 'fragment' in self.options:
             self.options['start-after'] = self.options['fragment']
             self.options['end-before'] = self.options['fragment']
@@ -152,7 +149,7 @@ class DataTable(Directive):
                    'data-order': directives.unchanged
                    }
 
-    def run(self) -> List[Node]:
+    def run(self) -> list[Node]:
         current_directory = os.path.dirname(os.path.abspath(self.state.document.current_source))
         csv_file = os.path.normpath(os.path.join(current_directory, self.options['file']))
         if os.path.isfile(csv_file) is False:
@@ -184,8 +181,7 @@ class DataTable(Directive):
                 csv_table_html += '<tr class="' + parity + '">'
                 for value in row:
                     csv_table_html += '<td><p>%s</p></td>' % value
-            csv_table_html += '</tr>\n</tbody>'
-            csv_table_html += "</tr>"
+                csv_table_html += '</tr>\n'
             csv_table_html += '</tbody></table>'
         csv_node.append(nodes.raw(csv_table_html, csv_table_html, format="html"))
 

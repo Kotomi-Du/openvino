@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,8 +12,10 @@ namespace kernel_selector {
 ParamsKey QuantizeKernelRef::GetSupportedKey() const {
     ParamsKey k;
     k.EnableInputDataType(Datatype::F16);
+    k.EnableInputDataType(Datatype::BF16);
     k.EnableInputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::F16);
+    k.EnableOutputDataType(Datatype::BF16);
     k.EnableOutputDataType(Datatype::F32);
     k.EnableOutputDataType(Datatype::UINT8);
     k.EnableOutputDataType(Datatype::INT8);
@@ -63,8 +65,9 @@ JitConstants QuantizeKernelRef::GetJitConstants(const quantize_params& params, c
 
 bool QuantizeKernelRef::Validate(const Params& p) const {
     const quantize_params& params = static_cast<const quantize_params&>(p);
-    if (params.inputs.size() != 5)
-        return false;
+    if (params.inputs.size() != 5) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     return true;
 }

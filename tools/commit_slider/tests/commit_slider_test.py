@@ -1,13 +1,16 @@
-# Copyright (C) 2024 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
+import os
 from unittest import TestCase
+from tempfile import TemporaryDirectory
 from tests import skip_commit_slider_devtest
 
 sys.path.append('./')
-from test_util import getExpectedCommit,\
-    getBordersByTestData, getActualCommit, getCSOutput
+from test_util import getExpectedCommit, \
+    getBordersByTestData, getActualCommit, getCSOutput, \
+    createRepoAndUpdateData, runCSAndCheckPattern
 from utils.break_validator import validateBMOutput, BmValidationError
 from test_data import FirstBadVersionData, FirstValidVersionData,\
     BmStableData, BmValidatorSteppedBreakData, BmValidatorSteppedBreakData2,\
@@ -15,9 +18,44 @@ from test_data import FirstBadVersionData, FirstValidVersionData,\
     BenchmarkAppUnstableDevData, BenchmarkAppWrongPathData, BenchmarkAppPathFoundData,\
     BenchmarkFirstFixedAppData, AcModeData, BenchmarkMetricData, CustomizedLogData, \
     MultiConfigData, ConfigMultiplicatorData, ConfigMultiplicatorWithKeyData, \
-    AcModeDataBitwise, CompareBlobsData, CompareBlobsMulOutputData, CompareBlobsAutomatchData
+    AcModeDataBitwise, CompareBlobsData, CompareBlobsMulOutputData, CompareBlobsAutomatchData, \
+    BrokenCompilationData, TemplateData, CrossCheckBadAppl, CrossCheckBadModel, CrossCheckPerformance, \
+    CrossCheckPerformanceSeparateMode, CrossCheckPerformanceSeparateTemplate, CrossCheckPerformanceSeparateTemplateBadModel, \
+    TableTemplate
 
 class CommitSliderTest(TestCase):
+    def testBmMetricParsesCsvReport(self):
+        from utils.helpers import parseBenchmarkMetricReport
+
+        with TemporaryDirectory() as tmpdir:
+            report_path = os.path.join(tmpdir, "benchmark_report.csv")
+            with open(report_path, "w", encoding="utf-8") as report:
+                report.write("Execution results\n")
+                report.write("Median latency (ms);0.75\n")
+                report.write("Average latency (ms);0.70\n")
+                report.write("Min latency (ms);0.60\n")
+                report.write("Max latency (ms);0.90\n")
+                report.write("throughput;1000.00\n")
+
+            self.assertAlmostEqual(parseBenchmarkMetricReport(report_path, "latency:median"), 0.75)
+            self.assertAlmostEqual(parseBenchmarkMetricReport(report_path, "latency:average"), 0.70)
+            self.assertAlmostEqual(parseBenchmarkMetricReport(report_path, "latency:min"), 0.60)
+            self.assertAlmostEqual(parseBenchmarkMetricReport(report_path, "latency:max"), 0.90)
+            self.assertAlmostEqual(parseBenchmarkMetricReport(report_path, "throughput"), 1000.0)
+
+    def testBmMetricCommandForcesCsvReport(self):
+        from utils.helpers import prepareBenchmarkMetricCommand
+
+        command = prepareBenchmarkMetricCommand(
+            "./benchmark_app -m model.xml -report_type detailed_counters -report_folder old_reports -json_stats true",
+            "/tmp/new_reports",
+        )
+
+        self.assertIn("-report_type no_counters", command)
+        self.assertIn("-report_folder /tmp/new_reports", command)
+        self.assertNotIn("detailed_counters", command)
+        self.assertNotIn("-json_stats", command)
+
     @skip_commit_slider_devtest
     def testFirstValidVersion(self):
         breakCommit, updatedData = getExpectedCommit(
@@ -27,11 +65,81 @@ class CommitSliderTest(TestCase):
         self.assertEqual(breakCommit, actualCommit)
 
     @skip_commit_slider_devtest
+    def testBrokenCompilation(self):
+        breakCommit, updatedData = getExpectedCommit(
+            BrokenCompilationData())
+        actualCommit, _ = getActualCommit(updatedData)
+        self.assertEqual(breakCommit, actualCommit)
+
+    @skip_commit_slider_devtest
+    def testBrokenCompTmplate(self):
+        breakCommit, updatedData = getExpectedCommit(
+            TemplateData())
+        actualCommit, _ = getActualCommit(updatedData)
+        self.assertEqual(breakCommit, actualCommit)
+
+    @skip_commit_slider_devtest
     def testFirstBadVersion(self):
         breakCommit, updatedData = getExpectedCommit(
             FirstBadVersionData())
         actualCommit, _ = getActualCommit(updatedData)
         self.assertEqual(breakCommit, actualCommit)
+
+    @skip_commit_slider_devtest
+    def testCrossCheckBadAppl(self):
+        updatedData = createRepoAndUpdateData(
+            CrossCheckBadAppl())
+        res = runCSAndCheckPattern(updatedData, ["failed", "failed", "success", "success"])
+
+        self.assertEqual(True, res)
+
+    @skip_commit_slider_devtest
+    def testCrossCheckBadModel(self):
+        updatedData = createRepoAndUpdateData(
+            CrossCheckBadModel())
+        res = runCSAndCheckPattern(updatedData, ["success", "failed", "success", "failed"])
+
+        self.assertEqual(True, res)
+
+    @skip_commit_slider_devtest
+    def testCrossCheckPerformance(self):
+        updatedData = createRepoAndUpdateData(
+            CrossCheckPerformance())
+        res = runCSAndCheckPattern(updatedData, ["500.0 FPS", "500.0 FPS", "1000.0 FPS", "1000.0 FPS"])
+
+        self.assertEqual(True, res)
+
+    @skip_commit_slider_devtest
+    def testCrossCheckPerformanceSeparateMode(self):
+        updatedData = createRepoAndUpdateData(
+            CrossCheckPerformanceSeparateMode())
+        res = runCSAndCheckPattern(updatedData, ["500.0", "500.0", "1000.0", "1000.0"])
+
+        self.assertEqual(True, res)
+
+    @skip_commit_slider_devtest
+    def testCrossCheckPerformanceSeparateTemplate(self):
+        updatedData = createRepoAndUpdateData(
+            CrossCheckPerformanceSeparateTemplate())
+        res = runCSAndCheckPattern(updatedData, ["rootcause", "OV"])
+
+        self.assertTrue(res)
+
+    @skip_commit_slider_devtest
+    def testTableTemplate(self):
+        updatedData = createRepoAndUpdateData(
+            TableTemplate())
+        res = runCSAndCheckPattern(updatedData, ["rootcause", "OV"])
+
+        self.assertTrue(res)
+
+    @skip_commit_slider_devtest
+    def testCrossCheckPerformanceSeparateTemplateBadModel(self):
+        updatedData = createRepoAndUpdateData(
+            CrossCheckPerformanceSeparateTemplateBadModel())
+        res = runCSAndCheckPattern(updatedData, ["rootcause", "Model"])
+
+        self.assertTrue(res)
 
     @skip_commit_slider_devtest
     def testCustomizedLog(self):

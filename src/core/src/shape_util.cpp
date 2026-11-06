@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,6 +8,7 @@
 
 #include "openvino/core/partial_shape.hpp"
 #include "openvino/core/validation_util.hpp"
+#include "openvino/util/math_util.hpp"
 
 namespace ov {
 template <class TContainer, class TAxes>
@@ -67,5 +68,16 @@ std::ptrdiff_t normalize_shape_index(std::ptrdiff_t idx, size_t rank) {
         return idx;
     }
 }
+
+std::optional<size_t> shape_size_safe(const Shape& shape) {
+    size_t size = 1;
+    for (auto first = shape.cbegin(), last = shape.cend(); first != last; ++first) {
+        if (mul_overflow(size, *first, size)) {
+            return std::nullopt;
+        }
+    }
+    return std::make_optional(size);
+}
+
 }  // namespace util
 }  // namespace ov

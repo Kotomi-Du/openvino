@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -22,10 +22,7 @@
 using namespace std;
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 OutputVector translate_sparse_segment_op(const NodeContext& node) {
     default_op_checks(node, 3, {"SparseSegmentMean", "SparseSegmentSqrtN"});
     auto data = node.get_input(0);
@@ -77,7 +74,4 @@ OutputVector translate_sparse_segment_op(const NodeContext& node) {
     return {result};
 }
 
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

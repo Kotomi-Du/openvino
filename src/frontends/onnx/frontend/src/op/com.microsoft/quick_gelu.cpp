@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,11 +12,7 @@
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace com_microsoft {
-namespace opset_1 {
+namespace ov::frontend::onnx::com_microsoft::opset_1 {
 ov::OutputVector quick_gelu(const ov::frontend::onnx::Node& node) {
     // Original Documentation:
     // https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md#com.microsoft.QuickGelu
@@ -34,8 +30,8 @@ ov::OutputVector quick_gelu(const ov::frontend::onnx::Node& node) {
                      "Unsupported input x type, accepted FP16, FP32, FP64, BFP16 but got: ",
                      element_type);
 
-    // Get attribute from node
-    const float alpha = node.get_attribute_value<float>("alpha");
+    constexpr auto ort_default = 1.702f;
+    const float alpha = node.get_attribute_value<float>("alpha", ort_default);
 
     // Numpy broadcasting rule is automatically applied with mismatched shapes according to:
     // https://docs.openvino.ai/2022.3/openvino_docs_ops_arithmetic_Multiply_1.html "Tensor with dimension of size 1
@@ -51,8 +47,4 @@ ov::OutputVector quick_gelu(const ov::frontend::onnx::Node& node) {
 
 ONNX_OP("QuickGelu", OPSET_SINCE(1), com_microsoft::opset_1::quick_gelu, MICROSOFT_DOMAIN);
 
-}  // namespace opset_1
-}  // namespace com_microsoft
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx::com_microsoft::opset_1

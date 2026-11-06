@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,9 +13,7 @@
 #include "openvino/frontend/decoder.hpp"
 #include "openvino/frontend/jax/visibility.hpp"
 
-namespace ov {
-namespace frontend {
-namespace jax {
+namespace ov::frontend::jax {
 
 class JAX_FRONTEND_API JaxDecoder : public IDecoder {
 public:
@@ -69,6 +67,4 @@ public:
     ~JaxDecoder() override;
 };
 
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax

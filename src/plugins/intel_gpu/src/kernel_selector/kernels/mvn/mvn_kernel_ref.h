@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ class MVNKernelRef : public MVNKernelBase {
 public:
     using Parent = MVNKernelBase;
     MVNKernelRef() : MVNKernelBase("mvn_gpu_ref") {}
-    virtual ~MVNKernelRef() {}
+    ~MVNKernelRef() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -33,11 +33,13 @@ DeviceFeaturesKey FullyConnected_fb_io_b8_f8::get_required_device_features_key(c
 size_t FullyConnected_fb_io_b8_f8::GetBatchesPerWorkItem(const fully_connected_params& params) const {
     auto batch_size = params.outputs[0].Batch().v;
 
-    if (batch_size % 32 == 0)
+    if (batch_size % 32 == 0) {
         return std::min(batch_size, static_cast<size_t>(32U));
+    }
 
-    if (batch_size % 16 == 0)
+    if (batch_size % 16 == 0) {
         return std::min(batch_size, static_cast<size_t>(16U));
+    }
 
     return std::min(batch_size, static_cast<size_t>(8U));
 }
@@ -60,11 +62,12 @@ FullyConnected_fb_io_b8_f8::DispatchData FullyConnected_fb_io_b8_f8::SetDefault(
 
 bool FullyConnected_fb_io_b8_f8::Validate(const Params& p) const {
     if (!FullyConnectedBlockKernelBase::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
-    if (!IsSIMDSizeSupported(p.engineInfo, 8))
-        return false;
+    if (!IsSIMDSizeSupported(p.engineInfo, 8)) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     const auto& params = static_cast<const fully_connected_params&>(p);
 
@@ -82,12 +85,12 @@ bool FullyConnected_fb_io_b8_f8::Validate(const Params& p) const {
     const bool bSupportedFeature = (x_size % 8) == 0;
 
     if (!bSupportedBatch || !bSupportedFeature || !proper_input_aligment || !proper_output_aligment) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     if (!params.bias.empty()) {
         if (params.inputs[0].GetDType() != params.bias[0].GetDType()) {
-            return false;
+            DO_NOT_USE_THIS_KERNEL(p.layerID);
         }
     }
 

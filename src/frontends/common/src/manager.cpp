@@ -1,9 +1,13 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/frontend/manager.hpp"
 
+#include <set>
+#include <string>
+
+#include "openvino/frontend/common/path_util.hpp"
 #include "openvino/frontend/exception.hpp"
 #include "openvino/util/env_util.hpp"
 #include "openvino/util/file_util.hpp"
@@ -13,6 +17,17 @@
 
 using namespace ov;
 using namespace ov::frontend;
+
+namespace {
+// Hidden frontends are absent from available_front_ends() and skipped by load_by_model, so they
+// are never picked up implicitly (notably by core.read_model), but stay loadable on explicit
+// request via load_by_framework(). Kept manager-side to leave FrontEndPluginInfo's ABI unchanged.
+// "gguf" is listed because reading GGUF through core.read_model is not supported yet.
+bool is_hidden_frontend(const std::string& name) {
+    static const std::set<std::string> hidden_frontends = {"gguf"};
+    return hidden_frontends.count(name) != 0;
+}
+}  // namespace
 
 class FrontEndManager::Impl {
     std::mutex m_loading_mutex;
@@ -57,6 +72,7 @@ public:
         // Load plugins until we found the right one
         for (auto& plugin : m_plugins) {
             OPENVINO_ASSERT(plugin.load(), "Cannot load frontend ", plugin.get_name_from_file());
+            // Not filtered by is_hidden_frontend: asking for a frontend by name is explicit.
             if (plugin.get_creator().m_name == framework) {
                 return make_frontend(plugin);
             }
@@ -71,6 +87,10 @@ public:
         for (auto& plugin_info : m_plugins) {
             if (!plugin_info.load()) {
                 OPENVINO_DEBUG("Frontend load failed: ", plugin_info.m_file_path, "\n");
+                continue;
+            }
+            // Hidden frontends are for direct linkage only; do not advertise them.
+            if (is_hidden_frontend(plugin_info.get_creator().m_name)) {
                 continue;
             }
             names.push_back(plugin_info.get_creator().m_name);
@@ -90,6 +110,10 @@ public:
             if (!plugin.load()) {
                 continue;
             }
+            // Hidden frontends are for direct linkage only; never auto-select them.
+            if (is_hidden_frontend(plugin.get_creator().m_name)) {
+                continue;
+            }
             auto fe = plugin.get_creator().m_creator();
             OPENVINO_ASSERT(fe, "Frontend error: frontend '", plugin.get_creator().m_name, "' created null FrontEnd");
             if (fe->supported(variants)) {
@@ -105,11 +129,10 @@ public:
         m_plugins.push_back(std::move(plugin_info));
     }
 
-    void register_front_end(const std::string& name, const std::string& library_path) {
-        auto lib_path = ov::util::from_file_path(ov::util::get_plugin_path(library_path));
+    void register_front_end(const std::string& name, const std::filesystem::path& library_path) {
         PluginInfo plugin;
-        plugin.m_file_path = lib_path;
-        plugin.m_file_name = ov::util::get_file_name(lib_path);
+        plugin.m_file_path = ov::util::get_plugin_path(library_path);
+        plugin.m_file_name = plugin.m_file_path.filename();
         FRONT_END_GENERAL_CHECK(plugin.load(), "Cannot load frontend ", plugin.get_name_from_file());
         std::lock_guard<std::mutex> guard(m_loading_mutex);
         m_plugins.push_back(std::move(plugin));
@@ -159,20 +182,10 @@ private:
         if (variants.empty()) {
             return nullptr;
         }
-        std::string model_path;
 
-        const auto& model_variant = variants.at(0);
-        if (model_variant.is<std::string>()) {
-            const auto& tmp_path = model_variant.as<std::string>();
-            model_path = tmp_path;
-#if defined(OPENVINO_ENABLE_UNICODE_PATH_SUPPORT) && defined(_WIN32)
-        } else if (model_variant.is<std::wstring>()) {
-            auto wpath = model_variant.as<std::wstring>();
-            model_path = ov::util::wstring_to_string(wpath);
-#endif
-        }
-        if (!model_path.empty()) {
-            auto ext = ov::util::get_file_ext(model_path);
+        const auto model_path = get_path_from_any(variants.at(0));
+        if (model_path.has_value()) {
+            auto ext = ov::util::path_to_string(model_path.value().extension());
             auto it = priority_fe_extensions.find(ext);
             if (it != priority_fe_extensions.end()) {
                 // Priority FE is found by file extension, try this first
@@ -208,9 +221,8 @@ private:
     }
 
     void search_all_plugins() {
-        auto fe_lib_dir = ov::util::get_ov_lib_path();
-        if (!fe_lib_dir.empty())
-            find_plugins(fe_lib_dir, m_plugins);
+        const auto fe_lib_dir = ov::util::get_ov_lib_path();
+        find_plugins(fe_lib_dir, m_plugins);
     }
 };
 
@@ -238,6 +250,10 @@ void FrontEndManager::register_front_end(const std::string& name, FrontEndFactor
 }
 
 void FrontEndManager::register_front_end(const std::string& name, const std::string& library_path) {
+    m_impl->register_front_end(name, ov::util::make_path(library_path));
+}
+
+void FrontEndManager::register_front_end(const std::string& name, const std::filesystem::path& library_path) {
     m_impl->register_front_end(name, library_path);
 }
 

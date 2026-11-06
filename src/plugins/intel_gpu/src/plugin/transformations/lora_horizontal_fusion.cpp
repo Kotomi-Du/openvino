@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -57,10 +57,10 @@ LoRAHorizontalFusion::LoRAHorizontalFusion() {
             const auto& variable_alpha =
                 ov::as_type_ptr<ov::op::util::ReadValueBase>(multiply->get_input_node_shared_ptr(alpha_idx));                 check(variable_alpha)
 
-            const auto& variable_a = ov::as_type_ptr<ov::op::util::ReadValueBase>(matmul1->get_input_node_shared_ptr(1));     check(variable_a)
+            const auto& variable_a = ov::as_type_ptr<ov::op::util::ReadValueBase>(matmul1->get_input_node_shared_ptr(1));
 
             #undef check
-            return true;
+            return variable_a != nullptr;
         };
 
         for (const auto& user : split_node->get_users()) {
@@ -154,7 +154,7 @@ LoRAHorizontalFusion::LoRAHorizontalFusion() {
         fused_matmul2->set_friendly_name(matmul2_name);
         copy_runtime_info_from_outputs(matmul2_nodes, fused_matmul2);
 
-        auto fused_add = std::make_shared<ov::op::v1::Add>(split->get_input_node_shared_ptr(0), fused_matmul2);
+        auto fused_add = std::make_shared<ov::op::v1::Add>(split->input_value(0), fused_matmul2);
         auto fused_add_name = add_nodes[0]->get_friendly_name() + "_fused_" + std::to_string(add_nodes.size()) + "_Adds";
         fused_add->set_friendly_name(fused_add_name);
         ov::copy_runtime_info(add_nodes, fused_add);

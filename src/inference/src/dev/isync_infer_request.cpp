@@ -1,11 +1,13 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "openvino/runtime/isync_infer_request.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
+#include <string>
 #include <unordered_map>
 
 #include "openvino/core/except.hpp"
@@ -18,7 +20,7 @@
 #include "openvino/runtime/make_tensor.hpp"
 #include "openvino/runtime/plugin_itt.hpp"
 #include "openvino/runtime/tensor.hpp"
-#include "openvino/util/common_util.hpp"
+#include "openvino/util/hash_util.hpp"
 
 namespace {
 void check_batched_tensors(const ov::Output<const ov::Node>& input,
@@ -124,7 +126,7 @@ ov::ISyncInferRequest::FoundPort ov::ISyncInferRequest::find_port(const ov::Outp
     // check if the tensor names of target port is a subset of source port's tensor names
     auto check_tensor_names = [](const std::unordered_set<std::string>& source,
                                  const std::unordered_set<std::string>& target) {
-        for (auto const& name : target) {
+        for (const auto& name : target) {
             if (source.find(name) == source.end())
                 return false;
         }
@@ -187,14 +189,23 @@ void ov::ISyncInferRequest::convert_batched_tensors() {
         } else {
             input_tensor = {ov::make_tensor(tmp_et, tmp_shape), nullptr};
         }
-        auto ptr = static_cast<uint8_t*>(input_tensor->data());
 
         // Perform memory copy
-        ov::parallel_for(item.second.size(), [&](size_t i) {
-            const auto& tensor = item.second.at(i);
-            memcpy(ptr + i * tensor->get_byte_size(), static_cast<uint8_t*>(tensor->data()), tensor->get_byte_size());
-        });
-        prepared_tensors[item.first] = input_tensor;
+        if (tmp_et == ov::element::string) {
+            ov::parallel_for(item.second.size(), [&](size_t i) {
+                const auto& tensor = item.second.at(i);
+                std::copy_n(tensor->data<std::string>(),
+                            tensor->get_size(),
+                            input_tensor->data<std::string>() + i * tensor->get_size());
+            });
+        } else {
+            auto ptr = static_cast<uint8_t*>(input_tensor->data());
+            ov::parallel_for(item.second.size(), [&](size_t i) {
+                const auto& tensor = item.second.at(i);
+                memcpy(ptr + i * tensor->get_byte_size(), tensor->data(), tensor->get_byte_size());
+            });
+        }
+        prepared_tensors[item.first] = std::move(input_tensor);
     }
 
     for (const auto& item : prepared_tensors) {

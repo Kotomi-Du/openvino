@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,7 +11,7 @@ namespace kernel_selector {
 class PoolingKernelGPU_b_fs_zyx_fsv16_imad: public PoolingKernelBase{
 public:
     PoolingKernelGPU_b_fs_zyx_fsv16_imad() : PoolingKernelBase("pooling_gpu_b_fs_zyx_fsv16_imad") {}
-    virtual ~PoolingKernelGPU_b_fs_zyx_fsv16_imad() {}
+    ~PoolingKernelGPU_b_fs_zyx_fsv16_imad() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

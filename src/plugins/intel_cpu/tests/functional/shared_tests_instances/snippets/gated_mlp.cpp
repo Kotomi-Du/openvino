@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -25,6 +25,14 @@ static std::vector<std::pair<InputShape, std::vector<Shape>>> shapes {
         InputShape{{-1, -1, 757}, {{21, 39, 757}, {12, 121, 757}, {12, 3, 757}}},
         std::vector<Shape>{{127, 757}, {127, 757}, {757, 127}}
     },
+    {
+        InputShape{{-1, -1, 1024}, {{3, 64, 1024}, {3, 1, 1024}}},
+        std::vector<Shape>{{256, 1024}, {256, 1024}, {1024, 256}}
+    },
+    {
+        InputShape{{}, {{1, 32, 1024}}},
+        std::vector<Shape>{{256, 1024}, {256, 1024}, {1024, 256}}
+    },
 };
 
 INSTANTIATE_TEST_SUITE_P(smoke_Snippets_GatedMLP_f32,
@@ -45,7 +53,7 @@ INSTANTIATE_TEST_SUITE_P(smoke_Snippets_GatedMLP_bf16,
                                             ::testing::Values(GatedMLPFunction::WeightFormat::FP32),
                                             ::testing::ValuesIn(activations),
                                             ::testing::Values(ov::element::bf16),
-                                            ::testing::Values(6), // 3 x Subgraphs + 3 x Reorders on weights
+                                            ::testing::Values(3), // 3 x Subgraphs
                                             ::testing::Values(3), // 3 Subgraphs - In/Out Converts + gMLP
                                             ::testing::Values(ov::test::utils::DEVICE_CPU),
                                             ::testing::Values(CPUTestUtils::empty_plugin_config)),

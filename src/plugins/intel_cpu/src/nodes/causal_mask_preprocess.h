@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,9 +14,7 @@
 #include "openvino/core/node.hpp"
 #include "transformations/cpu_opset/common/op/causal_mask_preprocess.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class CausalMaskPreprocess : public Node {
 public:
@@ -40,6 +38,7 @@ private:
     struct Executor {
         virtual void execute(const dnnl::stream& strm,
                              intel_cpu::Node* pnode,
+                             const CpuParallelPtr& cpu_parallel,
                              const intel_cpu::CausalMaskPreprocessNode::Config& config) = 0;
         virtual ~Executor() = default;
     };
@@ -49,6 +48,4 @@ private:
     std::shared_ptr<Executor> m_executor;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

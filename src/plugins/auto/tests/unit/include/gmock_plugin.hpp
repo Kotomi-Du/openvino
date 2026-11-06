@@ -1,10 +1,11 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #pragma once
 #include <gmock/gmock.h>
 
+#include <filesystem>
 #include <iostream>
 
 #include "openvino/runtime/core.hpp"
@@ -16,9 +17,16 @@ namespace mock_auto_plugin {
 
 class MockAutoPlugin : public Plugin {
 public:
+    MOCK_METHOD((ov::Any), get_property, ((const std::string&), (const ov::AnyMap&)), (const, override));
+    MOCK_METHOD((std::unordered_map<std::string, float>),
+                get_device_utilizations,
+                (const std::list<DeviceInformation>&),
+                (override));
+    MOCK_METHOD((std::optional<bool>), get_low_power_mode, (), (override));
+    MOCK_METHOD((bool), is_telemetry_available, (), (const, override));
     MOCK_METHOD((std::string),
                 get_device_list,
-                ((ov::AnyMap&), const std::shared_ptr<const ov::Model>&, const std::string&),
+                ((ov::AnyMap&), const std::shared_ptr<const ov::Model>&, const std::filesystem::path&),
                 (const, override));
     MOCK_METHOD((bool), is_meta_device, ((const std::string&)), (const, override));
     MOCK_METHOD((std::list<DeviceInformation>),
@@ -27,7 +35,18 @@ public:
                 (const, override));
     MOCK_METHOD(DeviceInformation,
                 select_device,
-                ((const std::vector<DeviceInformation>&), const std::string&, unsigned int),
+                ((const std::vector<DeviceInformation>&),
+                 const std::string&,
+                 unsigned int,
+                 (const DeviceSelectionPolicy&),
+                 (const std::optional<DeviceInformation>&)),
+                (override));
+    MOCK_METHOD((std::list<DeviceInformation>),
+                sort_device_by_perf_curve,
+                ((const std::unordered_map<std::string, float>&),
+                 (const std::list<DeviceInformation>&),
+                 (const ov::intel_auto::PerfCurveTable&),
+                 size_t*),
                 (override));
     MOCK_METHOD((std::vector<DeviceInformation>),
                 parse_meta_devices,

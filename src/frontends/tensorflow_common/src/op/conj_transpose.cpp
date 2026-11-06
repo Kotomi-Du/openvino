@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -29,10 +29,7 @@ std::shared_ptr<ov::op::v0::Concat> get_conj_ptr(const ov::Output<ov::Node>& nod
     return conj;
 }
 
-namespace ov {
-namespace frontend {
-namespace tensorflow {
-namespace op {
+namespace ov::frontend::tensorflow::op {
 
 OutputVector translate_conj_op(const NodeContext& node) {
     default_op_checks(node, 1, {"Conj"}, true);
@@ -85,7 +82,4 @@ OutputVector translate_conj_transpose_op(const NodeContext& node) {
     return {conj_transpose};
 }
 
-}  // namespace op
-}  // namespace tensorflow
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow::op

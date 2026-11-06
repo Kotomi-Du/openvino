@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from pytorch_layer_test_class import PytorchLayerTest
@@ -6,14 +9,11 @@ class TestTakeAlongDim(PytorchLayerTest):
     def _prepare_input(self, m, n, max_val, out=False, flattenize=False):
         import numpy as np
         shape = (m, n) if not flattenize else (m * n,)
-        index = np.random.randint(0, max_val, shape).astype(np.int64)
-        inp = np.random.randn(m, n).astype(np.float32)
+        index = self.random.randint(0, max_val, shape, dtype=np.int64)
+        inp = self.random.randn(m, n)
         if out:
             axis = int(max_val == n)
-            if flattenize:
-                out = np.zeros_like(np.take(inp, index))
-            else:
-                out = np.zeros_like(np.take(inp, index, axis))
+            out = np.zeros_like(index, dtype=inp.dtype)
             return (inp, index, out)
         return (inp, index)
 
@@ -22,7 +22,7 @@ class TestTakeAlongDim(PytorchLayerTest):
 
         class aten_take_along_dim(torch.nn.Module):
             def __init__(self, axis, out=False):
-                super(aten_take_along_dim, self).__init__()
+                super().__init__()
                 self.axis = axis
                 if self.axis is None:
                     self.forward = self.forward_no_dim
@@ -41,10 +41,11 @@ class TestTakeAlongDim(PytorchLayerTest):
             def forward_no_dim_out(self, x, index, out):
                 return torch.take_along_dim(x, index, out=out)
 
-        return aten_take_along_dim(axis, out), None, "aten::take_along_dim"
+        return aten_take_along_dim(axis, out), "aten::take_along_dim"
 
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     @pytest.mark.parametrize("m", [2, 10, 100])
     @pytest.mark.parametrize("n", [2, 10, 100])
     @pytest.mark.parametrize("axis", [0, 1, None])

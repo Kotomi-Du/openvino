@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -30,7 +30,7 @@ class JitConstants;
 // fuse_params
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 struct fuse_params {
-    virtual ~fuse_params() {}
+    virtual ~fuse_params() = default;
 
     KernelType GetType() const { return kType; }
 protected:
@@ -206,6 +206,8 @@ public:
                         uint32_t axisY : 1;
                         uint32_t axisZ : 1;
                         uint32_t axisW : 1;
+                        uint32_t axisU : 1;
+                        uint32_t axisV : 1;
                         uint32_t axisFeature : 1;
                         uint32_t axisBatch : 1;
                         uint32_t kernelPerInput : 1;
@@ -242,8 +244,10 @@ public:
 
         static_assert(sizeof(restrict_t) == sizeof(uint64_t), "problem with union");
 
-        typedef union DataTypesKey_t {
+        union DataTypesKey {
             struct val_t {
+                uint32_t uint2 : 1;
+                uint32_t uint3 : 1;
                 uint32_t int4 : 1;
                 uint32_t uint4 : 1;
                 uint32_t int8 : 1;
@@ -256,9 +260,13 @@ public:
                 uint32_t F16 : 1;
                 uint32_t F32 : 1;
                 uint32_t BF16 : 1;
+                uint32_t F4E2M1 : 1;
+                uint32_t F8E4M3 : 1;
+                uint32_t F8E5M2 : 1;
+                uint32_t F8E8M0 : 1;
             } val;
             uint32_t raw;
-        } DataTypesKey;
+        };
 
         DataTypesKey inputType;
         DataTypesKey outputType;
@@ -328,7 +336,7 @@ public:
     void EnableSurfaceInputSupport() { key.restrict.val.dedicated.reorder.surface_input = 1; }
     void EnableSoftmaxDim(SoftmaxDim d);
     void EnableConcatAxis(ConcatAxis a);
-    void EnableReampleType(ResampleType a);
+    void EnableResampleType(ResampleType a);
     void EnableEltwiseStride();
     void EnableEltwiseBroadcast() { key.restrict.val.dedicated.eltwise.broadcast = 1; }
 
@@ -337,7 +345,7 @@ public:
     void EnableArgMaxMinAxis(ArgMaxMinAxis a);
     bool Support(const ParamsKey& k) const;
     bool isEnabledDifferentInputWeightsTypes() const {
-        return key.restrict.val.different_input_weights_types ? true : false;
+        return key.restrict.val.different_input_weights_types != 0;
     }
     ParamsKey Merge(const ParamsKey& k) const;
 
@@ -366,6 +374,7 @@ enum class gpu_arch {
     xe_hpc = 6,
     xe2 = 7,
     xe3 = 8,
+    xe3p = 9,
 };
 
 
@@ -386,9 +395,11 @@ struct EngineInfo {
     bool supports_imad = false;
     bool supports_immad = false;
     bool enable_sub_groups_emulation = false;
+    bool enable_large_allocations = false;
     bool bOptHintsSupport = false;
     bool supports_microkernels = false;
     bool supports_work_group_collective_functions = false;
+    bool supports_register_file_size_option = false;
     uint32_t vendor_id = 0x0;
     dev_type deviceType = dev_type::integrated_gpu;
     uint32_t computeUnitsCount = 0;
@@ -396,13 +407,13 @@ struct EngineInfo {
     gpu_arch arch = gpu_arch::unknown;
     uint32_t maxThreadsPerExecutionUnit = 0;
     uint32_t maxThreadsPerDevice = 0;
-    uint64_t maxWorkGroupSize = 0;
-    uint64_t maxLocalMemSize = 0;
+    size_t maxWorkGroupSize = 0;
+    size_t maxLocalMemSize = 0;
     uint64_t maxImage2dWidth = 0;
     uint64_t maxImage2dHeight = 0;
-    std::string deviceId = "";
-    std::string driverVersion = "";
-    std::vector<size_t> supportedSimdSizes = {};
+    std::string deviceId;
+    std::string driverVersion;
+    std::vector<size_t> supportedSimdSizes;
 
     DeviceFeaturesKey get_supported_device_features_key() const;
 };
@@ -411,16 +422,14 @@ struct EngineInfo {
 // Params
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 struct Params {
-    virtual ~Params() {}
+    virtual ~Params() = default;
 
     KernelType GetType() const { return kType; }
     virtual ParamsKey GetParamsKey() const;
 
     virtual void set_dynamic_shape_offsets() {
-        return;
     }
     virtual void set_dynamic_shape_offsets(std::map<size_t, size_t> in_tensor_to_offset_map, std::map<size_t, size_t> out_tensor_to_offset_map) {
-        return;
     }
 
 protected:
@@ -542,18 +551,19 @@ struct FusedOpsConfiguration {
         allow_for_partial_preload = partial_preload;
         return *this; }
     FusedOpsConfiguration& SetShuffleVarName(std::string val) { shuffle_var_name = val; return *this; }
-    bool IsPostReorderFused(void) const { return orig_output_layout != DataLayout::DataLayoutCount; }
+    bool IsPostReorderFused() const { return orig_output_layout != DataLayout::DataLayoutCount; }
     int GetDimIndexFromOrder(Tensor::DataChannelName val) const {
         int dims_num = static_cast<int>(bfzyx_idx_order.size());
         if (val == Tensor::DataChannelName::BATCH && dims_num >= 1) {
             return 0;
-        } else if (val == Tensor::DataChannelName::FEATURE && dims_num >= 2) {
-            return 1;
-        } else if (dims_num >= 3 && dims_num - static_cast<int>(val) - 1 >= 0) {
-            return static_cast<int>(bfzyx_idx_order.size()) - static_cast<int>(val) - 1;
-        } else {
-            return -1;
         }
+        if (val == Tensor::DataChannelName::FEATURE && dims_num >= 2) {
+            return 1;
+        }
+        if (dims_num >= 3 && dims_num - static_cast<int>(val) - 1 >= 0) {
+            return static_cast<int>(bfzyx_idx_order.size()) - static_cast<int>(val) - 1;
+        }
+        return -1;
     }
 };
 
@@ -625,17 +635,18 @@ struct fused_operation_desc {
     int32_t dep_idx_start;
     size_t dep_size;
     MultiDataTensor tensors;
-    DataTensor output_tensor;
+    MultiDataTensor output_tensors;
     size_t op_id;
-    std::vector<dep_info> dep_data = {};
+    std::vector<dep_info> dep_data;
 
     // Helper functions for operation generation
     KernelType GetType() const { return op_params->GetType(); }
     template<typename T>
     std::shared_ptr<T> GetOpParams() const {
         auto p = std::dynamic_pointer_cast<T>(op_params);
-        if (!p)
+        if (!p) {
             throw std::runtime_error("Invalid dynamic cast of fused operation parameters");
+        }
 
         return p;
     }
@@ -648,7 +659,7 @@ struct fused_operation_desc {
 // base_params
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 struct base_params : public Params {
-    virtual ~base_params() {}
+    ~base_params() override = default;
 
     enum class ArgType {
         Input,
@@ -656,7 +667,7 @@ struct base_params : public Params {
     };
 
     std::vector<base_activation_params> activations;
-    std::vector<fused_operation_desc> fused_ops = {};
+    std::vector<fused_operation_desc> fused_ops;
     MultiDataTensor inputs;
     MultiDataTensor outputs;
 
@@ -683,8 +694,9 @@ struct base_params : public Params {
             if (tensor.is_dynamic()) {
                 offset += DataTensor::max_rank();
                 for (auto dim : tensor.GetDims()) {
-                    if (dim.pad.is_dynamic)
+                    if (dim.pad.is_dynamic) {
                         offset += Tensor::Pad::NumPadOffsetsPerDim();
+                    }
                 }
             }
         };
@@ -692,8 +704,9 @@ struct base_params : public Params {
             update_offset(in);
         }
         for (auto& fd : fused_ops) {
-            if (!fd.has_outer_dep())
+            if (!fd.has_outer_dep()) {
                 continue;
+            }
             auto& fused_op_inputs = fd.tensors;
             for (auto& fused_input : fused_op_inputs) {
                 update_offset(fused_input);

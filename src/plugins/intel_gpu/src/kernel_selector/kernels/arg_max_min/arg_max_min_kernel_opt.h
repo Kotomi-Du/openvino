@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,7 @@ namespace kernel_selector {
 class ArgMaxMinKernelOpt : public ArgMaxMinKernelBase {
 public:
     ArgMaxMinKernelOpt() : ArgMaxMinKernelBase("arg_max_min_opt") {}
-    virtual ~ArgMaxMinKernelOpt() {}
+    ~ArgMaxMinKernelOpt() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

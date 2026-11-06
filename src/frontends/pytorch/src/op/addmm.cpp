@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,10 +14,7 @@
 #include "openvino/op/shape_of.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
 
@@ -46,7 +43,7 @@ OutputVector translate_addmm(const NodeContext& context) {
     if (!context.input_is_none(4)) {
         alpha = context.get_input(4);
     }
-    return {translate_addmm_common(context, std::move(beta), std::move(alpha))};
+    return translate_addmm_common(context, std::move(beta), std::move(alpha));
 };
 
 OutputVector translate_addmm_fx(const NodeContext& context) {
@@ -60,7 +57,7 @@ OutputVector translate_addmm_fx(const NodeContext& context) {
     if (context.has_attribute("alpha")) {
         alpha = context.get_input("alpha");
     }
-    return {translate_addmm_common(context, std::move(beta), std::move(alpha))};
+    return translate_addmm_common(context, std::move(beta), std::move(alpha));
 };
 
 OutputVector translate_conv1d_ext(const NodeContext& context) {
@@ -77,7 +74,4 @@ OutputVector translate_conv1d_ext(const NodeContext& context) {
     return {context.mark_node(std::make_shared<v1::Add>(mm, bias))};
 };
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

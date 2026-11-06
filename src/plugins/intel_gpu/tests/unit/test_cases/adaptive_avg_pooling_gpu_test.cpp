@@ -1,4 +1,4 @@
-// Copyright (C) 2021-2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -93,11 +93,8 @@ float getError<ov::float16>() {
 struct PrintToStringParamName {
     std::string operator()(const testing::TestParamInfo<AdaptiveAvgPoolingParamsWithLayout> &param) {
         std::stringstream buf;
-        AdaptiveAvgPoolingParams p;
-        format::type plain_layout;
-        format::type target_layout;
-        bool is_caching_test;
-        std::tie(p, plain_layout, target_layout, is_caching_test) = param.param;
+
+        const auto& [p, plain_layout, target_layout, is_caching_test] = param.param;
         buf << " input tensor " << p.inputTensor.to_string()
             << " output tensor " << p.outputTensor.to_string()
             << " plain layout " << plain_layout
@@ -120,11 +117,8 @@ struct adaptive_avg_pooling_test
 public:
     void test() {
         const auto data_type = ov::element::from<T>();
-        AdaptiveAvgPoolingParams params;
-        format::type plain_layout;
-        format::type target_layout;
-        bool is_caching_test;
-        std::tie(params, plain_layout, target_layout, is_caching_test) = this->GetParam();
+
+        const auto& [params, plain_layout, target_layout, is_caching_test] = this->GetParam();
 
         std::vector<T> input_data;
         std::vector<T> expected;
@@ -149,7 +143,7 @@ public:
         auto result = network->execute();
 
         auto out_mem = result.at("adaptive_avg_pooling").get_memory();
-        cldnn::mem_lock<T> out_ptr(out_mem, get_test_stream());
+        cldnn::mem_lock<T, mem_lock_type::read> out_ptr(out_mem, get_test_stream());
 
         ASSERT_EQ(params.outputTensor.count(), out_ptr.size());
         ASSERT_EQ(params.outputTensor.count(), expected.size());

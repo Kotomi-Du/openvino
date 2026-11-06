@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -280,6 +280,27 @@ TEST_F(ResolveTensorNamesTest, collision_on_outputsinputs) {
     EXPECT_THAT(input_2->output(0).get_names(), UnorderedElementsAre("input_2", "input:2", "result_1"));
     EXPECT_THAT(result_1->output(0).get_names(), UnorderedElementsAre("result_1_1", "input_1"));
     EXPECT_THAT(result_2->output(0).get_names(), UnorderedElementsAre("result_1"));
+}
+
+TEST_F(ResolveTensorNamesTest, collision_with_multiline_name) {
+    // "." in the port-number regex doesn't match line terminators, so a colliding name
+    // containing '\n' must still be made unique via the non-regex fallback path.
+    auto input_1 = std::make_shared<Parameter>(element::f32, Shape{1, 3});
+    auto input_2 = std::make_shared<Parameter>(element::f32, Shape{1, 3});
+    auto result_1 = std::make_shared<Result>(input_1);
+    auto result_2 = std::make_shared<Result>(input_2);
+
+    input_1->output(0).set_names({"foo\nbar"});
+    input_2->output(0).set_names({"foo\nbar"});
+
+    auto model = std::make_shared<Model>(ResultVector{result_1, result_2}, ParameterVector{input_1, input_2});
+
+    pass::Manager pass_manager;
+    pass_manager.register_pass<pass::ResolveNameCollisions>();
+    pass_manager.run_passes(model);
+
+    EXPECT_THAT(input_1->output(0).get_names(), UnorderedElementsAre("foo\nbar"));
+    EXPECT_THAT(input_2->output(0).get_names(), UnorderedElementsAre("foo\nbar_1"));
 }
 
 TEST(ResolveNameCollisionsTest, FixTensorNamesMultiSubgraphOp) {

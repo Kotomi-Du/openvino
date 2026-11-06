@@ -1,0 +1,390 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#include "include/batch_headers/fetch_data.cl"
+#include "include/batch_headers/bf16_utils.cl"
+
+// For bf16 the raw storage is ushort and requires bit-reinterpretation (not a numeric convert)
+// to obtain a usable float value. For all other types the input type is already numerically
+// usable, so we keep the original variable type and use an identity load. This preserves the
+// pre-bf16 codegen for fp16/fp32 paths (no unintended promotion to the accumulator type).
+//
+// INPUTi_IS_FP is false for bf16 in the ocl_v2 jitter (see make_type_jit_constants), so the
+// pair (TYPE_SIZE == 2 && !IS_FP) uniquely identifies bf16 without matching fp16.
+
+#if INPUT0_TYPE_SIZE == 2 && !INPUT0_IS_FP
+    #define INPUT0_COMPUTE_T   ACCUMULATOR_TYPE
+    #define LOAD_INPUT0(v)     _convert_as_bfloat16_float(v)
+#else
+    #define INPUT0_COMPUTE_T   INPUT0_TYPE
+    #define LOAD_INPUT0(v)     (v)
+#endif
+
+#if INPUT1_TYPE_SIZE == 2 && !INPUT1_IS_FP
+    #define INPUT1_COMPUTE_T   ACCUMULATOR_TYPE
+    #define LOAD_INPUT1(v)     _convert_as_bfloat16_float(v)
+#else
+    #define INPUT1_COMPUTE_T   INPUT1_TYPE
+    #define LOAD_INPUT1(v)     (v)
+#endif
+
+#if INPUT2_TYPE_SIZE == 2 && !INPUT2_IS_FP
+    #define INPUT2_COMPUTE_T   ACCUMULATOR_TYPE
+    #define LOAD_INPUT2(v)     _convert_as_bfloat16_float(v)
+#else
+    #define INPUT2_COMPUTE_T   INPUT2_TYPE
+    #define LOAD_INPUT2(v)     (v)
+#endif
+
+// attn_mask input (INPUT3) - same treatment as Q/K/V: bit-reinterpret bf16 storage,
+// identity load for the remaining supported (numerically usable) mask types.
+#ifdef INPUT3_TYPE
+#if INPUT3_TYPE_SIZE == 2 && !INPUT3_IS_FP
+    #define INPUT3_COMPUTE_T   ACCUMULATOR_TYPE
+    #define LOAD_INPUT3(v)     _convert_as_bfloat16_float(v)
+#else
+    #define INPUT3_COMPUTE_T   INPUT3_TYPE
+    #define LOAD_INPUT3(v)     (v)
+#endif
+#endif
+
+// Output store: for bf16 we bit-reinterpret the float accumulator into a ushort payload; for
+// other output types the standard numeric conversion is correct. OUTPUT_COMPUTE_T is the type
+// used to hold in-flight values that will eventually be stored to `output` (mirrors the
+// INPUTi_COMPUTE_T pattern above). TO_OUTPUT_COMPUTE_T() is the corresponding numeric convert
+// for scalar/literal values populating an OUTPUT_COMPUTE_T variable.
+#if OUTPUT_TYPE_SIZE == 2 && !OUTPUT_IS_FP
+    #define OUTPUT_COMPUTE_T          ACCUMULATOR_TYPE
+    #define TO_OUTPUT_COMPUTE_T(v)    convert_float(v)
+    #define STORE_OUTPUT(v)           _convert_bfloat16_as_ushort(v)
+    #define OUTPUT_COMPUTE_VAL_ZERO   ACCUMULATOR_VAL_ZERO
+    #define OUTPUT_COMPUTE_VAL_ONE    ACCUMULATOR_VAL_ONE
+    #define OUTPUT_COMPUTE_VAL_MIN    ACCUMULATOR_VAL_MIN
+#else
+    #define OUTPUT_COMPUTE_T          OUTPUT_TYPE
+    #define TO_OUTPUT_COMPUTE_T(v)    TO_OUTPUT_TYPE(v)
+    #define STORE_OUTPUT(v)           TO_OUTPUT_TYPE(v)
+    #define OUTPUT_COMPUTE_VAL_ZERO   OUTPUT_VAL_ZERO
+    #define OUTPUT_COMPUTE_VAL_ONE    OUTPUT_VAL_ONE
+    #define OUTPUT_COMPUTE_VAL_MIN    OUTPUT_VAL_MIN
+#endif
+
+// query_input   [batch, heads_num, q_len, head_size]
+// key_input     [batch, kv_heads_num, kv_len, head_size]
+// value_input   [batch, kv_heads_num, kv_len, head_size]
+// attn_mask     [1, 1, q_len, kv_len]
+// output        [batch, heads_num, q_len, head_size]
+// tmp_buf       [batch, heads_num, q_len, kv_len]
+
+// When handling long sequences and executing in FP16, accuracy can significantly vary based on two factors:
+// 1) The order of scale application (which can be controlled using the APPLY_SCALE_TO_QUERY macro)
+// 2) The type of SoftMax accumulator
+
+inline uint FUNC(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#if INPUT0_SIMPLE
+    return GET_DATA_INDEX_6D_SAFE(INPUT0, b, f, w, z, y, x);
+#else
+#if INPUT0_DIMS == 4
+    return INPUT0_GET_INDEX_SAFE(b, f, y, x);
+#elif INPUT0_DIMS == 5
+    return INPUT0_GET_INDEX_SAFE(b, f, z, y, x);
+#elif INPUT0_DIMS == 6
+    return INPUT0_GET_INDEX_SAFE(b, f, w, z, y, x);
+#else
+#   error sdpa_ref.cl : Unsupported input 0 format
+#endif
+#endif
+}
+
+inline uint FUNC(get_input0_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#ifdef INPUT0_DIMS_ORDER
+    return FUNC_CALL(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT0_DIMS_ORDER);
+#else
+    return FUNC_CALL(get_input0_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
+#endif
+}
+
+inline uint FUNC(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#ifdef DO_BROADCAST_KEY_VALUE
+    DO_BROADCAST_KEY_VALUE;
+#endif
+#if INPUT1_SIMPLE
+    return GET_DATA_INDEX_6D_SAFE(INPUT1, b, f, w, z, y, x);
+#else
+#if INPUT1_DIMS == 4
+    return INPUT1_GET_INDEX_SAFE(b, f, y, x);
+#elif INPUT1_DIMS == 5
+    return INPUT1_GET_INDEX_SAFE(b, f, z, y, x);
+#elif INPUT1_DIMS == 6
+    return INPUT1_GET_INDEX_SAFE(b, f, w, z, y, x);
+#else
+#   error sdpa_ref.cl : Unsupported input 1 format
+#endif
+#endif
+}
+
+inline uint FUNC(get_input1_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#ifdef INPUT1_DIMS_ORDER
+    return FUNC_CALL(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT1_DIMS_ORDER);
+#else
+    return FUNC_CALL(get_input1_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
+#endif
+}
+
+inline uint FUNC(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#ifdef DO_BROADCAST_KEY_VALUE
+    DO_BROADCAST_KEY_VALUE;
+#endif
+#if INPUT2_SIMPLE
+    return GET_DATA_INDEX_6D_SAFE(INPUT2, b, f, w, z, y, x);
+#else
+#if INPUT2_DIMS == 4
+    return INPUT2_GET_INDEX_SAFE(b, f, y, x);
+#elif INPUT2_DIMS == 5
+    return INPUT2_GET_INDEX_SAFE(b, f, z, y, x);
+#elif INPUT2_DIMS == 6
+    return INPUT2_GET_INDEX_SAFE(b, f, w, z, y, x);
+#else
+#   error sdpa_ref.cl : Unsupported input 1 format
+#endif
+#endif
+}
+
+inline uint FUNC(get_input2_index)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#ifdef INPUT2_DIMS_ORDER
+    return FUNC_CALL(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT2_DIMS_ORDER);
+#else
+    return FUNC_CALL(get_input2_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR b, f, w, z, y, x);
+#endif
+}
+
+#ifdef BEAM_TABLE_TYPE
+inline uint FUNC(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+#if BEAM_TABLE_SIMPLE
+    return GET_DATA_INDEX_6D_SAFE(BEAM_TABLE, b, f, w, z, y, x);
+#else
+#   error sdpa_ref.cl : Unsupported beam table format
+#endif
+}
+
+inline uint FUNC(get_bt_index_key)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+    return FUNC_CALL(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT1_DIMS_ORDER);
+}
+
+inline uint FUNC(get_bt_index_value)(OPTIONAL_SHAPE_INFO_ARG uint b, uint f, uint w, uint z, uint y, uint x) {
+    return FUNC_CALL(get_bt_index_nt)(OPTIONAL_SHAPE_INFO_TENSOR INPUT2_DIMS_ORDER);
+}
+#endif
+
+#define APPLY_SCALE_TO_QUERY 1
+#define HAS_KV_CACHE_ZP_INPUT USE_ASYMMETRIC_QUANTIZATION && !COMBINE_SCALES_AND_ZP
+
+#if IS_KV_COMPRESSED
+#if COMPRESSED_PER_HEAD
+    #define GET_COMPRESSION_INDEX(INPUT, b, f, y, x) GET_DATA_INDEX(INPUT, (b), (f), (y), (0));
+#else
+    #define GET_COMPRESSION_INDEX(INPUT, b, f, y, x) GET_DATA_INDEX(INPUT, (b), (0), (y), (0));
+#endif
+#endif
+#if HAS_SCALE_INPUT
+// Scale always occupies the fixed SCALE input slot (index 4) of the SDPA primitive,
+// regardless of whether the attention-mask input is actually used at runtime
+// (a placeholder attn_mask input is still present whenever scale is provided).
+#define SCALE_TYPE INPUT4_TYPE
+#endif
+
+KERNEL(sdpa_ref)(
+    OPTIONAL_SHAPE_INFO_ARG
+    const __global INPUT0_TYPE* query_input,
+    const __global INPUT1_TYPE* key_input,
+    const __global INPUT2_TYPE* value_input,
+#if HAS_ATTN_MASK_INPUT
+    const __global INPUT3_TYPE* attn_mask,
+#endif
+#if HAS_SCALE_INPUT
+    const __global half* scale,
+#endif
+#ifdef HAS_SINK_INPUT
+    global SINK_DATA_T *sink_ptr,
+#endif
+    __global OUTPUT_TYPE* output,
+#if IS_KV_COMPRESSED
+    const __global KEY_COMPRESSION_SCALE_TYPE* key_scale,
+    const __global VALUE_COMPRESSION_SCALE_TYPE* val_scale,
+#if HAS_KV_CACHE_ZP_INPUT
+    const __global KEY_COMPRESSION_ZP_TYPE* key_zp,
+    const __global VALUE_COMPRESSION_ZP_TYPE* val_zp,
+#endif
+#endif
+#ifdef BEAM_TABLE_TYPE
+    const __global BEAM_TABLE_TYPE* beam_table,
+#endif
+    __global OUTPUT_COMPUTE_T* tmp_buf
+)
+{
+    const uint batch_idx = get_global_id(0);
+    const uint b0 = batch_idx / NUM_HEADS; /* BATCH dim */
+    const uint b1 = batch_idx % NUM_HEADS; /* HEADS_NUM dim */
+    const uint target_seq_idx = get_global_id(1);
+    const uint head_size_idx = get_global_id(2);
+
+#if HAS_SCALE_INPUT
+    const OUTPUT_COMPUTE_T scale_val = *scale;
+#elif defined(STATIC_SCALE_VALUE)
+    const OUTPUT_COMPUTE_T scale_val = TO_OUTPUT_COMPUTE_T(STATIC_SCALE_VALUE);
+#else
+    const OUTPUT_COMPUTE_T scale_val = OUTPUT_COMPUTE_VAL_ONE / sqrt(TO_OUTPUT_COMPUTE_T(INPUT1_SIZE_X));
+#endif
+
+    // Process 1*seq_len elements (Gemm1 + SoftMax) using a single work item, saving results to tmp_buf and
+    // reusing them between all work items within a single workgroup for Gemm2 calculations.
+    if (get_local_id(2) == 0) {
+        for (uint s = 0; s < SOURCE_SEQ_LEN /* seq_len */; s++) {
+            OUTPUT_COMPUTE_T acc = OUTPUT_COMPUTE_VAL_ZERO;
+            for (uint h = 0; h < HEAD_SIZE /* head_size */; h++) {
+                uint query_offset = FUNC_CALL(get_input0_index)(OPTIONAL_SHAPE_INFO_TENSOR b0, b1, 0, 0, target_seq_idx, h);
+#ifdef BEAM_TABLE_TYPE
+                uint b_idx = beam_table[FUNC_CALL(get_bt_index_key)(OPTIONAL_SHAPE_INFO_TENSOR b0, b1, 0, 0, s, h)];
+#else
+                uint b_idx = b0;
+#endif
+                uint key_offset = FUNC_CALL(get_input1_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1, 0, 0, s, h);
+
+#if APPLY_SCALE_TO_QUERY
+                INPUT0_COMPUTE_T q_val = LOAD_INPUT0(query_input[query_offset]) * scale_val;
+#else
+                INPUT0_COMPUTE_T q_val = LOAD_INPUT0(query_input[query_offset]);
+#endif
+
+                INPUT1_TYPE k_val_packed = key_input[key_offset];
+#if IS_KV_COMPRESSED
+                const uint comp_offset = GET_COMPRESSION_INDEX(KEY_COMPRESSION_SCALE, b_idx, b1 / BROADCAST_GROUP_SIZE, s, 0);
+                KEY_COMPRESSION_SCALE_COMPUTE_TYPE comp_scale = DECODE_KEY_COMPRESSION_SCALE_COMPUTE_TYPE(key_scale[comp_offset]);
+
+#if USE_ASYMMETRIC_QUANTIZATION && HAS_KV_CACHE_ZP_INPUT
+                KEY_COMPRESSION_SCALE_COMPUTE_TYPE comp_zp = TO_KEY_COMPRESSION_SCALE_COMPUTE_TYPE(DECODE_KEY_COMPRESSION_ZP_COMPUTE_TYPE(key_zp[comp_offset]));
+#elif USE_ASYMMETRIC_QUANTIZATION
+                KEY_COMPRESSION_SCALE_COMPUTE_TYPE comp_zp = DECODE_KEY_COMPRESSION_SCALE_COMPUTE_TYPE(key_scale[comp_offset + 1]);
+#else
+                KEY_COMPRESSION_SCALE_COMPUTE_TYPE comp_zp = 0;
+#endif
+                KEY_COMPRESSION_SCALE_COMPUTE_TYPE k_val = (k_val_packed - comp_zp) * comp_scale;
+
+#else
+                INPUT1_COMPUTE_T k_val = LOAD_INPUT1(k_val_packed);
+#endif
+                acc += q_val * k_val;
+            }
+
+#if !APPLY_SCALE_TO_QUERY
+            acc *= scale_val;
+#endif
+
+            uint tmp_buf_offset = b0 * (NUM_HEADS * TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  b1 * (TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  target_seq_idx * (SOURCE_SEQ_LEN) + s;
+            tmp_buf[tmp_buf_offset] = acc;
+        }
+
+        ACCUMULATOR_TYPE qk_max = ACCUMULATOR_VAL_MIN;
+        for (uint s = 0; s < SOURCE_SEQ_LEN /* seq_len */; s++) {
+            uint tmp_buf_offset = b0 * (NUM_HEADS * TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  b1 * (TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  target_seq_idx * (SOURCE_SEQ_LEN) + s;
+#if IS_CAUSAL
+            #if !IS_PAGED_ATTENTION && CAUSAL_MASK_LOWER_RIGHT
+                const uint causal_offset = max(0, (int)SOURCE_SEQ_LEN - (int)TARGET_SEQ_LEN);
+                OUTPUT_COMPUTE_T attn_mask_val = s > target_seq_idx + causal_offset ? OUTPUT_COMPUTE_VAL_MIN : OUTPUT_COMPUTE_VAL_ZERO;
+            #else
+                OUTPUT_COMPUTE_T attn_mask_val = s > target_seq_idx ? OUTPUT_COMPUTE_VAL_MIN : OUTPUT_COMPUTE_VAL_ZERO;
+            #endif
+#elif !IS_CAUSAL && HAS_ATTN_MASK_INPUT
+            uint attn_mask_offset = INPUT3_GET_INDEX_SAFE(b0, b1, target_seq_idx, s);
+            OUTPUT_COMPUTE_T attn_mask_val = LOAD_INPUT3(attn_mask[attn_mask_offset]);
+#elif defined(STATIC_SCALAR_ATTN_MASK_VALUE)
+            OUTPUT_COMPUTE_T attn_mask_val = TO_OUTPUT_COMPUTE_T(STATIC_SCALAR_ATTN_MASK_VALUE);
+#else
+            OUTPUT_COMPUTE_T attn_mask_val = OUTPUT_COMPUTE_VAL_ZERO;
+#endif
+
+            OUTPUT_COMPUTE_T qk_val = tmp_buf[tmp_buf_offset] + attn_mask_val;
+            tmp_buf[tmp_buf_offset] = qk_val;
+
+            qk_max = ACCUMULATOR_MAX_FUNC(qk_max, TO_ACCUMULATOR_TYPE(qk_val));
+            #ifdef HAS_SINK_INPUT
+            qk_max = ACCUMULATOR_MAX_FUNC(qk_max, TO_ACCUMULATOR_TYPE(sink_ptr[b1]));
+            #endif
+        }
+
+        ACCUMULATOR_TYPE exp_sum = ACCUMULATOR_VAL_ZERO;
+        for (uint s = 0; s < SOURCE_SEQ_LEN /* seq_len */; s++) {
+            uint tmp_buf_offset = b0 * (NUM_HEADS * TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  b1 * (TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  target_seq_idx * (SOURCE_SEQ_LEN) + s;
+
+            ACCUMULATOR_TYPE qk_val = tmp_buf[tmp_buf_offset];
+            ACCUMULATOR_TYPE val = native_exp(qk_val - qk_max);
+            exp_sum += val;
+
+            tmp_buf[tmp_buf_offset] = val;
+        }
+        #ifdef HAS_SINK_INPUT
+        ACCUMULATOR_TYPE val = native_exp(TO_ACCUMULATOR_TYPE(sink_ptr[b1] - qk_max));
+        exp_sum += val;
+        #endif
+
+        const ACCUMULATOR_TYPE inv_sum = ACCUMULATOR_VAL_ONE / exp_sum;
+#if OUTPUT_TYPE_SIZE == 2 && OUTPUT_IS_FP
+        // Work around observed FP16 scratch normalization errors in unrolled code.
+        #pragma unroll 1
+#endif
+        for (uint s = 0; s < SOURCE_SEQ_LEN /* seq_len */; s++) {
+            uint tmp_buf_offset = b0 * (NUM_HEADS * TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  b1 * (TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                                  target_seq_idx * (SOURCE_SEQ_LEN) + s;
+
+            ACCUMULATOR_TYPE qk_val = tmp_buf[tmp_buf_offset];
+            ACCUMULATOR_TYPE val = qk_val * inv_sum;
+            tmp_buf[tmp_buf_offset] = val;
+        }
+    }
+
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    OUTPUT_COMPUTE_T acc = OUTPUT_COMPUTE_VAL_ZERO;
+    for (uint s = 0; s < SOURCE_SEQ_LEN /* seq_len */; s++) {
+        uint tmp_buf_offset = b0 * (NUM_HEADS * TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                              b1 * (TARGET_SEQ_LEN * SOURCE_SEQ_LEN) +
+                              target_seq_idx * (SOURCE_SEQ_LEN) + s;
+
+#ifdef BEAM_TABLE_TYPE
+        uint b_idx = beam_table[FUNC_CALL(get_bt_index_value)(OPTIONAL_SHAPE_INFO_TENSOR b0, b1, 0, 0, s, head_size_idx)];
+#else
+        uint b_idx = b0;
+#endif
+        uint value_offset = FUNC_CALL(get_input2_index)(OPTIONAL_SHAPE_INFO_TENSOR b_idx, b1, 0, 0, s, head_size_idx);
+
+        const INPUT2_TYPE value_packed = value_input[value_offset];
+#if IS_KV_COMPRESSED
+        const uint comp_offset = GET_COMPRESSION_INDEX(VALUE_COMPRESSION_SCALE, b_idx, b1 / BROADCAST_GROUP_SIZE, s, 0);
+        VALUE_COMPRESSION_SCALE_COMPUTE_TYPE comp_scale = DECODE_VALUE_COMPRESSION_SCALE_COMPUTE_TYPE(val_scale[comp_offset]);
+
+#if USE_ASYMMETRIC_QUANTIZATION && HAS_KV_CACHE_ZP_INPUT
+        VALUE_COMPRESSION_SCALE_COMPUTE_TYPE comp_zp = TO_VALUE_COMPRESSION_SCALE_COMPUTE_TYPE(DECODE_VALUE_COMPRESSION_ZP_COMPUTE_TYPE(val_zp[comp_offset]));
+#elif USE_ASYMMETRIC_QUANTIZATION
+        VALUE_COMPRESSION_SCALE_COMPUTE_TYPE comp_zp = DECODE_VALUE_COMPRESSION_SCALE_COMPUTE_TYPE(val_scale[comp_offset + 1]);
+#else
+        VALUE_COMPRESSION_SCALE_COMPUTE_TYPE comp_zp = 0;
+#endif
+        VALUE_COMPRESSION_SCALE_COMPUTE_TYPE value = (value_packed - comp_zp) * comp_scale;
+#else
+        INPUT2_COMPUTE_T value = LOAD_INPUT2(value_packed);
+#endif
+
+        acc += tmp_buf[tmp_buf_offset] * value;
+    }
+
+    uint output_offset = OUTPUT_GET_INDEX(b0, b1, target_seq_idx, head_size_idx);
+    output[output_offset] = STORE_OUTPUT(acc);
+}

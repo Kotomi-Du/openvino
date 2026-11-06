@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -55,6 +55,7 @@ const std::map<ActivationTypes, std::vector<std::vector<float>>> activationTypes
         {ActivationTypes::GeluErf,               {}},
         {ActivationTypes::GeluTanh,              {}},
         {ActivationTypes::SoftSign,              {}},
+        {ActivationTypes::ErfInv,                {}},
 };
 
 const std::map<ActivationTypes, std::vector<std::vector<float>>> big_rank_activation_types = {
@@ -86,6 +87,7 @@ std::map<std::vector<ov::Shape>, std::vector<ov::Shape>> big_ranks = {
 std::map<std::vector<ov::Shape>, std::vector<ov::Shape>> preluBasic = {
         {{{1, 10, 20}}, {{10}, {20}, {10, 20}}},
         {{{1, 128}}, {{1}, {128}}},
+        {{{24}}, {{1}}},
 };
 
 auto static_shapes_param_transform = [](const std::vector<std::pair<std::vector<ov::Shape>, ov::Shape>>& original_shapes) {

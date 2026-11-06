@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,6 +12,7 @@
 #include "intel_gpu/primitives/fully_connected.hpp"
 #include "intel_gpu/primitives/reshape.hpp"
 #include "intel_gpu/primitives/reorder.hpp"
+#include "plugin/transformations/fuse_hadamard_fc.hpp"
 
 namespace ov {
 namespace op {
@@ -25,7 +26,7 @@ using FullyConnectedCompressed = ov::intel_gpu::op::FullyConnectedCompressed;
 namespace ov::intel_gpu {
 
 static void CreateFullyConnectedCompressedOp(ProgramBuilder& p, const std::shared_ptr<op::FullyConnectedCompressed>& op) {
-    validate_inputs_count(op, {4, 5, 6, 7});
+    validate_inputs_count(op, {4, 5, 6, 8});
     auto inputs = p.GetInputInfo(op);
     std::string primitive_name = layer_type_name_ID(op);
     auto supports_immad = p.get_engine().get_device_info().supports_immad;
@@ -39,10 +40,11 @@ static void CreateFullyConnectedCompressedOp(ProgramBuilder& p, const std::share
     std::string zp_name = op->get_input_size() > input_idx ? inputs[input_idx++].pid : "";
     auto activation_scale_input = op->get_input_size() > input_idx ? inputs[input_idx++] : cldnn::input_info();
     auto activation_zero_point_input = op->get_input_size() > input_idx ? inputs[input_idx++] : cldnn::input_info();
+    auto activation_precomputed_reduction = op->get_input_size() > input_idx ? inputs[input_idx++] : cldnn::input_info();
 
     float zp_value = 0.0f;
     bool has_scalar_zp = false;
-    if (zp_name.size() > 0) {
+    if (!zp_name.empty()) {
         auto zp_const = ov::as_type_ptr<ov::op::v0::Constant>(op->get_input_node_shared_ptr(W_ZP_IDX));
         if (zp_const && ov::shape_size(zp_const->get_output_shape(0)) == 1) {
             has_scalar_zp = true;
@@ -50,7 +52,6 @@ static void CreateFullyConnectedCompressedOp(ProgramBuilder& p, const std::share
         }
     }
 
-    // The decompression zp node should be kept for onednn FC.
     auto fc = cldnn::fully_connected(primitive_name,
                                      cldnn::input_info(input_name),
                                      weights_name,
@@ -59,13 +60,24 @@ static void CreateFullyConnectedCompressedOp(ProgramBuilder& p, const std::share
                                      has_scalar_zp && !supports_immad ? "" : zp_name,
                                      activation_scale_input,
                                      activation_zero_point_input,
+                                     activation_precomputed_reduction,
                                      cldnn::element_type_to_data_type(op->get_output_element_type(0)),
                                      op->get_input_partial_shape(0).size(),
-                                     op->get_input_partial_shape(1).size());
-
+                                     op->get_input_partial_shape(1).size(),
+                                     op->get_transpose_b(),
+                                     op->get_transpose_b_scale(),
+                                     op->get_transpose_b_zp());
 
     if (has_scalar_zp) {
         fc.decompression_zero_point_scalar = zp_value;
+    }
+
+    // Input rotation absorbed by FuseHadamardIntoFC.
+    const auto& rt = op->get_rt_info();
+    if (auto it = rt.find(int2_hadamard_block_key); it != rt.end()) {
+        fc.hadamard_block = static_cast<size_t>(it->second.as<int64_t>());
+        if (auto st = rt.find(int2_hadamard_signs_key); st != rt.end())
+            fc.hadamard_signs = st->second.as<std::vector<int8_t>>();
     }
 
     p.add_primitive(*op, fc);
@@ -120,8 +132,8 @@ static void CreateFullyConnectedOp(ProgramBuilder& p, const std::shared_ptr<op::
                                          bias_name,
                                          cldnn::element_type_to_data_type(op->get_output_element_type(0)),
                                          rank_a,
-                                         rank_b);
-
+                                         rank_b,
+                                         op->get_transpose_b());
     p.add_primitive(*op, fcPrim);
 
     if (shape_a.size() > 3 && !p.use_new_shape_infer()) {

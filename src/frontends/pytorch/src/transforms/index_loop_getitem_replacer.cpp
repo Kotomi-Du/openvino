@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,10 +26,7 @@
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace pass {
+namespace ov::frontend::pytorch::pass {
 
 using namespace ov::pass;
 using namespace ov::op;
@@ -77,7 +74,7 @@ IndexLoopGetitemReplacer::IndexLoopGetitemReplacer() {
 
         auto param_targets = chunk_param->get_output_target_inputs(0);
         if (param_targets.size() != 1) {
-            add_exception_to_fw_node(chunk_op, "aten::chunk: targets more then one.");
+            add_exception_to_fw_node(chunk_op, "aten::chunk: targets more than one.");
             return false;
         }
 
@@ -147,7 +144,4 @@ IndexLoopGetitemReplacer::IndexLoopGetitemReplacer() {
     this->register_matcher(m, callback);
 };
 
-}  // namespace pass
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::pass

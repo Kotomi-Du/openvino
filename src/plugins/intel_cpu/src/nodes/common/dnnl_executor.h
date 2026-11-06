@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -72,7 +72,6 @@ public:
 protected:
     virtual void reorder_exec(std::unordered_map<int, dnnl::memory> primArgs, const dnnl::stream& strm);
 
-protected:
     dnnl::primitive execPrim;
     // key is the port number for the primitive that needs memory reordering
     std::unordered_map<int, IntermReorder> inputReorders;

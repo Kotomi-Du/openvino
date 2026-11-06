@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -37,6 +37,18 @@ struct Col2Im : public ImplementationManager {
 
         if (!one_of(in0_layout.data_type, supported_types) || !one_of(out_layout.data_type, supported_types)) {
             return false;
+        }
+
+        for (const auto& input : node.get_input_layouts()) {
+            if (input.data_padding) {
+                return false;
+            }
+        }
+
+        for (const auto& output : node.get_output_layouts()) {
+            if (output.data_padding) {
+                return false;
+            }
         }
 
         return true;

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,6 +18,7 @@
 #include "openvino/op/abs.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/broadcast.hpp"
+#include "openvino/op/concat.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/cos.hpp"
 #include "openvino/op/cosh.hpp"
@@ -469,7 +470,7 @@ TEST(pattern, optional_match_node_with_single_input) {
     TestMatcher matcher;
     // is_on_const_path
     auto param_predicate = [](const Output<Node>& output) {
-        return !ov::op::util::is_on_constant_path(output);
+        return !ov::op::util::is_on_path<ov::op::v0::Constant>(output);
     };
 
     auto pattern_in_0 = ov::pass::pattern::any_input();
@@ -1459,7 +1460,7 @@ TEST(pattern, pattern_symbol_predicate_and_operators) {
     auto reshape = std::make_shared<ov::op::v1::Reshape>(input,
                                                          ov::op::v0::Constant::create(element::i64, {4}, {0, 0, 0, 20}),
                                                          true);
-    pattern::PatternSymbolMap m;
+    ov::pass::pattern::Matcher m;
     for (size_t i = 0; i < 10; ++i) {
         predicate_and = predicate_and && pattern::consumers_count(i);
         predicate_or = predicate_and || pattern::consumers_count(i);
@@ -1468,7 +1469,7 @@ TEST(pattern, pattern_symbol_predicate_and_operators) {
         else
             predicate_mixed = predicate_mixed || pattern::consumers_count(i);
 
-        ASSERT_NO_THROW(predicate_and(m, input));
+        ASSERT_NO_THROW(predicate_and(&m, input));
     }
 }
 
@@ -1535,7 +1536,7 @@ TEST(pattern, predicate_attr_match) {
     auto ss_pattern = pattern::any_input({{"begin_mask", std::vector<int64_t>{0, 1}}});
     // TODO: to allow initializer list as attribute value -- need to update ov::Attribute value type -- wrap ov::Any and
     //  allow implicit conversion from initializer lists of different types.
-    //  For now it seems excessive as it impacts quality of life of limited number of developers aka there is a WA
+    //  For now it seems excessive as it impacts quality of life of limited number of developers.
     ASSERT_TRUE(tm.match(ss_pattern, ss));
 }
 
@@ -1578,4 +1579,183 @@ TEST(pattern, predicate_syntactic_sugar) {
     ASSERT_NO_THROW(pattern::wrap_type<op::v0::Relu>(pattern::any_input()));
     ASSERT_NO_THROW(pattern::wrap_type<op::v0::Relu>(pattern::wrap_type<op::v0::Relu>()));
     ASSERT_NO_THROW(pattern::wrap_type<op::v0::Relu>("[-1,0,1]"));
+}
+
+TEST(pattern, multi_output_edge_index_honored) {
+    TestMatcher tm;
+
+    auto input = std::make_shared<op::v0::Parameter>(element::f32, Shape{10, 20, 30});
+    auto axis = op::v0::Constant::create(element::i64, {}, {-1});
+    auto split_lengths = op::v0::Constant::create(element::i64, {3}, {5, 10, 15});
+    auto variadic_split = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+    variadic_split->set_output_size(3);
+
+    auto reshape_shape = op::v0::Constant::create(element::i64, {2}, {-1, 5});
+    auto reshape0 = std::make_shared<op::v1::Reshape>(variadic_split->output(0), reshape_shape, false);
+    auto reshape1 = std::make_shared<op::v1::Reshape>(variadic_split->output(1), reshape_shape, false);
+
+    auto split_p = pattern::wrap_type_strict_index<op::v1::VariadicSplit>(
+        {pattern::any_input(), pattern::any_input(), pattern::any_input()});
+    auto reshape_p = pattern::wrap_type<op::v1::Reshape>({split_p->output(1), pattern::any_input()});
+
+    // A pattern edge pinned to producer->output(1) must NOT match a graph value
+    // that is physical output(0).
+    ASSERT_FALSE(tm.match(reshape_p, reshape0));
+    ASSERT_TRUE(tm.match(reshape_p, reshape1));
+}
+
+TEST(pattern, multi_output_shared_producer_identity_enforced) {
+    auto input = std::make_shared<op::v0::Parameter>(element::f32, Shape{10, 20, 30});
+    auto axis = op::v0::Constant::create(element::i64, {}, {0});
+    auto split_lengths = op::v0::Constant::create(element::i64, {2}, {5, 5});
+
+    // Pattern: ONE split node, both outputs referenced by index.
+    auto split_p = pattern::wrap_type_strict_index<op::v1::VariadicSplit>();
+    auto concat_p = pattern::wrap_type<op::v0::Concat>({split_p->output(1), split_p->output(0)});
+
+    // Positive control: both concat inputs come from the SAME split -> matches.
+    {
+        auto split = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+        auto concat = std::make_shared<op::v0::Concat>(OutputVector{split->output(1), split->output(0)}, 0);
+        TestMatcher tm;
+        ASSERT_TRUE(tm.match(concat_p, concat));
+    }
+
+    // A single pattern node cannot bind to two different physical producers.
+    {
+        auto split_a = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+        auto split_b = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+        auto concat = std::make_shared<op::v0::Concat>(OutputVector{split_b->output(1), split_a->output(0)}, 0);
+        TestMatcher tm;
+        ASSERT_FALSE(tm.match(concat_p, concat));
+    }
+}
+
+TEST(pattern, multi_output_single_node_index_honored) {
+    auto input = std::make_shared<op::v0::Parameter>(element::f32, Shape{10, 20, 30});
+    auto axis = op::v0::Constant::create(element::i64, {}, {0});
+    auto split_lengths = op::v0::Constant::create(element::i64, {2}, {5, 5});
+    auto scale = op::v0::Constant::create(element::f32, Shape{}, {-1.0f});
+
+    /*
+    Pattern: ONE split node, outputs referenced by index.
+               split_p
+             /         \
+         out1            out0
+           |             |
+      Multiply(out1, *)  |
+            \            /
+             Concat(neg_p, out0)
+    */
+    auto build_pattern = []() {
+        auto split_p = pattern::wrap_type_strict_index<op::v1::VariadicSplit>(
+            {pattern::any_input(), pattern::any_input(), pattern::any_input()});
+        auto neg_p = pattern::wrap_type<op::v1::Multiply>({split_p->output(1), pattern::any_input()});
+        auto concat_p = pattern::wrap_type<op::v0::Concat>({neg_p, split_p->output(0)});
+        return concat_p;
+    };
+
+    // Correctly-wired graph: neg uses output(1), concat uses output(0) -> matches.
+    {
+        auto split = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+        split->set_output_size(2);
+        auto neg = std::make_shared<op::v1::Multiply>(split->output(1), scale);
+        auto concat = std::make_shared<op::v0::Concat>(OutputVector{neg, split->output(0)}, 0);
+
+        TestMatcher tm;
+        ASSERT_TRUE(tm.match(build_pattern(), concat));
+    }
+
+    // Swapped-wired graph: neg uses output(0), concat uses output(1) -> must NOT match.
+    {
+        auto split = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+        split->set_output_size(2);
+        auto neg = std::make_shared<op::v1::Multiply>(split->output(0), scale);
+        auto concat = std::make_shared<op::v0::Concat>(OutputVector{neg, split->output(1)}, 0);
+
+        TestMatcher tm;
+        ASSERT_FALSE(tm.match(build_pattern(), concat));
+    }
+}
+
+TEST(pattern, multi_output_callback_map_access) {
+    auto input = std::make_shared<op::v0::Parameter>(element::f32, Shape{10, 20, 30});
+    auto axis = op::v0::Constant::create(element::i64, {}, {0});
+    auto split_lengths = op::v0::Constant::create(element::i64, {2}, {5, 5});
+    auto scale = op::v0::Constant::create(element::f32, Shape{}, {-1.0f});
+
+    auto graph_split = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+    graph_split->set_output_size(2);
+    auto neg = std::make_shared<op::v1::Multiply>(graph_split->output(1), scale);
+    auto concat = std::make_shared<op::v0::Concat>(OutputVector{neg, graph_split->output(0)}, 0);
+
+    auto split_p = pattern::wrap_type_strict_index<op::v1::VariadicSplit>(
+        {pattern::any_input(), pattern::any_input(), pattern::any_input()});
+    auto neg_p = pattern::wrap_type<op::v1::Multiply>({split_p->output(1), pattern::any_input()});
+    auto concat_p = pattern::wrap_type<op::v0::Concat>({neg_p, split_p->output(0)});
+
+    bool callback_ran = false;
+    auto callback = [&](pattern::Matcher& m) {
+        callback_ran = true;
+
+        const auto& node_map = m.get_pattern_map();
+        EXPECT_EQ(node_map.at(split_p), graph_split);
+
+        // It's possible to retrieve the matched output value for a
+        // multi-output node from the pattern-value map, but the outputs
+        // are not guaranteed to be in any particular order, so it's important
+        // to use this output with care. I.e. taking the graph node from it.
+        const auto& value_map = m.get_pattern_value_map();
+        Output<Node> stored = value_map.at(split_p);
+        EXPECT_EQ(stored.get_node(), graph_split.get());
+
+        // To obtain a SPECIFIC physical output, index into the matched producer's
+        // outputs directly; the index stored in the map is traversal-dependent.
+        auto producer = stored.get_node_shared_ptr();
+        EXPECT_EQ(producer->output(0), graph_split->output(0));
+        EXPECT_EQ(producer->output(1), graph_split->output(1));
+    };
+
+    pattern::Matcher m(concat_p, "MultiOutputCallback");
+    ASSERT_TRUE(m.match(concat->output(0)));
+    callback(m);
+    EXPECT_TRUE(callback_ran);
+}
+
+TEST(pattern, wrap_type_strict_index_matches_subset_of_outputs) {
+    auto input = std::make_shared<op::v0::Parameter>(element::f32, Shape{10, 20, 30});
+    auto axis = op::v0::Constant::create(element::i64, {}, {-1});
+    auto split_lengths = op::v0::Constant::create(element::i64, {3}, {10, 10, 10});
+    auto scale = op::v0::Constant::create(element::f32, Shape{}, {2.0f});
+
+    // Graph node has THREE outputs; output(2) feeds a consumer the pattern
+    // does not describe, but still matches. This is ok.
+    auto split = std::make_shared<op::v1::VariadicSplit>(input, axis, split_lengths);
+    split->set_output_size(3);
+    ASSERT_EQ(split->get_output_size(), 3);
+    auto ignored = std::make_shared<op::v1::Multiply>(split->output(2), scale);
+
+    auto neg = std::make_shared<op::v1::Multiply>(split->output(1), scale);
+    auto concat = std::make_shared<op::v0::Concat>(OutputVector{neg, split->output(0)}, 0);
+
+    // Pattern producer only references output(0)/output(1).
+    auto split_p = pattern::wrap_type_strict_index<op::v1::VariadicSplit>(
+        {pattern::any_input(), pattern::any_input(), pattern::any_input()});
+    auto neg_p = pattern::wrap_type<op::v1::Multiply>({split_p->output(1), pattern::any_input()});
+    auto concat_p = pattern::wrap_type<op::v0::Concat>({neg_p, split_p->output(0)});
+
+    TestMatcher tm;
+    ASSERT_TRUE(tm.match(concat_p, concat));
+}
+
+TEST(pattern, wrap_type_strict_index_output_grows_through_base_handle) {
+    std::shared_ptr<ov::Node> strict_p = pattern::wrap_type_strict_index<op::v1::VariadicSplit>();
+    EXPECT_EQ(strict_p->get_output_size(), 1);
+    EXPECT_NO_THROW(strict_p->output(3));
+    EXPECT_EQ(strict_p->get_output_size(), 4);
+
+    // Non-strict pattern nodes keep the base out-of-range check.
+    std::shared_ptr<ov::Node> plain_p = pattern::wrap_type<op::v1::VariadicSplit>();
+    EXPECT_THROW(plain_p->output(1), ov::Exception);
+    EXPECT_EQ(plain_p->get_output_size(), 1);
 }

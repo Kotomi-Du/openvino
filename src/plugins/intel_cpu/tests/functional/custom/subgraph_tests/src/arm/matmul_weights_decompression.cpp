@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,12 +12,13 @@ namespace ov {
 namespace test {
 
 namespace {
+using namespace ov::test::utils;
 
 const ov::AnyMap enable_dyn_quant_config_kleidiai = {ov::hint::dynamic_quantization_group_size(UINT64_MAX)};
 const std::vector<ov::test::ElementType> decompression_precisions = {ov::element::f32};
 const std::vector<fusingSpecificParams> fusing_params{emptyFusingSpec, fusingBias};
 
-const std::vector<ov::test::ElementType> weights_precisions_kleidiai = {ov::element::i8};
+const std::vector<ov::test::ElementType> weights_precisions_kleidiai = {ov::element::i8, ov::element::i4};
 const std::vector<MatMulDecompressionShapeParams> input_shapes_kleidiai = {
     {{{-1, -1, -1}, {{1, 4, 16}, {10, 16, 16}}}, {16, 32}},
     {{{}, {{1, 4, 16}}}, {1, 16, 32}},
@@ -32,7 +33,7 @@ INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_Kleidiai,
     ::testing::Combine(::testing::ValuesIn(input_shapes_kleidiai),
                        ::testing::ValuesIn(weights_precisions_kleidiai),
                        ::testing::ValuesIn(decompression_precisions),
-                       ::testing::Values(ov::element::undefined),
+                       ::testing::Values(ov::element::dynamic),
                        ::testing::ValuesIn(transpose_weights_kleidiai),
                        ::testing::Values(DecompressionType::full),
                        ::testing::Values(DecompressionType::empty),
@@ -41,6 +42,76 @@ INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_Kleidiai,
                        ::testing::ValuesIn(fusing_params),
                        ::testing::Values(true)),
     MatmulWeightsDecompression::getTestCaseName);
+
+const std::vector<MatMulDecompressionShapeParams> group_input_shape_params_kleidiai = {
+    // dynamic batch dim, multiple concrete shapes exercised, IC/group_size=64/32 -> numGroups=2
+    {
+        {{-1, -1, -1}, {{10, 40, 64}, {11, 40, 64}}}, // data_shape
+        {64, 128},  // weights_shape
+        64        // group size
+    },
+    // group size not a multiple of 32 -> fall back to FP32 path
+    {
+        {{-1, -1, -1}, {{1, 4, 16}, {10, 16, 16}}}, // data_shape
+        {16, 32},  // weights_shape
+        16        // group size
+    },
+    // small/fast smoke case, numGroups=2
+    {
+        {{}, {{1, 1, 64}}},
+        {64, 16},
+        32
+    },
+    // more than 2 groups
+    {
+        {{}, {{1, 4, 128}}},
+        {128, 64},
+        32        // numGroups=4
+    },
+    // degenerate: group_size == IC -> numGroups=1, falls back to the non-group kernel path
+    {
+        {{}, {{1, 4, 32}}},
+        {32, 40},
+        32
+    }
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeightsGrp_Kleidiai,
+    MatmulWeightsDecompression,
+    ::testing::Combine(::testing::ValuesIn(group_input_shape_params_kleidiai),
+                       ::testing::Values(ov::element::i4),
+                       ::testing::ValuesIn(decompression_precisions),
+                       ::testing::Values(ov::element::dynamic),
+                       ::testing::ValuesIn(transpose_weights_kleidiai),
+                       ::testing::Values(DecompressionType::full),
+                       ::testing::Values(DecompressionType::empty),
+                       ::testing::Values(false),
+                       ::testing::Values(enable_dyn_quant_config_kleidiai),
+                       ::testing::ValuesIn(fusing_params),
+                       ::testing::Values(true)),
+    MatmulWeightsDecompression::getTestCaseName);
+
+const std::vector<MatMulDecompressionShapeParams> input_shapes_with_groups = {  
+    {{{}, {{1, 7, 256}}}, {256, 128}, 32lu},  // group_size = 32  
+    {    {{-1, -1, -1}, {{10, 40, 64}, {11, 40, 64}}}, // data_shape
+        {64, 128},  // weights_shape
+        32lu},   // group_size = 16  
+}; 
+
+INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeightsGrp_Kleidiai_asym,  
+                         MatmulWeightsDecompression,  
+                         ::testing::Combine(::testing::ValuesIn(input_shapes_with_groups),  
+                                            ::testing::Values(ov::element::u4),  
+                                            ::testing::ValuesIn(decompression_precisions),  
+                                            ::testing::Values(ov::element::dynamic),  
+                                            ::testing::Values(true),  
+                                            ::testing::Values(DecompressionType::full),  // group-wise requires full  
+                                            ::testing::Values(DecompressionType::full),  // asymmetric with zero-point  
+                                            ::testing::Values(false),  
+                                            ::testing::Values(enable_dyn_quant_config_kleidiai),  
+                                            ::testing::ValuesIn(fusing_params),  
+                                            ::testing::Values(true)),  // should_use_decompression_impl() can also be passed
+                         MatmulWeightsDecompression::getTestCaseName);
 
 const std::vector<ov::test::ElementType> weights_precisions = {ov::element::u8, ov::element::i8};
 
@@ -107,6 +178,46 @@ INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_corner_cases,
                                             ::testing::Values(basic_config),
                                             ::testing::Values(emptyFusingSpec),
                                             ::testing::Values(should_use_decompression_impl())),
+                         MatmulWeightsDecompression::getTestCaseName);
+
+// INT8 KleidiAI FC runs a 1-row GEMV kernel when M == 1 and a 16x4 GEMM kernel otherwise
+// (the i8mm path keeps the GEMM at M == 1 on a CPU without dotprod).
+// M is the product of all activation dims except the last one (e.g. {2, 8, 64} -> M = 16).
+// Dynamic entries compile once and run every target shape on the same executor, so the
+// kernel switches back and forth between calls.
+const std::vector<MatMulDecompressionShapeParams> input_shapes_kleidiai_i8_kernel_switch = {
+    // M: 1 -> 37 -> 1 -> 2 -> 16 -> 3 (the last two use the batch dim)
+    {{{-1, -1, -1}, {{1, 1, 64}, {1, 37, 64}, {1, 1, 64}, {1, 2, 64}, {2, 8, 64}, {3, 1, 64}}}, {64, 96}},
+    // M == 1, K not a multiple of 32, N not a multiple of 4
+    {{{}, {{1, 1, 77}}}, {77, 30}},
+    // M == 1 with 3D weights
+    {{{}, {{1, 1, 64}}}, {1, 64, 36}},
+    // M smaller than the GEMM mr
+    {{{-1, -1, -1}, {{1, 2, 48}, {1, 3, 48}}}, {48, 64}},
+    // GEMM block boundaries (16, 17, 33), then back to the GEMV
+    {{{-1, -1, -1}, {{1, 16, 128}, {1, 17, 128}, {1, 33, 128}, {1, 1, 128}}}, {128, 40}},
+    // N < 4 with M == 1 and M > 1
+    {{{-1, -1, -1}, {{1, 1, 32}, {1, 5, 32}}}, {32, 3}},
+    // 2D activations, M: 1 -> 20 -> 1
+    {{{-1, 96}, {{1, 96}, {20, 96}, {1, 96}}}, {96, 50}},
+};
+
+const ov::AnyMap kleidiai_i8_kernel_switch_config = {ov::hint::dynamic_quantization_group_size(UINT64_MAX),
+                                                     ov::hint::inference_precision(ov::element::f32)};
+
+INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_Kleidiai_i8_kernel_switch,
+                         MatmulWeightsDecompression,
+                         ::testing::Combine(::testing::ValuesIn(input_shapes_kleidiai_i8_kernel_switch),
+                                            ::testing::Values(ov::element::i8),
+                                            ::testing::Values(ov::element::f32),
+                                            ::testing::Values(ov::element::dynamic),
+                                            ::testing::Values(true, false),
+                                            ::testing::Values(DecompressionType::full),
+                                            ::testing::Values(DecompressionType::empty),
+                                            ::testing::Values(false),
+                                            ::testing::Values(kleidiai_i8_kernel_switch_config),
+                                            ::testing::ValuesIn(fusing_params),
+                                            ::testing::Values(true)),
                          MatmulWeightsDecompression::getTestCaseName);
 
 }  // namespace

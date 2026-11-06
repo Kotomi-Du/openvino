@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import sys, argparse
@@ -23,6 +23,12 @@ def check_positive(value):
     ivalue = int(value)
     if ivalue <= 0:
         raise argparse.ArgumentTypeError(f"{value} is an invalid positive int value")
+    return ivalue
+
+def check_nonneg(value):
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"{value} is an invalid non-negative int value")
     return ivalue
 
 class print_help(argparse.Action):
@@ -69,9 +75,11 @@ def parse_args():
                             '\'latency\': device performance mode will be set to LATENCY. \n'
                             '\'none\': no device performance mode will be set. \n'
                             'Using explicit \'nstreams\' or other device-specific options, please set hint to \'none\'')
-    args.add_argument('-niter', '--number_iterations', type=check_positive, required=False, default=None,
+    args.add_argument('-niter', '--number_iterations', type=check_nonneg, required=False, default=None,
                       help='Optional. Number of iterations. '
-                           'If not specified, the number of iterations is calculated depending on a device.')
+                           'If not specified, the number of iterations is calculated depending on a device. '
+                           'Set -niter 0 to compile the model and exit without running inference '
+                           '(useful for models with dynamic shapes that would otherwise require -shape, -data_shape, or -i).')
     args.add_argument('-max_irate', '--maximum_inference_rate', type=float, required=False, default=0,
                       help='Optional. Maximum inference rate by frame per second. '
                            'If not specified, default value is 0, the inference will run at maximium rate depending on a device capabilities. '
@@ -125,9 +133,10 @@ def parse_args():
     advs.add_argument('-inference_only', '--inference_only', type=str2bool, required=False, default=None, nargs='?', const=True,
                       help='Optional. If true inputs filling only once before measurements (default for static models), '
                                      'else inputs filling is included into loop measurement (default for dynamic models)', )
+    advs.add_argument('-no_warmup', action='store_true', required=False, default=False,
+                  help='Optional. Skip warmup inference. Useful for benchmarking purposes in simulated environments. Otherwise, not recommended.')
     advs.add_argument('-infer_precision', type=str, required=False,
                       help='Optional. Specifies the inference precision. Example #1: \'-infer_precision bf16\'. Example #2: \'-infer_precision CPU:bf16,GPU:f32\'')
-
     prpr = parser.add_argument_group('Preprocessing options')
     prpr.add_argument('-ip', '--input_precision', type=str, required=False, choices=INPUT_OUTPUT_PRECISION_CHOICES,
                       help='Optional. Specifies precision for all input layers of the model.')

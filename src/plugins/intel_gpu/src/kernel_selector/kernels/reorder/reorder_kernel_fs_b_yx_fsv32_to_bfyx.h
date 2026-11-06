@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,7 @@ namespace kernel_selector {
 class ReorderKernel_fs_b_yx_fsv32_to_bfyx : public ReorderKernelBase {
 public:
     ReorderKernel_fs_b_yx_fsv32_to_bfyx() : ReorderKernelBase("reorder_fs_b_yx_fsv32_to_bfyx") {}
-    virtual ~ReorderKernel_fs_b_yx_fsv32_to_bfyx() {}
+    ~ReorderKernel_fs_b_yx_fsv32_to_bfyx() override = default;
 
     DispatchData SetDefault(const reorder_params& params) const override;
     KernelsData GetKernelsData(const Params& params) const override;

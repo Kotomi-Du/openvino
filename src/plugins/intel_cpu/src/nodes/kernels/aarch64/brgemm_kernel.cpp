@@ -1,5 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
-// Copyright (C) 2024 FUJITSU LIMITED
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -21,6 +20,7 @@
 #include <memory>
 #include <oneapi/dnnl/dnnl.hpp>
 #include <openvino/core/except.hpp>
+#include <tuple>
 
 #include "dnnl_extension_utils.h"
 #include "openvino/core/type/element_type.hpp"
@@ -34,10 +34,35 @@ using namespace dnnl::impl::cpu::aarch64::matmul;
 
 namespace ov::intel_cpu {
 
+// Highest supported SVE ISA at or above `min_isa`, or isa_undef if none (caller then
+// declines instead of emitting illegal SVE). Default floor sve_128 fits the main brgemm
+// kernel; copy_a/copy_b pass sve_256 since oneDNN only provides sve_256/sve_512 for them
+// (create_brgemm_matmul_copy_* asserts the isa is a superset of sve_256).
+static cpu_isa_t getSupportedSveIsa(cpu_isa_t min_isa = cpu_isa_t::sve_128) {
+    if (mayiuse(sve_512)) {
+        return cpu_isa_t::sve_512;
+    }
+    if (mayiuse(sve_256)) {
+        return cpu_isa_t::sve_256;
+    }
+    if (min_isa == cpu_isa_t::sve_128 && mayiuse(sve_128)) {
+        return cpu_isa_t::sve_128;
+    }
+    return cpu_isa_t::isa_undef;
+}
+
 static size_t getVlen() {
-    return mayiuse(sve_512)   ? cpu_isa_traits<sve_512>::vlen
-           : mayiuse(sve_256) ? cpu_isa_traits<sve_256>::vlen
-                              : cpu_isa_traits<sve_128>::vlen;
+    const auto isa = getSupportedSveIsa();
+    if (isa == cpu_isa_t::sve_512) {
+        return cpu_isa_traits<sve_512>::vlen;
+    }
+    if (isa == cpu_isa_t::sve_256) {
+        return cpu_isa_traits<sve_256>::vlen;
+    }
+    if (isa == cpu_isa_t::sve_128) {
+        return cpu_isa_traits<sve_128>::vlen;
+    }
+    THROW_ERROR("requires ARM SVE support");
 }
 
 BrgemmKernel::BrgemmKernel(size_t M,
@@ -72,17 +97,38 @@ BrgemmKernel::BrgemmKernel(size_t M,
             for (size_t n = 0; n < 2; n++) {
                 auto& brgemmCtx = brgCtxs[getBrgIdx(m, k, n)];
 
-                auto M_ = m ? M_tail : M < M_blk ? 0 : M_blk;
-                auto N_ = n ? N_tail : N - N_tail;
-                auto K_ = k ? K_tail : K - K % K_blk;
+                auto [M_, N_, K_] = [&]() {
+                    size_t M_ = [&]() {
+                        if (m) {
+                            return M_tail;
+                        }
+                        return this->M < M_blk ? 0 : M_blk;
+                    }();
+
+                    size_t N_ = [&]() {
+                        if (n) {
+                            return N_tail;
+                        }
+                        return N - N_tail;
+                    }();
+
+                    size_t K_ = [&]() {
+                        if (k) {
+                            return K_tail;
+                        }
+                        return K - K % K_blk;
+                    }();
+
+                    return std::make_tuple(M_, N_, K_);
+                }();
                 auto beta = (b_accumulate || (k && brgCtxs[getBrgIdx(m, 0, n)].K != 0)) ? 1.0F : 0.0F;
 
                 brgemmCtx.M = M_;
                 brgemmCtx.N = N_;
                 brgemmCtx.K = K_;
-                brgemmCtx.LDA = k ? K_blk : lda;
+                brgemmCtx.LDA = k ? K_blk : this->lda;
                 brgemmCtx.LDB = b_transposed ? rnd_up(N, N_blk) : ldb;  // b_transposed needs copy
-                brgemmCtx.LDC = ldc;
+                brgemmCtx.LDC = this->ldc;
                 brgemmCtx.dt_in0 = static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(inType));
                 brgemmCtx.dt_in1 = static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(inType));
                 brgemmCtx.beta = beta;
@@ -125,9 +171,11 @@ size_t BrgemmKernel::get_scratch_b_size() const {
 }
 
 void BrgemmKernel::init_brgemm(brgemmCtx& ctx, std::unique_ptr<dnnl::impl::cpu::aarch64::brgemm_kernel_t>& brgKernel) {
-    brgemm_t brgDesc;
-    cpu_isa_t isa;
-    isa = mayiuse(sve_512) ? cpu_isa_t::sve_512 : mayiuse(sve_256) ? cpu_isa_t::sve_256 : cpu_isa_t::sve_128;
+    brgemm_desc_t brgDesc;
+    const cpu_isa_t isa = getSupportedSveIsa();
+    if (isa == cpu_isa_t::isa_undef) {
+        THROW_ERROR("requires ARM SVE support");
+    }
     auto status = brgemm_desc_init(&brgDesc,
                                    isa,
                                    brgemm_addr,
@@ -165,7 +213,7 @@ void BrgemmKernel::init_brgemm_copy_a(
     dnnl_data_type_t dt_in0,
     bool transpose,
     size_t copy_A_src_stride) {
-    brgemm_matmul_conf_t brgCopyKernelConf;
+    brgemm_matmul_conf_t brgCopyKernelConf{};
     brgCopyKernelConf.src_tag = dnnl_abcd;
     brgCopyKernelConf.K = K;
     brgCopyKernelConf.K_tail = K_tail;
@@ -183,9 +231,10 @@ void BrgemmKernel::init_brgemm_copy_a(
     // copied A has the same precision of original
     brgCopyKernelConf.tr_a_dt_sz = DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(dt_in0));
     brgCopyKernelConf.transposed_A = transpose;
-    brgCopyKernelConf.isa = mayiuse(sve_512)   ? cpu_isa_t::sve_512
-                            : mayiuse(sve_256) ? cpu_isa_t::sve_256
-                                               : cpu_isa_t::sve_128;
+    brgCopyKernelConf.isa = getSupportedSveIsa(cpu_isa_t::sve_256);
+    if (brgCopyKernelConf.isa == cpu_isa_t::isa_undef) {
+        THROW_ERROR("copy A kernel requires ARM SVE256 support");
+    }
 
     create_brgemm_matmul_copy_a(brgCopyKernel, &brgCopyKernelConf);
 }
@@ -201,7 +250,7 @@ void BrgemmKernel::init_brgemm_copy_b(
     dnnl_data_type_t dt_in1,
     bool transpose,
     size_t copy_B_wei_stride) {
-    brgemm_matmul_conf_t brgCopyKernelConf;
+    brgemm_matmul_conf_t brgCopyKernelConf{};
     brgCopyKernelConf.src_dt = dt_in0;
     brgCopyKernelConf.wei_dt = dt_in1;
     brgCopyKernelConf.wei_n_blk = N_blk;
@@ -222,9 +271,10 @@ void BrgemmKernel::init_brgemm_copy_b(
     brgCopyKernelConf.tr_b_dt_sz =
         DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(brgCopyKernelConf.src_dt));
     brgCopyKernelConf.req_wei_vnni_downconvert = false;
-    brgCopyKernelConf.isa = mayiuse(sve_512)   ? cpu_isa_t::sve_512
-                            : mayiuse(sve_256) ? cpu_isa_t::sve_256
-                                               : cpu_isa_t::sve_128;
+    brgCopyKernelConf.isa = getSupportedSveIsa(cpu_isa_t::sve_256);
+    if (brgCopyKernelConf.isa == cpu_isa_t::isa_undef) {
+        THROW_ERROR("copy B kernel requires ARM SVE256 support");
+    }
 
     brgCopyKernelConf.has_zero_point_a = false;
     brgCopyKernelConf.has_zero_point_b = false;
@@ -260,7 +310,14 @@ void BrgemmKernel::copy_buffer_b(void* b, void* scratch_b) {
     }
 }
 
-void BrgemmKernel::executeGemm(bool is_M_tail, void* a, void* b, void* c, void* wsp, void* scratch_a) {
+void BrgemmKernel::executeGemm(bool is_M_tail,
+                               void* a,
+                               void* b,
+                               void* c,
+                               [[maybe_unused]] void* d,
+                               [[maybe_unused]] float* scale_b,
+                               void* wsp,
+                               void* scratch_a) {
     auto* ptr_A = reinterpret_cast<uint8_t*>(a);
     auto* ptr_C = reinterpret_cast<uint8_t*>(c);
     auto* ptr_scartch_a = reinterpret_cast<uint8_t*>(scratch_a);
@@ -318,20 +375,6 @@ void BrgemmKernel::executeGemm(bool is_M_tail, void* a, void* b, void* c, void* 
     }
 }
 
-void BrgemmKernel::executeGemm(void* a, void* b, void* c, void* wsp, void* scratch_a, void* scratch_b) {
-    auto* ptr_A = reinterpret_cast<uint8_t*>(a);
-    auto* ptr_B = reinterpret_cast<uint8_t*>(b);
-    auto* ptr_C = reinterpret_cast<uint8_t*>(c);
-
-    copy_buffer_b(ptr_B, scratch_b);
-
-    for (size_t mb = 0; mb < div_up(M, M_blk); mb++) {
-        const bool is_M_tail = (M - mb * M_blk < M_blk);
-        auto* ptr_a = ptr_A + (mb * M_blk * lda) * inType.size();
-        auto* ptr_c = ptr_C + (mb * M_blk * ldc) * ov::element::f32.size();
-        executeGemm(is_M_tail, ptr_a, scratch_b, wsp, ptr_c, scratch_a);
-    }
-}
 void BrgemmKernel::callBrgemm([[maybe_unused]] brgemmCtx& ctx,
                               std::unique_ptr<dnnl::impl::cpu::aarch64::brgemm_kernel_t>& brgKernel,
                               const void* pin0,

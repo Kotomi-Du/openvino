@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -18,7 +18,20 @@ set(NPU_PLUGIN_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 include(cmake/features.cmake)
 
-set(CMAKE_CXX_STANDARD 17)
+if(ENABLE_INTEL_NPU_COMPILER)
+    if(BUILD_SHARED_LIBS)
+        include(cmake/download_compiler_libs.cmake)
+    else()
+        message(FATAL_ERROR "Intel NPU Compiler library is not available when BUILD_SHARED_LIBS is OFF!")
+    endif()
+else()
+    message(STATUS "The download of Intel NPU Compiler library is skipped!")
+endif()
+
+# to allow overriding CMAKE_CXX_STANDARD from the command line (e.g. the C++20 opt-in CI jobs)
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
 
 if(ENABLE_NPU_DEBUG_CAPS)
     add_compile_definitions(NPU_PLUGIN_DEVELOPER_BUILD)
@@ -52,6 +65,14 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /WX")
 endif()
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    ov_add_compiler_flags(-fno-gnu-unique)
+    # Disable -Warray-bounds for GCC 15 and later due to false positive in the compiler.
+    if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15.0)
+        ov_add_compiler_flags(-Wno-array-bounds)
+    endif()
+endif()
+
 if(CMAKE_COMPILE_WARNING_AS_ERROR)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
         remove_compiler_flags(-Wno-error=deprecated-declarations)
@@ -68,8 +89,10 @@ endif()
 
 add_subdirectory(src)
 
-if(ENABLE_TESTS)
+if(ENABLE_TESTS AND ENABLE_NPU_PLUGIN_ENGINE)
     add_subdirectory(tests)
+elseif(ENABLE_TESTS)
+    message(WARNING "NPU plugin tests are skipped because ENABLE_NPU_PLUGIN_ENGINE is OFF.")
 endif()
 
 if(ENABLE_INTEL_NPU_INTERNAL)

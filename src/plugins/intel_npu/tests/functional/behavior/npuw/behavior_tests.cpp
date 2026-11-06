@@ -1,10 +1,9 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "behavior_tests.hpp"
-#include "comparators/nrmse.hpp"
-#include "openvino/util/shared_object.hpp"
+#include "test_engine/comparators/nrmse.hpp"
 #include "openvino/util/file_util.hpp"
 
 #include <filesystem>
@@ -75,7 +74,7 @@ TEST_F(BehaviorTestsNPUW, TestInfrastructureIsCorrect) {
 }
 
 TEST_F(BehaviorTestsNPUW, CompilationIsSuccessful) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
@@ -90,7 +89,7 @@ TEST_F(BehaviorTestsNPUW, CompilationIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUW, CompilationIsFailSafe) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     {
@@ -109,7 +108,7 @@ TEST_F(BehaviorTestsNPUW, CompilationIsFailSafe) {
 }
 
 TEST_F(BehaviorTestsNPUW, CompilationIsFailed) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1), THROW("Compilation on MockNPU is failed"));
@@ -124,7 +123,7 @@ TEST_F(BehaviorTestsNPUW, CompilationIsFailed) {
 }
 
 TEST_F(BehaviorTestsNPUW, InferRequestCreationIsSuccessful) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
@@ -141,7 +140,7 @@ TEST_F(BehaviorTestsNPUW, InferRequestCreationIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUW, InferRequestCreationIsFailSafe) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     {
@@ -162,7 +161,7 @@ TEST_F(BehaviorTestsNPUW, InferRequestCreationIsFailSafe) {
 }
 
 TEST_F(BehaviorTestsNPUW, InferRequestCreationIsFailed) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
@@ -180,7 +179,7 @@ TEST_F(BehaviorTestsNPUW, InferRequestCreationIsFailed) {
 }
 
 TEST_F(BehaviorTestsNPUW, InferIsSuccessful) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
@@ -199,7 +198,7 @@ TEST_F(BehaviorTestsNPUW, InferIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUW, InferIsFailSafe) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     {
@@ -223,7 +222,7 @@ TEST_F(BehaviorTestsNPUW, InferIsFailSafe) {
 }
 
 TEST_F(BehaviorTestsNPUW, InferIsFailed) {
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
@@ -244,7 +243,7 @@ TEST_F(BehaviorTestsNPUW, InferIsFailed) {
 
 using BehaviorTestsNPUWOnlinePartitioning = BehaviorTestsNPUW;
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, CompilationIsSuccessful) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(12));
@@ -260,7 +259,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, CompilationIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, CompilationIsFailSafe) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
     // Set expectations first:
     {
         InSequence s;
@@ -281,7 +280,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, CompilationIsFailSafe) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, CompilationIsFailed) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1), THROW("Compilation on MockNPU is failed"));
@@ -297,7 +296,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, CompilationIsFailed) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferRequestCreationIsSuccessful) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(12));
@@ -318,7 +317,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferRequestCreationIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferRequestCreationIsFailSafe) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
     // Set expectations first:
     {
         InSequence s;
@@ -344,7 +343,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferRequestCreationIsFailSafe) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferRequestCreationIsFailed) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(12));
@@ -366,7 +365,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferRequestCreationIsFailed) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferIsSuccessful) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(12));
@@ -389,7 +388,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferIsFailSafe) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     {
@@ -420,7 +419,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferIsFailSafe) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferIsFailed) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     {
@@ -448,7 +447,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, InferIsFailed) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, RepeatedBlocksAreFolded) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     {
@@ -480,7 +479,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, RepeatedBlocksAreFolded) {
 }
 
 TEST_F(BehaviorTestsNPUWOnlinePartitioning, FoldingAndPipelining) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     {
@@ -525,7 +524,7 @@ TEST_F(BehaviorTestsNPUWOnlinePartitioning, FoldingAndPipelining) {
 
 using BehaviorTestsNPUWOfflinePartitioning = BehaviorTestsNPUW;
 TEST_F(BehaviorTestsNPUWOfflinePartitioning, CompilationIsSuccessful) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     // For plan generation and execution (twice compiled):
@@ -554,7 +553,7 @@ TEST_F(BehaviorTestsNPUWOfflinePartitioning, CompilationIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUWOfflinePartitioning, InferRequestCreationIsSuccessful) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     // For plan generation and execution (twice compiled):
@@ -589,7 +588,7 @@ TEST_F(BehaviorTestsNPUWOfflinePartitioning, InferRequestCreationIsSuccessful) {
 }
 
 TEST_F(BehaviorTestsNPUWOfflinePartitioning, InferIsSuccessful) {
-    model = model_generator.get_model_with_repeated_blocks();
+    model = model_builder.get_model_with_repeated_blocks();
 
     // Set expectations first:
     // For plan generation and execution (twice compiled):
@@ -638,8 +637,8 @@ TEST(BehaviorTestsNPUWAccuracy, RepAndNonePartPipesGiveSameResults) {
     core.register_plugin(plugin_path, ov::test::utils::DEVICE_TEMPLATE);
 
     // Create model:
-    ModelGenerator model_generator;
-    const auto &model = model_generator.get_model_with_repeated_blocks(32);
+    ov::test::npuw::ModelBuilder model_builder;
+    const auto &model = model_builder.get_model_with_repeated_blocks(32);
 
     // Do the test:
     ov::AnyMap online_rep_props { ::ov::intel_npu::use_npuw(true),
@@ -671,7 +670,7 @@ TEST(BehaviorTestsNPUWAccuracy, RepAndNonePartPipesGiveSameResults) {
 
 TEST_F(BehaviorTestsNPUW, CanSayNoToPMMProperty) {
     // Create model:
-    model = model_generator.get_model_with_one_op();
+    model = model_builder.get_model_with_one_op();
 
     // Set expectation to npu plugin:
     EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
@@ -686,4 +685,157 @@ TEST_F(BehaviorTestsNPUW, CanSayNoToPMMProperty) {
     EXPECT_NO_THROW(compiled_model = core.compile_model(model, "NPU", use_npuw_props));
     auto prop = compiled_model.get_property(partitioning::par_matmul_merge_dims.name());
     EXPECT_EQ("NO", prop.as<std::string>());
+}
+
+namespace {
+// By default mock compiled models don't list ov::hint::model_priority and throw from set_property.
+// This makes one behave like an NPU compiled model: priority is RW and can be updated.
+void allow_model_priority_updates(MockCompiledModel& model) {
+    ON_CALL(model, get_property(StrEq(ov::supported_properties.name())))
+        .WillByDefault(Return(ov::Any(std::vector<ov::PropertyName>{
+            ov::PropertyName(ov::num_streams.name()),
+            ov::PropertyName(ov::enable_profiling.name()),
+            ov::PropertyName(ov::hint::model_priority.name(), ov::PropertyMutability::RW)})));
+    ON_CALL(model, set_property(_)).WillByDefault(Return());
+}
+
+Matcher<const ov::AnyMap&> IsModelPriority(ov::hint::Priority priority) {
+    return Truly([priority](const ov::AnyMap& props) {
+        const auto it = props.find(ov::hint::model_priority.name());
+        return props.size() == 1 && it != props.end() && it->second.as<ov::hint::Priority>() == priority;
+    });
+}
+}  // anonymous namespace
+
+TEST_F(BehaviorTestsNPUWOnlinePartitioning, ModelPriorityIsPropagatedToAllSubmodels) {
+    model = model_builder.get_model_with_repeated_blocks();
+
+    // Set expectations first:
+    EXPECT_COMPILE_MODEL(mock_npu, TIMES(12));
+    EXPECT_COMPILE_MODEL(mock_cpu, TIMES(0));
+    for (int i = 0; i < 12; i++) {
+        mock_npu_plugin->set_expectations_to_comp_models(MODEL(i), [](MockCompiledModel& model) {
+            allow_model_priority_updates(model);
+            EXPECT_CALL(model, set_property(IsModelPriority(ov::hint::Priority::HIGH))).Times(1);
+        });
+    }
+
+    // Register mock objects as plugins in OpenVINO:
+    register_mock_plugins_in_ov();
+
+    // Do the actual test:
+    use_npuw_props.emplace(devices("MockNPU"));
+    use_npuw_props.emplace(partitioning::online::min_size(12));
+    auto compiled_model = core.compile_model(model, "NPU", use_npuw_props);
+    EXPECT_NO_THROW(compiled_model.set_property(ov::hint::model_priority(ov::hint::Priority::HIGH)));
+    EXPECT_EQ(ov::hint::Priority::HIGH, compiled_model.get_property(ov::hint::model_priority));
+}
+
+TEST_F(BehaviorTestsNPUWOnlinePartitioning, ModelPriorityIsSkippedForSubmodelsWhichCannotChangeIt) {
+    model = model_builder.get_model_with_repeated_blocks();
+
+    // Set expectations first:
+    // the 1st subgraph falls back to MockCPU, the remaining 11 stay on MockNPU
+    {
+        InSequence s;
+
+        EXPECT_COMPILE_MODEL(mock_npu, TIMES(1), THROW("Compilation on MockNPU is failed"));
+        EXPECT_COMPILE_MODEL(mock_cpu, TIMES(1));
+        EXPECT_COMPILE_MODEL(mock_npu, TIMES(11));
+    }
+    for (int i = 0; i < 11; i++) {
+        mock_npu_plugin->set_expectations_to_comp_models(MODEL(i), [](MockCompiledModel& model) {
+            allow_model_priority_updates(model);
+            EXPECT_CALL(model, set_property(IsModelPriority(ov::hint::Priority::LOW))).Times(1);
+        });
+    }
+    // MockCPU keeps the default behavior (priority isn't RW, set_property throws),
+    // like the real CPU plugin, so it must not be touched
+    mock_cpu_plugin->set_expectations_to_comp_models(MODEL(0), [](MockCompiledModel& model) {
+        EXPECT_CALL(model, set_property(_)).Times(0);
+    });
+
+    // Register mock objects as plugins in OpenVINO:
+    register_mock_plugins_in_ov();
+
+    // Do the actual test:
+    use_npuw_props.emplace(devices("MockNPU,MockCPU"));
+    use_npuw_props.emplace(partitioning::online::min_size(12));
+    auto compiled_model = core.compile_model(model, "NPU", use_npuw_props);
+    EXPECT_NO_THROW(compiled_model.set_property(ov::hint::model_priority(ov::hint::Priority::LOW)));
+    EXPECT_EQ(ov::hint::Priority::LOW, compiled_model.get_property(ov::hint::model_priority));
+}
+
+TEST_F(BehaviorTestsNPUW, ModelPriorityIsNotRememberedWhenNoSubmodelCanChangeIt) {
+    model = model_builder.get_model_with_one_op();
+
+    // Set expectations first:
+    EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
+    EXPECT_COMPILE_MODEL(mock_cpu, TIMES(0));
+    // The compiled model keeps the default mock behavior (priority isn't RW, set_property throws),
+    // like a device which can't change it. NB: MockNPU is used rather than a MockCPU-only list on
+    // purpose: the mock engines hand out the injected plugins in creation order on Linux, so MockNPU
+    // must be created first.
+    mock_npu_plugin->set_expectations_to_comp_models(MODEL(0), [](MockCompiledModel& model) {
+        EXPECT_CALL(model, set_property(_)).Times(0);
+    });
+
+    // Register mock objects as plugins in OpenVINO:
+    register_mock_plugins_in_ov();
+
+    // Do the actual test:
+    use_npuw_props.emplace(devices("MockNPU"));
+    auto compiled_model = core.compile_model(model, "NPU", use_npuw_props);
+    EXPECT_NO_THROW(compiled_model.set_property(ov::hint::model_priority(ov::hint::Priority::HIGH)));
+    EXPECT_NE(ov::hint::Priority::HIGH, compiled_model.get_property(ov::hint::model_priority));
+}
+
+TEST_F(BehaviorTestsNPUW, SettingNonPriorityPropertyAfterCompilationThrows) {
+    model = model_builder.get_model_with_one_op();
+
+    // Set expectations first:
+    EXPECT_COMPILE_MODEL(mock_npu, TIMES(1));
+    EXPECT_COMPILE_MODEL(mock_cpu, TIMES(0));
+    mock_npu_plugin->set_expectations_to_comp_models(MODEL(0), [](MockCompiledModel& model) {
+        allow_model_priority_updates(model);
+        EXPECT_CALL(model, set_property(_)).Times(0);
+    });
+
+    // Register mock objects as plugins in OpenVINO:
+    register_mock_plugins_in_ov();
+
+    // Do the actual test:
+    use_npuw_props.emplace(devices("MockNPU"));
+    auto compiled_model = core.compile_model(model, "NPU", use_npuw_props);
+    EXPECT_ANY_THROW(compiled_model.set_property(partitioning::fold(true)));
+    // Nothing is applied when the same call also contains an unsupported key
+    EXPECT_ANY_THROW(compiled_model.set_property(
+        ov::AnyMap{ov::hint::model_priority(ov::hint::Priority::HIGH), partitioning::fold(true)}));
+    EXPECT_NE(ov::hint::Priority::HIGH, compiled_model.get_property(ov::hint::model_priority));
+}
+
+TEST_F(BehaviorTestsNPUWOnlinePartitioning, ModelPriorityIsSetOnceForFoldedFunction) {
+    model = model_builder.get_model_with_repeated_blocks();
+
+    // Set expectations first:
+    // head, function body (shared by all repeated blocks) and tail
+    EXPECT_COMPILE_MODEL(mock_npu, TIMES(3));
+    EXPECT_COMPILE_MODEL(mock_cpu, TIMES(0));
+    for (int i = 0; i < 3; i++) {
+        mock_npu_plugin->set_expectations_to_comp_models(MODEL(i), [](MockCompiledModel& model) {
+            allow_model_priority_updates(model);
+            EXPECT_CALL(model, set_property(IsModelPriority(ov::hint::Priority::HIGH))).Times(1);
+        });
+    }
+
+    // Register mock objects as plugins in OpenVINO:
+    register_mock_plugins_in_ov();
+
+    // Do the actual test:
+    use_npuw_props.emplace(devices("MockNPU"));
+    use_npuw_props.emplace(partitioning::online::min_size(12));
+    use_npuw_props.emplace(partitioning::fold(true));
+    auto compiled_model = core.compile_model(model, "NPU", use_npuw_props);
+    EXPECT_NO_THROW(compiled_model.set_property(ov::hint::model_priority(ov::hint::Priority::HIGH)));
+    EXPECT_EQ(ov::hint::Priority::HIGH, compiled_model.get_property(ov::hint::model_priority));
 }

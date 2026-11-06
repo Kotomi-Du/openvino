@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,9 +12,7 @@
 #include "openvino/core/node.hpp"
 
 namespace ov {
-namespace frontend {
-namespace onnx {
-namespace reshape {
+namespace frontend::onnx::reshape {
 /// \brief      Infer `output_shape` dimension values.
 ///
 /// \par Inference rules
@@ -61,12 +59,9 @@ ov::Output<ov::Node> interpret_as_scalar(const ov::Output<ov::Node>& node);
 ov::Output<ov::Node> reshape_channel_shaped_node_to_nchw(const ov::Output<ov::Node>& node,
                                                          const ov::Output<ov::Node>& expected_rank);
 
-}  // namespace  reshape
-}  // namespace onnx
-}  // namespace frontend
+}  // namespace frontend::onnx::reshape
 
-namespace op {
-namespace util {
+namespace op::util {
 /// \brief      Change shape of a value
 ///
 /// \param[in]  value  The value to be reshaped.
@@ -77,7 +72,7 @@ std::shared_ptr<Node> reshape(const Output<Node>& value, const Shape& shape);
 
 /// \brief Permute axes according to specified axes_order parameter.
 ///
-/// \param      The vlaue whose axes we want to permute.
+/// \param      The value whose axes we want to permute.
 /// \param      axes_order The permutation of axes.
 ///
 /// \return     Transpose:v1 op.
@@ -98,6 +93,5 @@ std::shared_ptr<Node> transpose(const Output<Node>& value);
 /// \return      The new value will be a 2D matrix representing the flattened input
 /// node.
 std::shared_ptr<Node> flatten(const Output<Node>& value, int axis);
-}  // namespace util
-}  // namespace op
+}  // namespace op::util
 }  // namespace ov

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -990,6 +990,29 @@ INSTANTIATE_TEST_SUITE_P(
                       ov::element::u4,
                       std::vector<float>{-1, -2, 2, 3},
                       std::vector<uint8_t>{0xEF, 0x32}),
+
+        // destination u2 - minimal essential coverage
+        // Test 1: u8 ? u2 (most common quantization path)
+        ConvertParams(ConversionTypes::CONVERT,
+                      ov::PartialShape{4},
+                      ov::element::u8,
+                      ov::element::u2,
+                      std::vector<uint8_t>{0, 1, 2, 3},
+                      std::vector<uint8_t>{0xE4}),
+        // Test 2: i8 ? u2 (signed to unsigned quantization)
+        ConvertParams(ConversionTypes::CONVERT,
+                      ov::PartialShape{4},
+                      ov::element::i8,
+                      ov::element::u2,
+                      std::vector<int8_t>{0, 1, 2, 3},
+                      std::vector<uint8_t>{0xE4}),
+        // Test 3: f16 ? u2 (actual use case: matmul weights compression)
+        ConvertParams(ConversionTypes::CONVERT,
+                      ov::PartialShape{4},
+                      ov::element::f16,
+                      ov::element::u2,
+                      std::vector<ov::float16>{0, 1, 2, 3},
+                      std::vector<uint8_t>{0xE4}),
 
         // destination u8
         ConvertParams(ConversionTypes::CONVERT,

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -218,7 +218,7 @@ void loop(const std::shared_ptr<Model>& func,
                               shapes_to_concat,
                               shape,
                               concat_desc->m_axis,
-                              out[concat_desc->m_output_index].get_element_type().size());
+                              out[concat_desc->m_output_index].get_element_type().bitwidth());
         }
     } else {
         OPENVINO_THROW("ExecutionCondition is false. Zero count of iteration not supported.");

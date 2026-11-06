@@ -1,11 +1,13 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "common_test_utils/ov_tensor_utils.hpp"
+#include "common_test_utils/test_assertions.hpp"
+#include "functional_test_utils/skip_tests_config.hpp"
+#include "openvino/op/scatter_elements_update.hpp"
 #include "shared_test_classes/base/ov_subgraph.hpp"
 #include "utils/cpu_test_utils.hpp"
-#include "openvino/op/scatter_elements_update.hpp"
 
 using namespace CPUTestUtils;
 namespace ov {
@@ -27,12 +29,8 @@ class ScatterElementsUpdateLayerCPUTest : public testing::WithParamInterface<sca
                                           public SubgraphBaseTest,
                                           public CPUTestsBase {
 public:
-    static std::string getTestCaseName(testing::TestParamInfo<scatterUpdateParams> obj) {
-        ScatterElementsUpdateLayerParams scatterParams;
-        std::int64_t axis;
-        ElementType inputPrecision;
-        ElementType idxPrecision;
-        std::tie(scatterParams, axis, inputPrecision, idxPrecision) = obj.param;
+    static std::string getTestCaseName(const testing::TestParamInfo<scatterUpdateParams>& obj) {
+        const auto& [scatterParams, axis, inputPrecision, idxPrecision] = obj.param;
         const auto inputShapes = scatterParams.inputShapes;
         const auto indicesVals = scatterParams.indicesValues;
 
@@ -81,10 +79,10 @@ protected:
                 }
             } else {
                 if (inputPrecision.is_real()) {
-                ov::test::utils::InputGenerateData in_data;
-                in_data.start_from = 0;
-                in_data.range = 10;
-                in_data.resolution = 1000;
+                    ov::test::utils::InputGenerateData in_data;
+                    in_data.start_from = 0;
+                    in_data.range = 10;
+                    in_data.resolution = 1000;
                     tensor = ov::test::utils::create_and_fill_tensor(inputPrecision, targetShape, in_data);
                 } else {
                     tensor = ov::test::utils::create_and_fill_tensor(inputPrecision, targetShape);
@@ -96,11 +94,7 @@ protected:
 
     void SetUp() override {
         targetDevice = ov::test::utils::DEVICE_CPU;
-        ScatterElementsUpdateLayerParams scatterParams;
-        std::int64_t axis;
-        ElementType inputPrecision;
-        ElementType idxPrecision;
-        std::tie(scatterParams, axis, inputPrecision, idxPrecision) = this->GetParam();
+        const auto& [scatterParams, axis, inputPrecision, idxPrecision] = this->GetParam();
         const auto inputShapes = scatterParams.inputShapes;
         const auto indicesDescr = scatterParams.indicesValues;
 
@@ -121,7 +115,7 @@ protected:
             std::make_shared<ov::op::v3::ScatterElementsUpdate>(dataParams[0], indicesParam, dataParams[1], axisNode);
 
         ov::ParameterVector allParams{dataParams[0], indicesParam, dataParams[1]};
-        function = makeNgraphFunction(inputPrecision, allParams, scatter, "ScatterElementsUpdateLayerCPUTest");
+        function = create_ov_model(inputPrecision, allParams, scatter, "ScatterElementsUpdateLayerCPUTest");
     }
 };
 
@@ -174,6 +168,34 @@ INSTANTIATE_TEST_SUITE_P(smoke_CompareWithRefs,
                          ScatterElementsUpdateLayerCPUTest,
                          ::testing::Combine(::testing::ValuesIn(scatterParams),
                                             ::testing::ValuesIn(axes),
+                                            ::testing::ValuesIn(inputPrecisions),
+                                            ::testing::ValuesIn(constantPrecisions)),
+                         ScatterElementsUpdateLayerCPUTest::getTestCaseName);
+
+class ScatterElementsUpdateLayerCPUErrorConditionTest : public ScatterElementsUpdateLayerCPUTest {};
+
+TEST_P(ScatterElementsUpdateLayerCPUErrorConditionTest, ThrowsOnOutOfRangeIndices) {
+    SKIP_IF_CURRENT_TEST_IS_DISABLED();
+    compile_model();
+    // Both CPU and TEMPLATE plugins should throw; a mismatch is a bug.
+    for (const auto& targetStaticShapeVec : targetStaticShapes) {
+        generate_inputs(targetStaticShapeVec);
+        OV_EXPECT_THROW(get_plugin_outputs(), ov::Exception, ::testing::_);
+        OV_EXPECT_THROW(calculate_refs(), ov::Exception, ::testing::_);
+    }
+}
+
+const std::vector<ScatterElementsUpdateLayerParams> scatterOutOfRangeParams = {
+    ScatterElementsUpdateLayerParams{
+        ScatterElementsUpdateShapes{{{-1, -1}, {{2, 2}}}, {{-1, -1}, {{2, 2}}}, {{-1, -1}, {{2, 2}}}},
+        IndicesValues{-1000, 1, 0, 0},
+    },
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_ScatterElementsUpdateOutOfRangeIndices,
+                         ScatterElementsUpdateLayerCPUErrorConditionTest,
+                         ::testing::Combine(::testing::ValuesIn(scatterOutOfRangeParams),
+                                            ::testing::Values(std::int64_t{0}),
                                             ::testing::ValuesIn(inputPrecisions),
                                             ::testing::ValuesIn(constantPrecisions)),
                          ScatterElementsUpdateLayerCPUTest::getTestCaseName);

@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #pragma once
@@ -7,7 +7,7 @@
 
 namespace ov::intel_cpu {
 
-#ifdef OPENVINO_CPP_23_VER
+#ifdef OPENVINO_CPP_VER_AT_LEAST_23
 using to_underlying = std::to_underlying;
 #else
 // implementation of C++23 std::to_underlying

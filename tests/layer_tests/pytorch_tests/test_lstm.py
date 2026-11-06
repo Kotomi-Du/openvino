@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
@@ -6,6 +6,13 @@ import pytest
 import torch
 
 from pytorch_layer_test_class import PytorchLayerTest
+
+# torch.nn.modules.rnn performs tensor-to-bool shape checks (input_size and
+# hidden_size validation) inside the traced forward pass. The warning is not
+# actionable at the test level; shapes are constant for all parametrize cases.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Converting a tensor to a Python boolean:torch.jit.TracerWarning"
+)
 
 
 class aten_lstm(torch.nn.Module):
@@ -80,11 +87,11 @@ class TestLSTM(PytorchLayerTest):
         if self.bidirectional:
             n *= 2
         if self.batch_first:
-            input = np.random.randn(3, 5, self.input_size).astype(np.float32)
+            input = self.random.randn(3, 5, self.input_size)
         else:
-            input = np.random.randn(5, 3, self.input_size).astype(np.float32)
-        h0 = np.random.randn(n, 3, self.hidden_size).astype(np.float32)
-        c0 = np.random.randn(n, 3, self.hidden_size).astype(np.float32)
+            input = self.random.randn(5, 3, self.input_size)
+        h0 = self.random.randn(n, 3, self.hidden_size)
+        c0 = self.random.randn(n, 3, self.hidden_size)
         return (input, h0, c0)
 
     @pytest.mark.parametrize("input_size,hidden_size", [(10, 20),])
@@ -94,13 +101,14 @@ class TestLSTM(PytorchLayerTest):
     @pytest.mark.parametrize("batch_first", [True, False])
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     def test_lstm(self, input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first, ie_device, precision, ir_version):
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.batch_first = batch_first
-        self._test(aten_lstm(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first), None, "aten::lstm",
+        self._test(aten_lstm(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first).eval(), "aten::lstm",
                    ie_device, precision, ir_version, trace_model=True)
 
 
@@ -108,12 +116,12 @@ class TestLSTMPacked(PytorchLayerTest):
     def _prepare_input(self):
         batch = 15
         if self.batch_first:
-            input = np.random.randn(
-                batch, 50, self.input_size).astype(np.float32)
+            input = self.random.randn(
+                batch, 50, self.input_size)
         else:
-            input = np.random.randn(
-                50, batch, self.input_size).astype(np.float32)
-        lengths = np.array(list(sorted(np.random.randint(
+            input = self.random.randn(
+                50, batch, self.input_size)
+        lengths = np.array(list(sorted(self.random.randint(
             1, 50, [batch - 1]).tolist() + [50], reverse=True)), dtype=np.int32)
         return (input, lengths)
 
@@ -131,7 +139,6 @@ class TestLSTMPacked(PytorchLayerTest):
         self.bidirectional = bidirectional
         self.batch_first = batch_first
         self._test(aten_lstm_packed(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first),
-                   None,
                    "aten::lstm",
                    ie_device,
                    precision,
@@ -147,10 +154,10 @@ class TestGRU(PytorchLayerTest):
         if self.bidirectional:
             n *= 2
         if self.batch_first:
-            input = np.random.randn(3, 5, self.input_size).astype(np.float32)
+            input = self.random.randn(3, 5, self.input_size)
         else:
-            input = np.random.randn(5, 3, self.input_size).astype(np.float32)
-        h0 = np.random.randn(n, 3, self.hidden_size).astype(np.float32)
+            input = self.random.randn(5, 3, self.input_size)
+        h0 = self.random.randn(n, 3, self.hidden_size)
         return (input, h0)
 
     @pytest.mark.parametrize("input_size,hidden_size", [(10, 20),])
@@ -160,13 +167,14 @@ class TestGRU(PytorchLayerTest):
     @pytest.mark.parametrize("batch_first", [True, False])
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     def test_gru(self, input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first, ie_device, precision, ir_version):
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.batch_first = batch_first
-        self._test(aten_gru(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first), None, "aten::gru",
+        self._test(aten_gru(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first).eval(), "aten::gru",
                    ie_device, precision, ir_version, trace_model=True)
 
 
@@ -176,10 +184,10 @@ class TestRNN(PytorchLayerTest):
         if self.bidirectional:
             n *= 2
         if self.batch_first:
-            input = np.random.randn(3, 5, self.input_size).astype(np.float32)
+            input = self.random.randn(3, 5, self.input_size)
         else:
-            input = np.random.randn(5, 3, self.input_size).astype(np.float32)
-        h0 = np.random.randn(n, 3, self.hidden_size).astype(np.float32)
+            input = self.random.randn(5, 3, self.input_size)
+        h0 = self.random.randn(n, 3, self.hidden_size)
         return (input, h0)
 
     @pytest.mark.parametrize("input_size,hidden_size", [(10, 20),])
@@ -190,11 +198,12 @@ class TestRNN(PytorchLayerTest):
     @pytest.mark.parametrize("nonlinearity", ["tanh", "relu"])
     @pytest.mark.nightly
     @pytest.mark.precommit
+    @pytest.mark.precommit_torch_export
     def test_rnn(self, input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first, nonlinearity, ie_device, precision, ir_version):
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.batch_first = batch_first
-        self._test(aten_rnn(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first, nonlinearity), None, f"aten::rnn_{nonlinearity}",
+        self._test(aten_rnn(input_size, hidden_size, num_layers, has_bias, bidirectional, batch_first, nonlinearity).eval(), f"aten::rnn_{nonlinearity}",
                    ie_device, precision, ir_version, trace_model=True)

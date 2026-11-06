@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -33,13 +33,13 @@ JitConstants MakeAxisJitConstants(size_t rank, int64_t axis, const std::string& 
     }();
     auto& axis_dimension = dimensions.at(axis);
 
-    const auto axis_length_name = "AXIS_LENGTH";
+    const auto* const axis_length_name = "AXIS_LENGTH";
     const auto axis_length_val = "INPUT0" + dimensions_sizes_map.at(axis_dimension);
 
     // Mark axis dimension as 'i' for indexing
     axis_dimension = 'i';
 
-    const auto get_index_name = "GET_INDEX(prefix, i)";
+    const auto* const get_index_name = "GET_INDEX(prefix, i)";
     const auto get_index_val = [&dimensions]() {
         std::string str = "CAT(prefix, _GET_INDEX)";
         str += '(';
@@ -51,7 +51,7 @@ JitConstants MakeAxisJitConstants(size_t rank, int64_t axis, const std::string& 
         return str;
     }();
 
-    const auto iterate_name = "ITERATE(body)";
+    const auto* const iterate_name = "ITERATE(body)";
     const auto iterate_val = [&dimensions, &dimensions_sizes_map, &prefix_for_iterate]() {
         std::stringstream ss;
         for (auto ch : dimensions) {
@@ -76,10 +76,10 @@ JitConstants MakeAxisJitConstants(size_t rank, int64_t axis, const std::string& 
 }
 
 JitConstants MakeFlattenedJitConstants(size_t rank, bool simple_layout) {
-    const auto get_index_name = "GET_INDEX(prefix, i)";
+    const auto* const get_index_name = "GET_INDEX(prefix, i)";
 
     if (simple_layout) {
-        const auto get_index_val = "i";
+        const auto* const get_index_val = "i";
         return {MakeJitConstant("FLATTENED", true), MakeJitConstant(get_index_name, get_index_val)};
     }
 
@@ -191,15 +191,15 @@ ParamsKey UniqueCountKernelRef::GetSupportedKey() const {
 
 bool UniqueCountKernelRef::Validate(const Params& params) const {
     if (params.GetType() != KernelType::UNIQUE_COUNT) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     const auto& kernel_params = dynamic_cast<const unique_count_params&>(params);
     if (kernel_params.inputs.size() != 1) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
     if (kernel_params.outputs.size() != 1) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     return true;
@@ -297,15 +297,15 @@ ParamsKey UniqueGatherKernelRef::GetSupportedKey() const {
 
 bool UniqueGatherKernelRef::Validate(const Params& params) const {
     if (params.GetType() != KernelType::UNIQUE_GATHER) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     const auto& kernel_params = dynamic_cast<const unique_gather_params&>(params);
     if (kernel_params.inputs.size() != 2) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
     if (kernel_params.outputs.size() != 4) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(params.layerID);
     }
 
     return true;

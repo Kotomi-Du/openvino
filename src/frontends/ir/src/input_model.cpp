@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,7 +6,6 @@
 
 #include <pugixml.hpp>
 
-#include "ir_deserializer.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/validation_util.hpp"
 #include "openvino/op/concat.hpp"
@@ -17,11 +16,12 @@
 #include "openvino/opsets/opset.hpp"
 #include "openvino/util/common_util.hpp"
 #include "openvino/util/xml_parse_utils.hpp"
+#include "openvino/xml_util/xml_deserialize_util.hpp"
 #include "utils.hpp"
 
 namespace {
 void parse_pre_process(pugi::xml_node& root,
-                       std::shared_ptr<ov::AlignedBuffer> weights,
+                       const std::shared_ptr<ov::util::WeightsProvider>& weights_provider,
                        std::shared_ptr<ov::Model> model) {
     /* Preprocessing block can have two preprocessing types:
      *
@@ -85,9 +85,6 @@ void parse_pre_process(pugi::xml_node& root,
     ov::Shape mean_shape;         // [1, H, W] - for 4D case
 
     const auto inputDims = input_shape.to_shape();
-
-    OPENVINO_ASSERT(inputDims.size() >= 2, "network did not define input dimensions properly");
-
     if (inputDims.size() == 2) {  // NC
         mean_scalar_shape = {inputDims[1]};
         mean_shape = {1};
@@ -100,6 +97,12 @@ void parse_pre_process(pugi::xml_node& root,
     } else if (inputDims.size() == 5) {  // NCDHW
         mean_scalar_shape = {inputDims[1], 1, 1, 1};
         mean_shape = {1, inputDims[2], inputDims[3], inputDims[4]};
+    } else {
+        OPENVINO_THROW("Unsupported input dimensions rank ",
+                       inputDims.size(),
+                       " for pre-process input '",
+                       inputName,
+                       "'");
     }
     const size_t channels = mean_scalar_shape[0];
 
@@ -120,6 +123,7 @@ void parse_pre_process(pugi::xml_node& root,
                 mean_scalar_values.insert({chanNo, ov::util::pugixml::get_float_attr(meanNode, "value")});
             }
             if (meanNode.attribute("size") && meanNode.attribute("offset")) {
+                OPENVINO_ASSERT(weights_provider, "Weights are required, but not provided");
                 auto const_size = ov::util::pugixml::get_uint64_attr(meanNode, "size");
                 auto const_offset = ov::util::pugixml::get_uint64_attr(meanNode, "offset");
                 if (shape_size(mean_shape) * input_type.size() != const_size) {
@@ -130,7 +134,7 @@ void parse_pre_process(pugi::xml_node& root,
                                    " x ",
                                    input_type.size());
                 }
-                if (const_offset + const_size > weights->size()) {
+                if (const_offset + const_size > weights_provider->size()) {
                     OPENVINO_THROW("mean value offset and size are out of weights size range");
                 }
                 mean_values.insert({chanNo, {const_size, const_offset}});
@@ -180,8 +184,8 @@ void parse_pre_process(pugi::xml_node& root,
                 OPENVINO_THROW("Mean values channel index ", item.first, " is out of range (", channels, ")");
             }
             const size_t offset = item.second.second;
-            const char* data = weights->get_ptr<char>() + offset;
-            per_channel_values[item.first] = ov::op::v0::Constant::create(input_type, mean_shape, data);
+            auto buffer = weights_provider->make_region(offset, item.second.first);
+            per_channel_values[item.first] = std::make_shared<ov::op::v0::Constant>(input_type, mean_shape, buffer);
         }
         auto const_node =
             ov::util::get_constant_from_source(std::make_shared<ov::op::v0::Concat>(per_channel_values, 0));
@@ -195,38 +199,31 @@ void parse_pre_process(pugi::xml_node& root,
 }
 }  // namespace
 
-namespace ov {
-namespace frontend {
-namespace ir {
+namespace ov::frontend::ir {
 
 class InputModel::InputModelIRImpl {
-    std::shared_ptr<ov::AlignedBuffer> m_weights;
+    std::shared_ptr<ov::util::WeightsProvider> m_weights_provider;
     std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr> m_extensions;
     std::unordered_map<std::string, ov::OpSet> m_opsets;
     pugi::xml_node m_root;
     pugi::xml_document m_xml_doc;
-    std::string m_weights_path;
 
 public:
     InputModelIRImpl(std::istream& model,
-                     const std::shared_ptr<ov::AlignedBuffer>& weights,
-                     const std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr>& extensions,
-                     std::string weights_path)
-        : m_weights(weights),
-          m_extensions(extensions),
-          m_weights_path(std::move(weights_path)) {
+                     std::shared_ptr<ov::util::WeightsProvider> weights_provider,
+                     const std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr>& extensions)
+        : m_weights_provider(std::move(weights_provider)),
+          m_extensions(extensions) {
         pugi::xml_parse_result res = m_xml_doc.load(model);
         OPENVINO_ASSERT(res.status == pugi::status_ok, res.description(), " at offset ", res.offset);
         init_opset();
     }
 
     InputModelIRImpl(const std::shared_ptr<ov::AlignedBuffer>& model,
-                     const std::shared_ptr<ov::AlignedBuffer>& weights,
-                     const std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr>& extensions,
-                     std::string weights_path)
-        : m_weights(weights),
-          m_extensions(extensions),
-          m_weights_path(std::move(weights_path)) {
+                     std::shared_ptr<ov::util::WeightsProvider> weights_provider,
+                     const std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr>& extensions)
+        : m_weights_provider(std::move(weights_provider)),
+          m_extensions(extensions) {
         auto res = m_xml_doc.load_buffer(model->get_ptr(), model->size(), pugi::parse_default, pugi::encoding_utf8);
         OPENVINO_ASSERT(res.status == pugi::status_ok, res.description(), " at offset ", res.offset);
         init_opset();
@@ -244,17 +241,17 @@ private:
 };
 
 InputModel::InputModel(std::istream& model,
-                       const std::shared_ptr<ov::AlignedBuffer>& weights,
+                       std::shared_ptr<ov::util::WeightsProvider> weights_provider,
                        const std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr>& extensions,
-                       std::string weights_path) {
-    _impl = std::make_shared<InputModelIRImpl>(model, weights, extensions, std::move(weights_path));
+                       std::filesystem::path) {
+    _impl = std::make_shared<InputModelIRImpl>(model, std::move(weights_provider), extensions);
 }
 
 InputModel::InputModel(const std::shared_ptr<ov::AlignedBuffer>& model,
-                       const std::shared_ptr<ov::AlignedBuffer>& weights,
+                       std::shared_ptr<ov::util::WeightsProvider> weights_provider,
                        const std::unordered_map<ov::DiscreteTypeInfo, ov::BaseOpExtension::Ptr>& extensions,
-                       std::string weights_path) {
-    _impl = std::make_shared<InputModelIRImpl>(model, weights, extensions, std::move(weights_path));
+                       std::filesystem::path) {
+    _impl = std::make_shared<InputModelIRImpl>(model, std::move(weights_provider), extensions);
 }
 
 std::shared_ptr<ov::Model> InputModel::convert() {
@@ -266,17 +263,18 @@ std::shared_ptr<ov::Model> InputModel::InputModelIRImpl::convert() {
 
     // Load default opsets
     size_t version = static_cast<size_t>(ov::util::pugixml::get_uint64_attr(m_root, "version", 0));
-    ov::XmlDeserializer visitor(m_root, m_weights, m_opsets, m_extensions, variables, version);
+    ov::util::XmlDeserializer visitor(m_root, m_weights_provider, m_opsets, m_extensions, variables, version);
     std::shared_ptr<ov::Model> model;
     visitor.on_attribute("net", model);
     model->get_rt_info()["version"] = int64_t(version);
-    if (!m_weights_path.empty())
-        model->get_rt_info()["__weights_path"] = m_weights_path;
-    parse_pre_process(m_root, m_weights, model);
+    if (m_weights_provider) {
+        const auto weights_path = m_weights_provider->path();
+        if (!weights_path.empty())
+            model->get_rt_info()["__weights_path"] = ov::util::path_to_string(weights_path);
+    }
+    parse_pre_process(m_root, m_weights_provider, model);
 
     return model;
 }
 
-}  // namespace ir
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::ir

@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -38,9 +38,9 @@ endif()
 #               )
 #
 function(ov_add_plugin)
-    set(options SKIP_INSTALL PSEUDO_DEVICE ADD_CLANG_FORMAT ADD_CLANG_TIDY AS_EXTENSION SKIP_REGISTRATION)
+    set(options SKIP_INSTALL PSEUDO_DEVICE ADD_CLANG_FORMAT ADD_CLANG_TIDY AS_EXTENSION SKIP_REGISTRATION DISPATCH_GROUP)
     set(oneValueArgs NAME DEVICE_NAME VERSION_DEFINES_FOR PSEUDO_PLUGIN_FOR)
-    set(multiValueArgs DEFAULT_CONFIG SOURCES OBJECT_LIBRARIES CPPLINT_FILTERS)
+    set(multiValueArgs DEFAULT_CONFIG SOURCES OBJECT_LIBRARIES)
     cmake_parse_arguments(OV_PLUGIN "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if(NOT OV_PLUGIN_NAME)
@@ -57,7 +57,6 @@ function(ov_add_plugin)
         set(input_files ${OV_PLUGIN_SOURCES})
         foreach(obj_lib IN LISTS OV_PLUGIN_OBJECT_LIBRARIES)
             list(APPEND input_files $<TARGET_OBJECTS:${obj_lib}>)
-            add_cpplint_target(${obj_lib}_cpplint FOR_TARGETS ${obj_lib})
         endforeach()
 
         if(BUILD_SHARED_LIBS)
@@ -73,10 +72,15 @@ function(ov_add_plugin)
         endif()
 
         target_compile_definitions(${OV_PLUGIN_NAME} PRIVATE IMPLEMENT_OPENVINO_RUNTIME_PLUGIN)
-        if(NOT BUILD_SHARED_LIBS)
+        if(BUILD_SHARED_LIBS)
+            target_link_libraries(${OV_PLUGIN_NAME} PRIVATE openvino::shutdown)
+        else()
             # to distinguish functions creating plugin objects
             target_compile_definitions(${OV_PLUGIN_NAME} PRIVATE
                 OV_CREATE_PLUGIN=create_plugin_engine_${OV_PLUGIN_DEVICE_NAME})
+            # likewise for the device-dispatch enumeration probe every plugin defines
+            target_compile_definitions(${OV_PLUGIN_NAME} PRIVATE
+                OV_ENUMERATE_DEVICES=ov_enumerate_dispatch_devices_${OV_PLUGIN_DEVICE_NAME})
             if(OV_PLUGIN_AS_EXTENSION)
                 # to distinguish functions creating extensions objects
                 target_compile_definitions(${OV_PLUGIN_NAME} PRIVATE
@@ -97,22 +101,12 @@ function(ov_add_plugin)
             endif()
         endif()
 
-        set(custom_filter "")
-        foreach(filter IN LISTS OV_PLUGIN_CPPLINT_FILTERS)
-            string(CONCAT custom_filter "${custom_filter}" "," "${filter}")
-        endforeach()
-
         if (OV_PLUGIN_ADD_CLANG_TIDY)
-            if (ENABLE_CLANG_TIDY)
-                set_target_properties(${OV_PLUGIN_NAME} PROPERTIES
-                    CXX_CLANG_TIDY "${CLANG_TIDY};--extra-arg=-Wno-unused-command-line-argument")
-            endif()
+            ov_apply_clang_tidy(TARGET ${OV_PLUGIN_NAME})
         endif()
 
         if (OV_PLUGIN_ADD_CLANG_FORMAT)
             ov_add_clang_format_target(${OV_PLUGIN_NAME}_clang FOR_SOURCES ${OV_PLUGIN_SOURCES})
-        else()
-            add_cpplint_target(${OV_PLUGIN_NAME}_cpplint FOR_TARGETS ${OV_PLUGIN_NAME} CUSTOM_FILTERS ${custom_filter})
         endif()
 
         # plugins does not have to be CXX ABI free, because nobody links with plugins,
@@ -152,13 +146,21 @@ function(ov_add_plugin)
 
     # Enable for static build to generate correct plugins.hpp
     if(NOT OV_PLUGIN_SKIP_REGISTRATION OR NOT BUILD_SHARED_LIBS)
+        # A dispatch group intentionally registers several libraries under one device name;
+        # such a device is exempt from the single-library uniqueness check below.
+        if(OV_PLUGIN_DISPATCH_GROUP)
+            list(APPEND OV_DISPATCH_GROUP_DEVICES ${OV_PLUGIN_DEVICE_NAME})
+            list(REMOVE_DUPLICATES OV_DISPATCH_GROUP_DEVICES)
+            set(OV_DISPATCH_GROUP_DEVICES "${OV_DISPATCH_GROUP_DEVICES}" CACHE INTERNAL "" FORCE)
+        endif()
         # check that plugin with such name is not registered
         foreach(plugin_entry IN LISTS PLUGIN_FILES)
             string(REPLACE ":" ";" plugin_entry "${plugin_entry}")
             list(GET plugin_entry -1 library_name)
             list(GET plugin_entry 0 plugin_name)
             if(plugin_name STREQUAL "${OV_PLUGIN_DEVICE_NAME}" AND
-                    NOT library_name STREQUAL ${OV_PLUGIN_NAME})
+                    NOT library_name STREQUAL ${OV_PLUGIN_NAME} AND
+                    NOT plugin_name IN_LIST OV_DISPATCH_GROUP_DEVICES)
                 message(FATAL_ERROR "${OV_PLUGIN_NAME} and ${library_name} are both registered as ${plugin_name}")
             endif()
         endforeach()
@@ -211,9 +213,10 @@ macro(ov_register_in_plugins_xml)
                   VERBATIM)
     endforeach()
 
-    # Generate <device_name>.xml files
-
-    set(plugin_files_local)
+    # Generate <device_name>.xml files. Group PLUGIN_FILES by device so a device registered
+    # with more than one library (a dispatch group) emits one <plugin> with several <location>
+    # children instead of one file per library.
+    set(registered_devices)
     foreach(name IN LISTS PLUGIN_FILES)
         string(REPLACE ":" ";" name "${name}")
         list(LENGTH name length)
@@ -221,11 +224,22 @@ macro(ov_register_in_plugins_xml)
             message(FATAL_ERROR "Unexpected error, please, contact developer of this script")
         endif()
         list(GET name 0 device_name)
-        list(GET name 1 name)
+        list(GET name 1 library_target)
 
-        # create plugin file
+        ov_plugin_get_file_name(${library_target} library_name)
+        # Reset per-device list on first encounter to avoid reusing a stale
+        # ${device_name}_LIBRARY_NAMES from a previous ov_register_plugins() invocation.
+        if(NOT device_name IN_LIST registered_devices)
+            unset(${device_name}_LIBRARY_NAMES)
+        endif()
+        list(APPEND registered_devices ${device_name})
+        list(APPEND ${device_name}_LIBRARY_NAMES "${library_name}")
+    endforeach()
+    list(REMOVE_DUPLICATES registered_devices)
+
+    set(plugin_files_local)
+    foreach(device_name IN LISTS registered_devices)
         set(config_file_name "${CMAKE_BINARY_DIR}/plugins/${device_name}.xml")
-        ov_plugin_get_file_name(${name} library_name)
 
         add_custom_command(TARGET ${OV_REGISTER_MAIN_TARGET} POST_BUILD
            COMMAND
@@ -233,9 +247,9 @@ macro(ov_register_in_plugins_xml)
               -D "OV_CONFIG_OUTPUT_FILE=${config_file_name}"
               -D "OV_DEVICE_NAME=${device_name}"
               -D "OV_PLUGIN_PROPERTIES=${${device_name}_CONFIG}"
-              -D "OV_PLUGIN_LIBRARY_NAME=${library_name}"
+              -D "OV_PLUGIN_LIBRARY_NAMES=${${device_name}_LIBRARY_NAMES}"
               -P "${OpenVINODeveloperScripts_DIR}/plugins/create_plugin_file.cmake"
-          COMMENT "Register ${device_name} device as ${library_name}"
+          COMMENT "Register ${device_name} device as ${${device_name}_LIBRARY_NAMES}"
           VERBATIM)
 
         list(APPEND plugin_files_local "${config_file_name}")
@@ -281,6 +295,13 @@ function(ov_target_link_plugins TARGET_NAME)
 
         # link plugin to ${TARGET_NAME} static version
         list(GET name 1 plugin_name)
+        # Skip MODULE libraries
+        if(TARGET ${plugin_name})
+            get_target_property(plugin_type ${plugin_name} TYPE)
+            if(plugin_type STREQUAL "MODULE_LIBRARY")
+                continue()
+            endif()
+        endif()
         target_link_libraries(${TARGET_NAME} PRIVATE ${plugin_name})
     endforeach()
 endfunction()

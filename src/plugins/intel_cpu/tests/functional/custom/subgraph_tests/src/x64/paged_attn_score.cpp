@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,6 +8,7 @@
 #include <numeric>
 #include "common_test_utils/data_utils.hpp"
 #include "common_test_utils/include/common_test_utils/ov_tensor_utils.hpp"
+#include "common_test_utils/node_builders/constant.hpp"
 #include "internal_properties.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node_vector.hpp"
@@ -37,13 +38,13 @@
 #include "openvino/runtime/infer_request.hpp"
 #include "openvino/runtime/tensor.hpp"
 #include "shared_test_classes/base/ov_subgraph.hpp"
+#include "transformations/rt_info/keep_const_precision.hpp"
 #include "utils/cpu_test_utils.hpp"
 #include "utils/general_utils.h"
 
 using namespace ov::test;
 using namespace CPUTestUtils;
 using namespace ov::op;
-using namespace std;
 
 namespace ov {
 namespace test {
@@ -55,10 +56,7 @@ class PagedAttnScoreTest : public testing::WithParamInterface<PagedAttnTestParam
                            public CPUTestsBase {
 public:
     static std::string getTestCaseName(const testing::TestParamInfo<PagedAttnTestParams>& obj) {
-        ElementType inType;
-        InputShapes inputShapes;
-        uint32_t score_aggregation_window;
-        std::tie(inType, inputShapes, score_aggregation_window) = obj.param;
+        const auto& [inType, inputShapes, score_aggregation_window] = obj.param;
         std::ostringstream result;
         result << "IS=";
         for (const auto& shape : inputShapes) {
@@ -79,15 +77,6 @@ public:
 
         return result.str();
     }
-    static std::shared_ptr<ov::op::v0::Parameter> make_param(const PartialShape& pshape,
-                                                             element::Type element_type,
-                                                             const std::string& name) {
-        auto param = std::make_shared<v0::Parameter>(element_type, pshape);
-        param->set_friendly_name(name);
-        param->get_output_tensor(0).set_names({name});
-        return param;
-    }
-
     std::shared_ptr<ov::Model> get_model(ov::element::Type data_type,
                                          ov::Dimension::value_type head_size = 64,
                                          ov::Dimension::value_type head_num = 8,
@@ -95,21 +84,21 @@ public:
         // q [batch_in_tokens, head_num * head_size]
         // k [batch_in_tokens, head_num * head_size]
         // v [batch_in_tokens, head_num * head_size]
-        auto q = make_param(PartialShape{ov::Dimension::dynamic(), ov::Dimension::dynamic()}, data_type, "q");
-        auto k = make_param(PartialShape{ov::Dimension::dynamic(), head_num * head_size}, data_type, "k");
-        auto v = make_param(PartialShape{ov::Dimension::dynamic(), head_num * head_size}, data_type, "v");
-        auto key_cache = make_param(PartialShape{ov::Dimension::dynamic(), 32, ov::Dimension::dynamic()},
-                                    ov::element::dynamic,
-                                    "key_cache.0");
-        auto value_cache = make_param(PartialShape{ov::Dimension::dynamic(), 32, ov::Dimension::dynamic()},
-                                      ov::element::dynamic,
-                                      "value_cache.0");
-        auto past_lens = make_param(PartialShape{ov::Dimension::dynamic()}, ov::element::i32, "past_lens");
+        auto q = utils::make_param(data_type, PartialShape{ov::Dimension::dynamic(), ov::Dimension::dynamic()}, "q");
+        auto k = utils::make_param(data_type, PartialShape{ov::Dimension::dynamic(), head_num * head_size}, "k");
+        auto v = utils::make_param(data_type, PartialShape{ov::Dimension::dynamic(), head_num * head_size}, "v");
+        auto key_cache = utils::make_param(ov::element::dynamic,
+                                             PartialShape{ov::Dimension::dynamic(), 32, ov::Dimension::dynamic()},
+                                             "key_cache.0");
+        auto value_cache = utils::make_param(ov::element::dynamic,
+                                               PartialShape{ov::Dimension::dynamic(), 32, ov::Dimension::dynamic()},
+                                               "value_cache.0");
+        auto past_lens = utils::make_param(ov::element::i32, PartialShape{ov::Dimension::dynamic()}, "past_lens");
         auto subsequence_begins =
-            make_param(PartialShape{ov::Dimension::dynamic()}, ov::element::i32, "subsequence_begins");
-        auto block_indices = make_param(PartialShape{ov::Dimension::dynamic()}, ov::element::i32, "block_indices");
+            utils::make_param(ov::element::i32, PartialShape{ov::Dimension::dynamic()}, "subsequence_begins");
+        auto block_indices = utils::make_param(ov::element::i32, PartialShape{ov::Dimension::dynamic()}, "block_indices");
         auto block_indices_begins =
-            make_param(PartialShape{ov::Dimension::dynamic()}, ov::element::i32, "block_indices_begins");
+            utils::make_param(ov::element::i32, PartialShape{ov::Dimension::dynamic()}, "block_indices_begins");
         float scale_value = 1.0 / std::sqrt(head_size);
         auto scale =
             std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape{}, std::vector<float>{scale_value});
@@ -120,6 +109,31 @@ public:
             std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<float>{128});
         auto score_aggregation_window_node =
             std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<uint32_t>{score_aggregation_window});
+        auto rotated_block_indices =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{0}, std::vector<uint32_t>{});
+        auto rotation_deltas =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{0}, std::vector<uint32_t>{});
+        auto rotation_trig_lut =
+            std::make_shared<ov::op::v0::Constant>(ov::element::f32, Shape{0}, std::vector<float>{});
+        auto xattention_threshold =
+            std::make_shared<ov::op::v0::Constant>(ov::element::f32, Shape{0}, std::vector<float>{});
+        auto xattention_block_size =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<uint32_t>{0});
+        auto xattention_stride =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<uint32_t>{0});
+        auto sinks =
+            std::make_shared<ov::op::v0::Constant>(data_type, Shape{0, 0, 0, 0}, std::vector<float>{});
+        auto adaptive_rkv_start_size =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<int32_t>{0});
+        auto adaptive_rkv_evictable_sizes =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{0}, std::vector<int32_t>{0});
+        auto adaptive_rkv_diversity_block_set_indices =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{0}, std::vector<int32_t>{0});
+        auto adaptive_rkv_diversity_block_set_indices_begins =
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{0}, std::vector<int32_t>{0});
+        auto token_type_ids = std::make_shared<ov::op::v0::Constant>(ov::element::i32, ov::Shape{0}, std::vector<int32_t>{});
+        auto qq_bias = std::make_shared<ov::op::v0::Constant>(ov::element::u8, Shape{0}, std::vector<uint8_t>{0});
+        auto qq_bias_begins = std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{0}, std::vector<int32_t>{0});
         ParameterVector params =
             {q, k, v, key_cache, value_cache, past_lens, subsequence_begins, block_indices, block_indices_begins};
         auto paged_attn = std::make_shared<op::PagedAttentionExtension>(OutputVector{q,
@@ -135,11 +149,29 @@ public:
                                                                                      silding_windows,
                                                                                      alibi_slopes,
                                                                                      max_context_len,
-                                                                                     score_aggregation_window_node});
+                                                                                     score_aggregation_window_node,
+                                                                                     rotated_block_indices,
+                                                                                     rotation_deltas,
+                                                                                     rotation_trig_lut,
+                                                                                     xattention_threshold,
+                                                                                     xattention_block_size,
+                                                                                     xattention_stride,
+                                                                                     sinks,
+                                                                                     adaptive_rkv_start_size,
+                                                                                     adaptive_rkv_evictable_sizes,
+                                                                                     adaptive_rkv_diversity_block_set_indices,
+                                                                                     adaptive_rkv_diversity_block_set_indices_begins,
+                                                                                     token_type_ids,
+                                                                                     qq_bias,
+                                                                                     qq_bias_begins});
         paged_attn->get_rt_info()["num_k_heads"] = head_num;
         paged_attn->get_rt_info()["k_head_size"] = head_size;
         paged_attn->get_rt_info()["num_v_heads"] = head_num;
         paged_attn->get_rt_info()["v_head_size"] = head_size;
+
+        enable_keep_const_precision(paged_attn->get_input_node_shared_ptr(3));
+        enable_keep_const_precision(paged_attn->get_input_node_shared_ptr(4));
+        
         OutputVector outputs{paged_attn};
         if (score_aggregation_window) {
             outputs.push_back(paged_attn->output(1));
@@ -148,10 +180,7 @@ public:
     }
 
     void SetUp() override {
-        ElementType inType;
-        InputShapes inputShapes;
-        uint32_t score_aggregation_window;
-        std::tie(inType, inputShapes, score_aggregation_window) = this->GetParam();
+        const auto& [inType, inputShapes, score_aggregation_window] = this->GetParam();
         targetDevice = ov::test::utils::DEVICE_CPU;
         rel_threshold = 0.01f;
         abs_threshold = 0.01f;
@@ -274,11 +303,11 @@ public:
         past_shape = {-1, 1, head_num, head_size};
         q_shape = {-1, 1, static_cast<int64_t>(head_num), head_size};
         kv_shape = {-1, 1, head_num, head_size};
-        auto q = make_param(q_shape, data_type, "q");
-        auto k = make_param(kv_shape, data_type, "k");
-        auto v = make_param(kv_shape, data_type, "v");
-        auto past_kv = make_param(past_shape, data_type, "past_kv");
-        auto beam_idx = make_param(ov::PartialShape{-1}, ov::element::i32, "beam_idx");
+        auto q = utils::make_param(data_type, q_shape, "q");
+        auto k = utils::make_param(data_type, kv_shape, "k");
+        auto v = utils::make_param(data_type, kv_shape, "v");
+        auto past_kv = utils::make_param(data_type, past_shape, "past_kv");
+        auto beam_idx = utils::make_param(ov::element::i32, ov::PartialShape{-1}, "beam_idx");
         inputParams.push_back(q);
         inputParams.push_back(k);
         inputParams.push_back(v);
@@ -493,10 +522,7 @@ public:
 
 TEST_P(PagedAttnScoreTest, CompareWithRefs) {
     SKIP_IF_CURRENT_TEST_IS_DISABLED();
-    ElementType inType;
-    InputShapes inputShapes;
-    uint32_t score_aggregation_window;
-    std::tie(inType, inputShapes, score_aggregation_window) = this->GetParam();
+    const auto& [inType, inputShapes, score_aggregation_window] = this->GetParam();
     if (inType == ElementType::bf16 && !ov::with_cpu_x86_bfloat16())
         GTEST_SKIP();
     auto actualOutputs = run_test(function, score_aggregation_window);

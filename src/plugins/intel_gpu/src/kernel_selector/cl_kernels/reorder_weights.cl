@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -302,6 +302,8 @@ inline uint FUNC(get_input_index)(uint g, uint o, uint i, uint z, uint y, uint x
     return GET_FILTER_OS_IS_YX_ISA8_OSV16_ISV4_INDEX(INPUT0, o, i, y, x);
 #elif defined INPUT0_LAYOUT_OS_IS_ZYX_ISA8_OSV16_ISV4
     return GET_FILTER_OS_IS_ZYX_ISA8_OSV16_ISV4_INDEX(INPUT0, o, i, z, y, x);
+#elif defined INPUT0_LAYOUT_OS_IS_YX_OSV16_ISV4
+    return GET_FILTER_OS_IS_YX_OSV16_ISV4_INDEX(INPUT0, o, i, y, x);
 #elif defined INPUT0_LAYOUT_OS_IS_YX_ISV16_OSV16
     return GET_FILTER_OS_IS_YX_ISV_OSV_INDEX(INPUT0, o, i, y, x, 16, 16);
 #elif defined INPUT0_LAYOUT_OIYX_O16
@@ -356,6 +358,8 @@ inline uint FUNC(get_input_index)(uint g, uint o, uint i, uint z, uint y, uint x
     return GET_FILTER_GS_OI_YXS_GSV16_YXSV4_INDEX(INPUT0, g, o, i, y, x);
 #elif defined INPUT0_LAYOUT_GS_OI_YXS_GSV32_YXSV4
     return GET_FILTER_GS_OI_YXS_GSV32_YXSV4_INDEX(INPUT0, g, o, i, y, x);
+#elif defined INPUT0_LAYOUT_G_OS_IS_YX_OSV16_ISV4
+    return GET_FILTER_G_OS_IS_YX_OSV16_ISV4_INDEX(INPUT0, g, o, i, y, x);
 #elif defined INPUT0_LAYOUT_G_OS_ZYX_IS_OSV16_ISV4
     return GET_FILTER_G_OS_ZYX_IS_OSV16_ISV4_INDEX(INPUT0, g, o, i, z, y, x);
 #elif defined INPUT0_LAYOUT_G_OS_ZYX_IS_OSV16_ISV16
@@ -431,6 +435,10 @@ inline uint FUNC(get_output_index)(uint g, uint o, uint i, uint z, uint y, uint 
     return GET_FILTER_OS_IS_YX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4_INDEX(OUTPUT, o, i, y, x);
 #elif defined OUTPUT_LAYOUT_OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4
     return GET_FILTER_OS_IS_ZYX_OSA4_ISA8_OSV8_ISV4_SWIZZLED_BY_4_INDEX(OUTPUT, o, i, z, y, x);
+#elif defined OUTPUT_LAYOUT_OS_IS_YX_OSA2_ISA8_OSV16_ISV4_SWIZZLED_BY_2
+    return GET_FILTER_OS_IS_YX_OSA2_ISA8_OSV16_ISV4_SWIZZLED_BY_2_INDEX(OUTPUT, o, i, y, x);
+#elif defined OUTPUT_LAYOUT_OS_IS_ZYX_OSA2_ISA8_OSV16_ISV4_SWIZZLED_BY_2
+    return GET_FILTER_OS_IS_ZYX_OSA2_ISA8_OSV16_ISV4_SWIZZLED_BY_2_INDEX(OUTPUT, o, i, z, y, x);
 #elif defined OUTPUT_LAYOUT_OS_IS_YX_ISV16_OSV16
     return GET_FILTER_OS_IS_YX_ISV_OSV_INDEX(OUTPUT, o, i, y, x, 16, 16);
 #elif defined OUTPUT_LAYOUT_OS_IS_ZYX_ISV16_OSV16
@@ -559,6 +567,18 @@ KERNEL (reorder_weights)(const __global INPUT0_TYPE* input, __global OUTPUT_TYPE
     const unsigned z = (zyx / OUTPUT_SIZE_X) / OUTPUT_SIZE_Y;
 #endif
 
+#if !REORDER_ROTATE
+    uint output_idx = FUNC_CALL(get_output_index)(g, o, i, z, y, x);
+#else
+    uint output_idx = FUNC_CALL(get_output_index)(g, o, i, OUTPUT_SIZE_Z - z - 1, OUTPUT_SIZE_Y - y - 1, OUTPUT_SIZE_X - x - 1);
+#endif
+#if IMAD_ISV4_PADDING
+    if (i >= OUTPUT_IFM_NUM) {
+        output[output_idx] = (OUTPUT_TYPE)0;
+        return;
+    }
+#endif
+
 #if OUTPUT_GROUPS_NUM > 1 //  Add grouped macro instead this check
     uint8 ir = RESHAPE_WEIGHT_DIMS_WITH_GROUPS(OUTPUT, INPUT0, g, o, i, 0, z, y, x);
 #else
@@ -566,11 +586,6 @@ KERNEL (reorder_weights)(const __global INPUT0_TYPE* input, __global OUTPUT_TYPE
 #endif
 
     uint input_idx = FUNC_CALL(get_input_index)(ir.s0,ir.s1,ir.s2,ir.s4,ir.s5,ir.s6);
-#if !REORDER_ROTATE
-    uint output_idx = FUNC_CALL(get_output_index)(g, o, i, z, y, x);
-#else
-    uint output_idx = FUNC_CALL(get_output_index)(g, o, i, OUTPUT_SIZE_Z - z - 1, OUTPUT_SIZE_Y - y - 1, OUTPUT_SIZE_X - x - 1);
-#endif
 #ifdef BF16_INPUT
     output[output_idx] = TO_OUTPUT_TYPE(_convert_as_bfloat16_float(input[input_idx]));
 #else

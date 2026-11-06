@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ public:
     using Parent = ConvolutionKernelBase;
     using BlockParams = DispatchData::BlockParams;
     Convolution_kernel_b_fs_zyx_fsv16_imad() : ConvolutionKernelBase("convolution_gpu_b_fs_zyx_fsv16_imad") {}
-    virtual ~Convolution_kernel_b_fs_zyx_fsv16_imad() {}
+    ~Convolution_kernel_b_fs_zyx_fsv16_imad() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

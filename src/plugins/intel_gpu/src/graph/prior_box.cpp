@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -26,10 +26,10 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
     // All the inputs for this layer are known at this point,
     // so the output buffer is written here and not in execute().
 
-    const int layer_width = input_layout.spatial(0);
-    const int layer_height = input_layout.spatial(1);
-    const int img_width = argument.img_size.spatial[0];
-    const int img_height = argument.img_size.spatial[1];
+    const int64_t layer_width = input_layout.spatial(0);
+    const int64_t layer_height = input_layout.spatial(1);
+    const int64_t img_width = argument.img_size.spatial[0];
+    const int64_t img_height = argument.img_size.spatial[1];
     float step_w = argument.step_width;
     float step_h = argument.step_height;
     if (!argument.is_clustered() && (step_w == 0 || step_h == 0)) {
@@ -37,18 +37,18 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
         step_h = static_cast<float>(img_height) / layer_height;
     }
     const float offset = argument.offset;
-    int num_priors = argument.is_clustered() ?
-        static_cast<int>(argument.widths.size()) :
+    int64_t num_priors = argument.is_clustered() ?
+        static_cast<int64_t>(argument.widths.size()) :
         output_mem->get_layout().spatial(1) / 4 / layer_width / layer_height;
     int var_size = static_cast<int>(argument.variance.size());
 
     mem_lock<dtype> lock{output_mem, stream};
     auto out_ptr = lock.begin();
-    int dim = layer_height * layer_width * num_priors * 4;
+    int64_t dim = layer_height * layer_width * num_priors * 4;
 
-    int idx = 0;
-    for (int h = 0; h < layer_height; ++h) {
-        for (int w = 0; w < layer_width; ++w) {
+    int64_t idx = 0;
+    for (int64_t h = 0; h < layer_height; ++h) {
+        for (int64_t w = 0; w < layer_width; ++w) {
             float center_x, center_y;
             if (argument.step_width == 0.f || argument.step_height == 0.f) {
                 center_x = (w + 0.5f) * step_w;
@@ -60,7 +60,7 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
             float box_width, box_height;
 
             if (argument.is_clustered()) {
-                for (int s = 0; s < num_priors; ++s) {
+                for (int64_t s = 0; s < num_priors; ++s) {
                     box_width = argument.widths[s];
                     box_height = argument.heights[s];
                     idx = h * layer_width * num_priors * 4 + w * num_priors * 4 + s * 4;
@@ -81,10 +81,10 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
                 auto density = static_cast<size_t>(argument.density[fs]);
                 auto shift = fixed_size / density;
 
-                if (argument.fixed_ratio.size() > 0) {
+                if (!argument.fixed_ratio.empty()) {
                     for (auto fr : argument.fixed_ratio) {
-                        box_width = fixed_size * sqrt(fr);
-                        box_height = fixed_size / sqrt(fr);
+                        box_width = fixed_size * sqrtf(fr);
+                        box_height = fixed_size / sqrtf(fr);
 
                         for (size_t r = 0; r < density; ++r) {
                             for (size_t c = 0; c < density; ++c) {
@@ -124,8 +124,8 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
                             continue;
                         }
 
-                        box_width = fixed_size * sqrt(ar);
-                        box_height = fixed_size / sqrt(ar);
+                        box_width = fixed_size * sqrtf(ar);
+                        box_height = fixed_size / sqrtf(ar);
 
                         for (size_t r = 0; r < density; ++r) {
                             for (size_t c = 0; c < density; ++c) {
@@ -158,10 +158,10 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
                 // ymax
                 out_ptr[idx++] = (dtype)((center_y + box_height / 2.f) / img_height);
 
-                if (argument.max_sizes.size() > 0) {
+                if (!argument.max_sizes.empty()) {
                     float max_size_ = argument.max_sizes[s];
                     // second prior: aspect_ratio = 1, size = sqrt(min_size * max_size)
-                    box_width = box_height = sqrt(min_size * max_size_);
+                    box_width = box_height = sqrtf(min_size * max_size_);
                     // xmin
                     out_ptr[idx++] = (dtype)((center_x - box_width / 2.f) / img_width);
                     // ymin
@@ -180,8 +180,8 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
                         if (fabs(ar - 1.) < 1e-6) {
                             continue;
                         }
-                        box_width = min_size * sqrt(ar);
-                        box_height = min_size / sqrt(ar);
+                        box_width = min_size * sqrtf(ar);
+                        box_height = min_size / sqrtf(ar);
                         // xmin
                         out_ptr[idx++] = (dtype)((center_x - box_width / 2.f) / img_width);
                         // ymin
@@ -204,7 +204,7 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
     }
 
     // set the variance.
-    int count = output_mem->get_layout().spatial(0) * output_mem->get_layout().spatial(1);
+    int64_t count = output_mem->get_layout().spatial(0) * output_mem->get_layout().spatial(1);
     int var_loop_count = argument.is_clustered() ? var_size : 4;
     for (int h = 0; h < layer_height; ++h) {
         for (int w = 0; w < layer_width; ++w) {
@@ -220,17 +220,19 @@ void calculate_prior_box_output(memory::ptr output_mem, stream& stream, layout c
 
 std::string vector_to_string(const std::vector<float>& vec) {
     std::stringstream result;
-    for (size_t i = 0; i < vec.size(); i++)
+    for (size_t i = 0; i < vec.size(); i++) {
         result << vec.at(i) << ", ";
+    }
     return result.str();
 }
 
 std::vector<float> normalized_aspect_ratio(const std::vector<float>& aspect_ratio, bool flip) {
     std::set<float> unique_ratios;
     for (auto ratio : aspect_ratio) {
-        unique_ratios.insert(std::round(ratio * 1e6) / 1e6);
-        if (flip)
-            unique_ratios.insert(std::round(1 / ratio * 1e6) / 1e6);
+        unique_ratios.insert(static_cast<float>(std::round(ratio * 1e6) / 1e6));
+        if (flip) {
+            unique_ratios.insert(static_cast<float>(std::round(1 / ratio * 1e6) / 1e6));
+        }
     }
     unique_ratios.insert(1);
     return std::vector<float>(unique_ratios.begin(), unique_ratios.end());
@@ -275,14 +277,15 @@ int64_t number_of_priors(const std::vector<float>& aspect_ratio,
     return num_priors;
 }
 
-tensor get_output_shape(int32_t height, int32_t width, int32_t number_of_priors) {
-    return tensor{std::vector<int32_t>{2, 4 * height * width * number_of_priors}};
+tensor get_output_shape(ov::Dimension::value_type height, ov::Dimension::value_type width, ov::Dimension::value_type number_of_priors) {
+    return tensor{std::vector<ov::Dimension::value_type>{2, 4 * height * width * number_of_priors}};
 }
 }  // namespace
 
 void prior_box_node::calc_result() {
-    if (result != nullptr)
+    if (result != nullptr) {
         return;
+    }
 
     auto& argument = *typed_desc();
 
@@ -315,7 +318,7 @@ void prior_box_node::calc_result() {
                                        0,
                                        "Min size must be positive.");
     }
-    if (argument.max_sizes.size() > 0) {
+    if (!argument.max_sizes.empty()) {
         CLDNN_ERROR_NOT_EQUAL(id(),
                               "Argument min sizes",
                               argument.min_sizes.size(),
@@ -400,16 +403,17 @@ void prior_box_node::calc_result() {
     result = get_program().get_engine().allocate_memory(get_output_layout());
 
     // perform calculations
-    if (get_output_layout().data_type == data_types::f16)
+    if (get_output_layout().data_type == data_types::f16) {
         calculate_prior_box_output<ov::element_type_traits<data_types::f16>::value_type>(result,
                                                                              get_program().get_stream(),
                                                                              get_input_layout(),
                                                                              *typed_desc());
-    else
+    } else {
         calculate_prior_box_output<ov::element_type_traits<data_types::f32>::value_type>(result,
                                                                              get_program().get_stream(),
                                                                              get_input_layout(),
                                                                              *typed_desc());
+    }
 }
 
 layout prior_box_inst::calc_output_layout(prior_box_node const& node, kernel_impl_params const& impl_param) {
@@ -442,7 +446,7 @@ std::vector<layout> prior_box_inst::calc_output_layouts(prior_box_node const& /*
     std::vector<ShapeType> output_shapes = {ShapeType()};
     std::unordered_map<size_t, ov::Tensor> const_data;
 
-    auto& memory_deps = impl_param.memory_deps;
+    const auto& memory_deps = impl_param.memory_deps;
 
     if (memory_deps.count(0) && memory_deps.count(1)) {
         auto output_size_mem = memory_deps.at(0);
@@ -453,7 +457,7 @@ std::vector<layout> prior_box_inst::calc_output_layouts(prior_box_node const& /*
 
         const_data.emplace(0, make_tensor(output_size_mem->get_layout(), output_size_lock.data()));
 
-        auto p_param = const_cast<kernel_impl_params*>(&impl_param);
+        auto* p_param = const_cast<kernel_impl_params*>(&impl_param);
         if (output_size_mem->get_layout().data_type == cldnn::data_types::i64) {
             auto output_height = reinterpret_cast<int64_t*>(output_size_lock.data())[0];
             auto output_width = reinterpret_cast<int64_t*>(output_size_lock.data())[1];
@@ -524,9 +528,9 @@ template std::vector<layout> prior_box_inst::calc_output_layouts<ov::PartialShap
 
 std::string prior_box_inst::to_string(prior_box_node const& node) {
     auto desc = node.get_primitive();
-    auto flip = desc->flip ? "true" : "false";
-    auto clip = desc->clip ? "true" : "false";
-    auto scale_all_sizes = desc->scale_all_sizes ? "true" : "false";
+    const auto* flip = desc->flip ? "true" : "false";
+    const auto* clip = desc->clip ? "true" : "false";
+    const auto* scale_all_sizes = desc->scale_all_sizes ? "true" : "false";
     auto node_info = node.desc_to_json();
 
     std::string str_min_sizes = vector_to_string(desc->min_sizes);

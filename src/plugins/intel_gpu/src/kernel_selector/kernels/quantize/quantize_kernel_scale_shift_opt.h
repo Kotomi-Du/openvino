@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -13,7 +13,7 @@ public:
     using Parent = QuantizeKernelBase;
 
     QuantizeKernelScaleShift() : QuantizeKernelBase("quantize_gpu_scale_shift_opt") {}
-    virtual ~QuantizeKernelScaleShift() {}
+    ~QuantizeKernelScaleShift() override = default;
 
     JitConstants GetJitConstants(const quantize_params& params, const CommonDispatchData& dispatchData) const override;
     CommonDispatchData SetDefault(const quantize_params& params) const override;

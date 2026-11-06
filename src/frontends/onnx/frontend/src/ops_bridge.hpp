@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,13 +10,14 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "core/operator_set.hpp"
+#include "openvino/frontend/onnx/extension/conversion.hpp"
 #include "version_range.hpp"
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 
 class OperatorsBridge {
 public:
@@ -28,6 +29,7 @@ public:
     OperatorsBridge& operator=(OperatorsBridge&&) = default;
 
     OperatorSet get_operator_set(const std::string& domain, std::int64_t version = -1) const;
+    const Operator* get_operator(const std::string& domain, const std::string& name, const int64_t version) const;
 
     template <typename Container = std::set<std::string>>
     Container get_supported_operators(int64_t version, std::string domain) const {
@@ -58,6 +60,7 @@ public:
     bool is_operator_registered(const std::string& name, std::int64_t version, const std::string& domain) const;
 
     void overwrite_operator(const std::string& name, const std::string& domain, Operator fn);
+    void register_extensions(const std::vector<ov::frontend::ConversionExtensionBase::Ptr>& conversions);
 
 private:
     void register_operator_in_custom_domain(std::string name,
@@ -86,6 +89,8 @@ private:
     std::unordered_map<std::string, DomainOpset> m_map;
 };
 
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+// Returns operations convertible via the openvino-tokenizers extension as (op_type, domain) pairs.
+// An empty domain denotes the default ONNX opset ("ai.onnx").
+const std::vector<std::pair<std::string, std::string>>& get_supported_ops_via_tokenizers();
+
+}  // namespace ov::frontend::onnx

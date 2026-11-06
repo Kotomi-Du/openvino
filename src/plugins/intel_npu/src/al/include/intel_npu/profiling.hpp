@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -20,6 +20,8 @@ LayerStatistics convertLayersToIeProfilingInfo(const std::vector<LayerInfo>& lay
     for (const auto& layer : layerInfo) {
         ov::ProfilingInfo& info = perfCounts.emplace_back();
         info.status = ov::ProfilingInfo::Status::EXECUTED;
+        info.start_time =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::nanoseconds(layer.start_time_ns));
         const auto real_time_ns = std::chrono::nanoseconds(layer.duration_ns);
         info.real_time = std::chrono::duration_cast<std::chrono::microseconds>(real_time_ns);
         const auto cpu_time_ns = std::chrono::nanoseconds(layer.dma_ns + layer.sw_ns + layer.dpu_ns);

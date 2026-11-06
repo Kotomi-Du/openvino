@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ class ConvolutionKernel_bfyx_GEMMLike : public ConvolutionKernelBase {
 public:
     using Parent = ConvolutionKernelBase;
     ConvolutionKernel_bfyx_GEMMLike() : Parent("convolution_gpu_bfyx_gemm_like") {}
-    virtual ~ConvolutionKernel_bfyx_GEMMLike() {}
+    ~ConvolutionKernel_bfyx_GEMMLike() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -18,11 +18,8 @@
 using namespace ov::op;
 using ::ONNX_NAMESPACE::TensorProto_DataType;
 
-namespace ov {
-namespace frontend {
-namespace onnx {
-namespace ai_onnx {
-namespace opset_1 {
+namespace ov::frontend::onnx {
+namespace ai_onnx::opset_1 {
 
 ov::OutputVector simplified_layer_normalization(const ov::frontend::onnx::Node& node) {
     common::default_op_checks(node, 2);
@@ -37,7 +34,7 @@ ov::OutputVector simplified_layer_normalization(const ov::frontend::onnx::Node& 
                      X.get_element_type(),
                      scale.get_element_type());
 
-    float epsilon = node.get_attribute_value<float>("epsilon", 1e-5f);
+    float epsilon = node.get_attribute_value<float>("epsilon", 1e-12f);
     int64_t axis = node.get_attribute_value<int64_t>("axis", -1);
     int64_t default_stash_type = static_cast<int64_t>(TensorProto_DataType::TensorProto_DataType_FLOAT);
     int64_t stash_type_i = node.get_attribute_value<int64_t>("stash_type", default_stash_type);
@@ -59,7 +56,10 @@ ov::OutputVector simplified_layer_normalization(const ov::frontend::onnx::Node& 
     auto rms_value =
         std::make_shared<v0::Sqrt>(std::make_shared<v1::Add>(mean, v0::Constant::create(stash_type, {}, {epsilon})));
     auto inv_std_var = std::make_shared<v1::Divide>(v0::Constant::create(stash_type, {}, {1.0}), rms_value);
-    auto normalized = std::make_shared<v1::Multiply>(X, inv_std_var);  // X / RMS(X)
+    ov::Output<ov::Node> normalized = std::make_shared<v1::Multiply>(X, inv_std_var);  // X / RMS(X)
+    if (needs_type_casting) {
+        normalized = std::make_shared<v0::Convert>(normalized, scale.get_element_type());
+    }
 
     auto scaled = std::make_shared<v1::Multiply>(normalized, scale);  // (X / RMS(X)) * scale
 
@@ -78,20 +78,15 @@ ov::OutputVector simplified_layer_normalization(const ov::frontend::onnx::Node& 
    in a folder with com.microsoft operations, because it isn't defined as a part of ONNX.
 */
 ONNX_OP("SimplifiedLayerNormalization", OPSET_SINCE(1), ai_onnx::opset_1::simplified_layer_normalization);
-}  // namespace opset_1
-}  // namespace ai_onnx
+}  // namespace ai_onnx::opset_1
 
-namespace com_microsoft {
-namespace opset_1 {
+namespace com_microsoft::opset_1 {
 OPENVINO_DEPRECATED("'SimplifiedLayerNormalization' in the 'com_microsoft' domain is deprecated. Please use the "
                     "'ai_onnx' domain instead, which is adopted by ONNX Runtime Web.")
 ONNX_OP("SimplifiedLayerNormalization",
         OPSET_SINCE(1),
         ai_onnx::opset_1::simplified_layer_normalization,
         MICROSOFT_DOMAIN);
-}  // namespace opset_1
-}  // namespace com_microsoft
+}  // namespace com_microsoft::opset_1
 
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

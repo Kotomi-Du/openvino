@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -24,6 +24,7 @@ ParamsKey ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv32::GetSupportedKey() const 
     k.EnableOutputDataType(Datatype::F16);
 
     k.EnableInputWeightsType(WeightsType::INT8);
+    k.EnableInputWeightsType(WeightsType::UINT8);
 
     k.EnableInputLayout(DataLayout::bfyx);
     k.EnableInputLayout(DataLayout::bfzyx);
@@ -58,23 +59,26 @@ DeviceFeaturesKey ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv32::get_required_dev
 
 bool ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv32::Validate(const Params &p) const {
     if (!Parent::Validate(p)) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     auto params = dynamic_cast<const convolution_params&>(p);
 
-    if (params.inputs[0].Dimentions() != params.outputs[0].Dimentions())
-        return false;
+    if (params.inputs[0].Dimentions() != params.outputs[0].Dimentions()) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (params.inputs[0].Feature().v != 3 && params.inputs[0].Feature().v != 4)
-        return false;
+    if (params.inputs[0].Feature().v != 3 && params.inputs[0].Feature().v != 4) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
-    if (params.outputs[0].Feature().v % 2 != 0)
-        return false;
+    if (params.outputs[0].Feature().v % 2 != 0) {
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
+    }
 
     if ((params.quantization == QuantizationType::ASYMMETRIC_DATA || params.quantization == QuantizationType::ASYMMETRIC_DATA_AND_WEIGHTS)
         && !params.HasCompensation()) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     return true;
@@ -88,8 +92,8 @@ ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv32::AutoTuneOption ConvolutionKernel_m
 
     AutoTuneOption option = {0, 0, 0, EXE_MODE_DEFAULT};
 
-    auto &params = dynamic_cast<const convolution_params &>(p);
-    auto &output = params.outputs[0];
+    const auto& params = dynamic_cast<const convolution_params&>(p);
+    const auto& output = params.outputs[0];
 
     // TODO: Check if other block size can improve performance
     option.blockHeight = 1;
@@ -141,8 +145,9 @@ static size_t get_slm_byte_size(const convolution_params &cp, size_t lws, size_t
 static size_t get_lws(const convolution_params &cp, size_t blocks_count, size_t block_size_x, size_t block_size_y, size_t max_lws) {
     while (max_lws > 1) {
         if (blocks_count % max_lws == 0) {
-            if (get_slm_byte_size(cp, max_lws, block_size_x, block_size_y) < cp.engineInfo.maxLocalMemSize)
+            if (get_slm_byte_size(cp, max_lws, block_size_x, block_size_y) < cp.engineInfo.maxLocalMemSize) {
                 return max_lws;
+            }
         }
         max_lws--;
     }
@@ -159,7 +164,7 @@ ConvolutionKernelBase::DispatchData ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv32
     dispatchData.cldnnStyle.blockHeight = tuneOptions.blockHeight;
     dispatchData.cldnnStyle.prefetch = tuneOptions.prefetch;
 
-    const size_t max_lws = std::max((size_t)1, cp.engineInfo.maxWorkGroupSize / sub_group_size);
+    const size_t max_lws = std::max<size_t>(1, cp.engineInfo.maxWorkGroupSize / sub_group_size);
     dispatchData.gws[0] = Align(cp.outputs[0].Feature().v, 32) / 2;
     dispatchData.gws[1] = CeilDiv(cp.outputs[0].X().v, dispatchData.cldnnStyle.blockWidth);
     dispatchData.gws[2] = cp.outputs[0].Batch().v * CeilDiv(cp.outputs[0].Y().v, dispatchData.cldnnStyle.blockHeight) * cp.outputs[0].Z().v;
@@ -209,6 +214,12 @@ JitConstants ConvolutionKernel_mmad_bfyx_to_b_fs_yx_fsv32::GetJitConstants(const
 
     jit.Merge(MakeTypeJitConstants(GetPackedInputType(params), "PACKED_IN"));
     jit.Merge(MakeTypeJitConstants(GetPackedType(params.outputs[0].GetDType(), 2), "PACKED_OUT"));
+
+    if (params.weights.GetDType() == WeightsType::INT8) {
+        jit.AddConstant(MakeJitConstant("FILTER_TYPE_CHAR", 1));
+    } else if (params.weights.GetDType() == WeightsType::UINT8) {
+        jit.AddConstant(MakeJitConstant("FILTER_TYPE_UCHAR", 1));
+    }
 
     if (!params.fused_ops.empty()) {
         auto input_dt = GetActivationType(params);

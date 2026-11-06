@@ -4,10 +4,25 @@ This article describes how to build OpenVINO for Android operating systems.
 
 ## Software requirements
 
-- [CMake](https://cmake.org/download/) 3.13 or higher
+- [CMake](https://cmake.org/download/) 3.26 or higher
 - [SCons](https://scons.org/pages/download.html) 4.6.0 or higher
-- [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) (this guide has been validated with 30.0.0 release)
-- [Android NDK](https://developer.android.com/ndk/downloads) (this guide has been validated with r26 release)
+- [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) (this guide has been validated with the 35.0.0 release)
+- [Android NDK](https://developer.android.com/ndk/downloads) (this guide has been validated with r28c release)
+
+## Use the prebuilt x86-64 archive
+
+For Android x86-64 targets, you can use the prebuilt OpenVINO 2026.4.0 Runtime package instead of building OpenVINO from source:
+
+```sh
+mkdir openvino-android
+export OPV_HOME_DIR=${PWD}/openvino-android
+curl -L https://storage.openvinotoolkit.org/repositories/openvino/packages/2026.4/linux/openvino_toolkit_android_2026.4.0.22959.99c81491cc3_x86_64.tgz \
+  --output $OPV_HOME_DIR/openvino_toolkit_android_2026.4.0.tgz
+tar -xf $OPV_HOME_DIR/openvino_toolkit_android_2026.4.0.tgz -C $OPV_HOME_DIR
+export OpenVINO_DIR=$OPV_HOME_DIR/openvino_toolkit_android_2026.4.0.22959.99c81491cc3_x86_64/runtime/cmake
+```
+
+The archive provides the OpenVINO headers, x86-64 Runtime libraries, CMake configuration, and required oneTBB libraries. For other Android architectures or a custom configuration, build OpenVINO from source as described below. The ADB example later in this guide demonstrates an aarch64 source build and does not apply directly to this x86-64 archive.
 
 ## How to build
 
@@ -15,22 +30,23 @@ This article describes how to build OpenVINO for Android operating systems.
   ```sh
   mkdir openvino-android
   export OPV_HOME_DIR=${PWD}/openvino-android
+  export HOST_OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]') # linux/darwin
   ```
 
 ### Download and unpack Android packages 
 * Download and unpack [Android NDK](https://developer.android.com/ndk/downloads)
   ```sh
-  wget https://dl.google.com/android/repository/android-ndk-r26d-linux.zip --directory-prefix $OPV_HOME_DIR
+  wget https://dl.google.com/android/repository/android-ndk-r28c-${HOST_OS_TYPE}.zip --directory-prefix $OPV_HOME_DIR
 
-  unzip $OPV_HOME_DIR/android-ndk-r26d-linux.zip -d $OPV_HOME_DIR
-  mv $OPV_HOME_DIR/android-ndk-r26d $OPV_HOME_DIR/android-ndk
+  unzip $OPV_HOME_DIR/android-ndk-r28c-${HOST_OS_TYPE}.zip -d $OPV_HOME_DIR
+  mv $OPV_HOME_DIR/android-ndk-r28c $OPV_HOME_DIR/android-ndk
   export ANDROID_NDK_PATH=$OPV_HOME_DIR/android-ndk
   ```
 * Download and unpack [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools)
   ```sh
-  wget https://dl.google.com/android/repository/platform-tools-latest-linux.zip --directory-prefix $OPV_HOME_DIR
+  wget https://dl.google.com/android/repository/platform-tools-latest-${HOST_OS_TYPE}.zip --directory-prefix $OPV_HOME_DIR
 
-  unzip $OPV_HOME_DIR/platform-tools-latest-linux.zip -d $OPV_HOME_DIR
+  unzip $OPV_HOME_DIR/platform-tools-latest-${HOST_OS_TYPE}.zip -d $OPV_HOME_DIR
   export ANDROID_TOOLS_PATH=$OPV_HOME_DIR/platform-tools
   ```
 _For Windows and Mac operating systems, the downloading and unpacking steps are similar._
@@ -39,7 +55,7 @@ _For Windows and Mac operating systems, the downloading and unpacking steps are 
   ```sh
   # If you have no android devices please set CURRENT_ANDROID_ABI according to your preferences e.g. export CURRENT_ANDROID_ABI=arm64-v8a
   export CURRENT_ANDROID_ABI=`$ANDROID_TOOLS_PATH/adb shell getprop ro.product.cpu.abi`
-  export CURRENT_ANDROID_PLATFORM=30
+  export CURRENT_ANDROID_PLATFORM=35
   export CURRENT_ANDROID_STL=c++_shared
   export CURRENT_CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_PATH/build/cmake/android.toolchain.cmake
   ```
@@ -47,11 +63,15 @@ _For Windows and Mac operating systems, the downloading and unpacking steps are 
     * `x86_64` for x64 build
     * `armeabi-v7a with NEON` for ARM with NEON support
     * `arm64-v8a` for ARM 64 bits
+    * `riscv64` for RISC-V 64 bits (experimental)
 * `ANDROID_PLATFORM` specifies the Android API version.
 * `ANDROID_STL` indicates that a shared C++ runtime is used.
 
-### Build and install OneTBB™
+### Build and install OneTBB™ (Not for RISC-V 64 architecture)
 To improve the parallelism performance of the OpenVINO™ library using OneTBB, it is required to separately build OneTBB for a specific version of the Android NDK:
+Android OpenVINO build with `THREADING=TBB` requires this separate OneTBB build.
+OpenVINO CMake configure must be called with `-DTBB_DIR=$OPV_HOME_DIR/one-tbb-install/lib/cmake/TBB`.
+If `TBB_DIR` is not provided, Android configure fails by design.
   ```sh
   # Clone OneTBB™ repository 
   git clone --recursive https://github.com/oneapi-src/oneTBB $OPV_HOME_DIR/one-tbb
@@ -67,11 +87,19 @@ To improve the parallelism performance of the OpenVINO™ library using OneTBB, 
         -DANDROID_PLATFORM=$CURRENT_ANDROID_PLATFORM \
         -DANDROID_STL=$CURRENT_ANDROID_STL \
         -DTBB_TEST=OFF \
-        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--undefined-version" 
+        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--undefined-version"
   # Build OneTBB™ project 
   cmake --build $OPV_HOME_DIR/one-tbb-build --parallel
   # Install OneTBB™ project 
   cmake --install $OPV_HOME_DIR/one-tbb-build
+  ```
+
+Android OpenVINO configuration expects the separately built OneTBB package.
+`TBB_DIR` must be provided when configuring OpenVINO.
+
+### Clone OpenVINO™ GenAI (Optional)
+  ```sh
+  git clone --recursive https://github.com/openvinotoolkit/openvino.genai $OPV_HOME_DIR/openvino.genai
   ```
 
 ### Build and install OpenVINO™
@@ -83,12 +111,14 @@ To improve the parallelism performance of the OpenVINO™ library using OneTBB, 
   # Configure OpenVINO™ CMake project 
   cmake -S $OPV_HOME_DIR/openvino \
         -B $OPV_HOME_DIR/openvino-build \
+        -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=$OPV_HOME_DIR/openvino-install \
         -DCMAKE_TOOLCHAIN_FILE=$CURRENT_CMAKE_TOOLCHAIN_FILE \
         -DANDROID_ABI=$CURRENT_ANDROID_ABI \
         -DANDROID_PLATFORM=$CURRENT_ANDROID_PLATFORM \
         -DANDROID_STL=$CURRENT_ANDROID_STL \
-        -DTBB_DIR=$OPV_HOME_DIR/one-tbb-install/lib/cmake/TBB
+        -DTBB_DIR=$OPV_HOME_DIR/one-tbb-install/lib/cmake/TBB \
+        -DOPENVINO_EXTRA_MODULES=$OPV_HOME_DIR/openvino.genai
   # Build OpenVINO™ project 
   cmake --build $OPV_HOME_DIR/openvino-build --parallel
   # Install OpenVINO™ project 
@@ -111,7 +141,7 @@ _This example is demonstrated for aarch64 architecture_
   # Copy OneTBB libraries to android device
   $ANDROID_TOOLS_PATH/adb push --sync $OPV_HOME_DIR/one-tbb-install/lib/* /data/local/tmp/
   # Copy shared STL library to android device
-  $ANDROID_TOOLS_PATH/adb push --sync $ANDROID_NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so /data/local/tmp/
+  $ANDROID_TOOLS_PATH/adb push --sync $ANDROID_NDK_PATH/toolchains/llvm/prebuilt/$HOST_OS_TYPE-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so /data/local/tmp/
   # Copy example model files
   $ANDROID_TOOLS_PATH/adb push --sync $OPV_HOME_DIR/mobelinet-v3-tf /data/local/tmp/
   # Copy OpenVINO™ benchmark_app tool to android device

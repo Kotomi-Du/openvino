@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -6,6 +6,7 @@
 
 #include <functional>
 
+#include "openvino/core/deprecated.hpp"
 #include "openvino/core/node.hpp"
 #include "openvino/pass/pattern/op/predicate.hpp"
 
@@ -67,9 +68,14 @@ OPENVINO_API op::Predicate attrs_match(const Attributes& expected_attrs);
 OPENVINO_API op::Predicate shape_matches(const std::string& shape_notation);
 OPENVINO_API op::Predicate value_matches(const std::string& value_notation);
 
+OPENVINO_DEPRECATED("Use wrap_type_strict_index<T>() and reference the output directly, e.g. node->output(0). "
+                    "`output_index_matches()` will be removed in 2028.0 release.")
+OPENVINO_API op::Predicate output_index_matches(size_t expected_index);
+OPENVINO_DEPRECATED("Use wrap_type_strict_index<T>() and reference the output directly, e.g. node->output(0). "
+                    "`output_index_matches()` will be removed in 2028.0 release.")
+OPENVINO_API op::Predicate output_index_matches(const std::vector<size_t>& expected_indices);
+
 namespace op {
-OPENVINO_DEPRECATED("This method is deprecated. Use constructor of ov::pass::pattern::Predicate instead")
-OPENVINO_API Predicate as_value_predicate(NodePredicate pred);
 
 class OPENVINO_API Pattern : public Node {
 public:

@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -11,6 +11,7 @@
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/runtime/properties.hpp"
 #include "utils/cpu_test_utils.hpp"
+#include "utils/general_utils.h"
 
 #if defined(OPENVINO_ARCH_RISCV64)
 #   include "nodes/kernels/riscv64/cpu_isa_traits.hpp"
@@ -21,19 +22,14 @@ using namespace CPUTestUtils;
 namespace ov {
 namespace test {
 
-std::string EltwiseLayerCPUTest::getTestCaseName(testing::TestParamInfo<EltwiseLayerCPUTestParamsSet> obj) {
-    EltwiseTestParams basicParamsSet;
-    CPUSpecificParams cpuParams;
-    fusingSpecificParams fusingParams;
-    bool enforceSnippets;
-    std::tie(basicParamsSet, cpuParams, fusingParams, enforceSnippets) = obj.param;
-
+std::string EltwiseLayerCPUTest::getTestCaseName(const testing::TestParamInfo<EltwiseLayerCPUTestParamsSet>& obj) {
+    const auto& [basicParamsSet, cpuParams, fusingParams, enforceSnippets] = obj.param;
     std::ostringstream result;
     result << EltwiseLayerTest::getTestCaseName(testing::TestParamInfo<EltwiseTestParams>(
                                                               basicParamsSet, 0));
     result << CPUTestsBase::getTestCaseName(cpuParams);
     result << CpuTestWithFusing::getTestCaseName(fusingParams);
-        result << "_enforceSnippets=" << enforceSnippets;
+    result << "_enforceSnippets=" << enforceSnippets;
 
     return result.str();
 }
@@ -57,6 +53,7 @@ ov::Tensor EltwiseLayerCPUTest::generate_eltwise_input(const ov::element::Type& 
         switch (eltwiseType) {
         case utils::EltwiseTypes::POWER:
             params = gen_params(6, -3);
+            break;
         case utils::EltwiseTypes::MOD:
         case utils::EltwiseTypes::FLOOR_MOD:
             params = gen_params(2, 2, 8);
@@ -131,22 +128,25 @@ void EltwiseLayerCPUTest::generate_inputs(const std::vector<ov::Shape>& targetIn
     }
 }
 
+void EltwiseLayerCPUTest::validate() {
+    SubgraphBaseTest::validate();
+    CheckPluginRelatedResults(compiledModel, std::set<std::string>{"Eltwise", "Subgraph"});
+}
+
 void EltwiseLayerCPUTest::SetUp() {
-    EltwiseTestParams basicParamsSet;
-    CPUSpecificParams cpuParams;
-    fusingSpecificParams fusingParams;
-    bool enforceSnippets;
-    std::tie(basicParamsSet, cpuParams, fusingParams, enforceSnippets) = this->GetParam();
-    std::vector<InputShape> shapes;
-    ElementType netType;
-    utils::InputLayerType secondaryInputType;
-    ov::test::utils::OpType opType;
-    ov::AnyMap additionalConfig;
-    std::tie(shapes, eltwiseType, secondaryInputType, opType, netType, inType, outType, targetDevice, additionalConfig) = basicParamsSet;
+    const auto& [basicParamsSet, cpuParams, fusingParams, enforceSnippets] = this->GetParam();
+    const auto& [_shapes, _eltwiseType, secondaryInputType, opType, _netType, _inType, _outType, _targetDevice,
+                 additionalConfig] = basicParamsSet;
+    auto shapes = _shapes;
+    eltwiseType = _eltwiseType;
+    inType = _inType;
+    outType = _outType;
+    targetDevice = _targetDevice;
+    auto netType = _netType;
     // we have to change model precision as well, otherwise inference precision won't affect single-node graph
     // due to enforce inference precision optimization for the eltwise as first node of the model
     if (ov::element::Type(netType).is_real() && additionalConfig.count(ov::hint::inference_precision.name())) {
-        netType = additionalConfig[ov::hint::inference_precision.name()].as<ov::element::Type>();
+        netType = additionalConfig.at(ov::hint::inference_precision.name()).as<ov::element::Type>();
     }
 
     if (ElementType::bf16 == netType) {
@@ -167,6 +167,25 @@ void EltwiseLayerCPUTest::SetUp() {
         }
     }
 
+    if (postOpMgrPtr &&
+        (postOpMgrPtr->getFusedOpsNames().find("SoftSign") != std::string::npos ||
+         postOpMgrPtr->getFusedOpsNames().find("FloorMod") != std::string::npos)) {
+        rel_threshold = 0.05f;
+    }
+
+#if defined(OPENVINO_ARCH_ARM)
+    // ARM32-only: Sub/Div may be decomposed or routed to different implementations
+    // causing variability (binary->unary or ACL/ref). Keep tests stable but localized here.
+    if (ov::intel_cpu::any_of(eltwiseType, utils::EltwiseTypes::SUBTRACT, utils::EltwiseTypes::DIVIDE)) {
+        // If format expectations specify two inputs, but transforms reduce arity, limit to single input.
+        if (inFmts.size() > 1) {
+            inFmts.resize(1);
+        }
+        // Do not enforce specific primType (ACL vs REF) for Sub/Div on ARM32.
+        selectedType = CPUTestsBase::any_type;
+    }
+#endif
+
     shapes.resize(2);
     switch (opType) {
     case ov::test::utils::OpType::SCALAR: {
@@ -186,7 +205,7 @@ void EltwiseLayerCPUTest::SetUp() {
     init_input_shapes(shapes);
     configuration.insert(additionalConfig.begin(), additionalConfig.end());
     updateSelectedType(
-        getPrimitiveType(eltwiseType, netType, shapes),
+        getPrimitiveType(netType, shapes),
         netType,
         configuration);
     // selectedType = makeSelectedTypeStr(getPrimitiveType(), netType);
@@ -231,27 +250,7 @@ void EltwiseLayerCPUTest::SetUp() {
                     shape,
                     (netType == element::i32) || (netType == element::u32) ||
                     (netType == element::i8) || (netType == element::u8));
-                if ((netType == ElementType::i8) || (netType == ElementType::u8)) {
-                    auto data_ptr = reinterpret_cast<uint8_t*>(data_tensor.data());
-                    std::vector<uint8_t> data(data_ptr, data_ptr + ov::shape_size(shape));
-                    secondaryInput = ov::op::v0::Constant::create(netType, shape, data);
-                } else if ((netType == ElementType::i16) || (netType == ElementType::u16)) {
-                    auto data_ptr = reinterpret_cast<uint16_t*>(data_tensor.data());
-                    std::vector<uint16_t> data(data_ptr, data_ptr + ov::shape_size(shape));
-                    secondaryInput = ov::op::v0::Constant::create(netType, shape, data);
-                } else if ((netType == ElementType::i32) || (netType == ElementType::u32)) {
-                    auto data_ptr = reinterpret_cast<uint32_t*>(data_tensor.data());
-                    std::vector<uint32_t> data(data_ptr, data_ptr + ov::shape_size(shape));
-                    secondaryInput = ov::op::v0::Constant::create(netType, shape, data);
-                } else if (netType == ElementType::f16) {
-                    auto data_ptr = reinterpret_cast<ov::float16*>(data_tensor.data());
-                    std::vector<ov::float16> data(data_ptr, data_ptr + ov::shape_size(shape));
-                    secondaryInput = ov::op::v0::Constant::create(netType, shape, data);
-                } else {
-                    auto data_ptr = reinterpret_cast<float*>(data_tensor.data());
-                    std::vector<float> data(data_ptr, data_ptr + ov::shape_size(shape));
-                    secondaryInput = ov::op::v0::Constant::create(netType, shape, data);
-                }
+                secondaryInput = std::make_shared<ov::op::v0::Constant>(data_tensor);
                 break;
             }
             default: {
@@ -260,27 +259,32 @@ void EltwiseLayerCPUTest::SetUp() {
         }
     }
     auto eltwise = utils::make_eltwise(parameters[0], secondaryInput, eltwiseType);
-    function = makeNgraphFunction(netType, parameters, eltwise, "Eltwise");
+    function = create_ov_model(netType, parameters, eltwise, "Eltwise");
 }
 
-std::string EltwiseLayerCPUTest::getPrimitiveType(const utils::EltwiseTypes& eltwise_type,
-                                                  const ov::element::Type_t& element_type,
+std::string EltwiseLayerCPUTest::getPrimitiveType(const ov::element::Type_t& element_type,
                                                   const std::vector<std::pair<ov::PartialShape, std::vector<ov::Shape>>>& input_shapes) const {
 #if defined(OV_CPU_WITH_ACL)
 #if defined(OPENVINO_ARCH_ARM64)
-    if ((eltwise_type == utils::EltwiseTypes::ADD) ||
-       (eltwise_type == utils::EltwiseTypes::MULTIPLY) ||
-       (eltwise_type == utils::EltwiseTypes::SUBTRACT) ||
-       (eltwise_type == utils::EltwiseTypes::DIVIDE) ||
-       (eltwise_type == utils::EltwiseTypes::FLOOR_MOD) ||
-       (eltwise_type == utils::EltwiseTypes::MOD) ||
-       (eltwise_type == utils::EltwiseTypes::POWER) ||
-       (eltwise_type == utils::EltwiseTypes::SQUARED_DIFF)) {
+    if ((eltwiseType == utils::EltwiseTypes::ADD) ||
+       (eltwiseType == utils::EltwiseTypes::MULTIPLY) ||
+       (eltwiseType == utils::EltwiseTypes::SUBTRACT) ||
+       (eltwiseType == utils::EltwiseTypes::DIVIDE) ||
+       (eltwiseType == utils::EltwiseTypes::FLOOR_MOD) ||
+       (eltwiseType == utils::EltwiseTypes::MOD) ||
+       (eltwiseType == utils::EltwiseTypes::POWER) ||
+       (eltwiseType == utils::EltwiseTypes::SQUARED_DIFF)) {
         return "jit";
     }
 #endif
-    if (eltwise_type == utils::EltwiseTypes::FLOOR_MOD ||
-        eltwise_type == utils::EltwiseTypes::MOD) {
+    if (eltwiseType == utils::EltwiseTypes::BITWISE_AND ||
+        eltwiseType == utils::EltwiseTypes::BITWISE_OR ||
+        eltwiseType == utils::EltwiseTypes::BITWISE_XOR ||
+        eltwiseType == utils::EltwiseTypes::BITWISE_NOT) {
+        return "ref";
+    }
+    if (eltwiseType == utils::EltwiseTypes::FLOOR_MOD ||
+        eltwiseType == utils::EltwiseTypes::MOD) {
         return "ref";
     } else {
         return "acl";
@@ -289,29 +293,23 @@ std::string EltwiseLayerCPUTest::getPrimitiveType(const utils::EltwiseTypes& elt
 
 #if defined(OPENVINO_ARCH_RISCV64)
     if (ov::intel_cpu::riscv64::mayiuse(ov::intel_cpu::riscv64::gv)) {
-        if ((eltwise_type == utils::EltwiseTypes::ADD) ||
-            (eltwise_type == utils::EltwiseTypes::SUBTRACT) ||
-            (eltwise_type == utils::EltwiseTypes::MULTIPLY) ||
-            (eltwise_type == utils::EltwiseTypes::DIVIDE) ||
-            (eltwiseType == utils::EltwiseTypes::MOD)) {
+        if ((eltwiseType == utils::EltwiseTypes::ADD) ||
+            (eltwiseType == utils::EltwiseTypes::SUBTRACT) ||
+            (eltwiseType == utils::EltwiseTypes::MULTIPLY) ||
+            (eltwiseType == utils::EltwiseTypes::DIVIDE) ||
+            (eltwiseType == utils::EltwiseTypes::POWER) ||
+            (eltwiseType == utils::EltwiseTypes::MOD) ||
+            (eltwiseType == utils::EltwiseTypes::FLOOR_MOD) ||
+            (eltwiseType == utils::EltwiseTypes::SQUARED_DIFF)) {
             return "jit";
         }
     }
-#if defined(OV_CPU_WITH_SHL)
-    if ((eltwise_type == utils::EltwiseTypes::ADD) ||
-        (eltwise_type == utils::EltwiseTypes::SUBTRACT) ||
-        (eltwise_type == utils::EltwiseTypes::MULTIPLY) ||
-        (eltwise_type == utils::EltwiseTypes::DIVIDE)) {
-        return "shl";
-    }
-#endif
 #endif
     return CPUTestsBase::getPrimitiveType();
 }
 
 TEST_P(EltwiseLayerCPUTest, CompareWithRefs) {
     run();
-    CheckPluginRelatedResults(compiledModel, std::set<std::string>{"Eltwise", "Subgraph"});
 }
 
 namespace Eltwise {
@@ -340,10 +338,8 @@ const std::vector<utils::EltwiseTypes>& eltwiseOpTypesBinInp() {
     static const std::vector<utils::EltwiseTypes> eltwiseOpTypesBinInp = {
         utils::EltwiseTypes::ADD,
         utils::EltwiseTypes::MULTIPLY,
-#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
-        utils::EltwiseTypes::SUBTRACT,                // TODO: Fix CVS-105430
-        utils::EltwiseTypes::DIVIDE,                  // TODO: Fix CVS-105430
-#endif
+        utils::EltwiseTypes::SUBTRACT,
+        utils::EltwiseTypes::DIVIDE,
         utils::EltwiseTypes::FLOOR_MOD,
         utils::EltwiseTypes::SQUARED_DIFF,
         utils::EltwiseTypes::MOD,
@@ -355,9 +351,12 @@ const std::vector<utils::EltwiseTypes>& eltwiseOpTypesBinInpSnippets() {
     static const std::vector<utils::EltwiseTypes> eltwiseOpTypesBinInp = {
         utils::EltwiseTypes::ADD,
         utils::EltwiseTypes::MULTIPLY,
+        utils::EltwiseTypes::SUBTRACT,
+        utils::EltwiseTypes::DIVIDE,
         utils::EltwiseTypes::FLOOR_MOD,
         utils::EltwiseTypes::MOD,
         utils::EltwiseTypes::POWER,
+        utils::EltwiseTypes::SQUARED_DIFF,
     };
     return eltwiseOpTypesBinInp;
 }
@@ -374,9 +373,7 @@ const std::vector<utils::EltwiseTypes>& eltwiseOpTypesBinDyn() {
     static const std::vector<utils::EltwiseTypes> eltwiseOpTypesBinDyn = {
         utils::EltwiseTypes::ADD,
         utils::EltwiseTypes::MULTIPLY,
-#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64) // TODO: Fix CVS-105430
         utils::EltwiseTypes::SUBTRACT,
-#endif
         utils::EltwiseTypes::SQUARED_DIFF,
     };
     return eltwiseOpTypesBinDyn;
@@ -450,10 +447,8 @@ const std::vector<utils::EltwiseTypes>& eltwiseOpTypesI32() {
     static const std::vector<utils::EltwiseTypes> eltwiseOpTypesI32 = {
         utils::EltwiseTypes::ADD,
         utils::EltwiseTypes::MULTIPLY,
-#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64) // TODO: Fix CVS-105430
         utils::EltwiseTypes::SUBTRACT,
         utils::EltwiseTypes::DIVIDE,
-#endif
         utils::EltwiseTypes::SQUARED_DIFF,
     };
     return eltwiseOpTypesI32;

@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -103,6 +103,13 @@ macro(ov_cpack_settings)
         2025.0.0 2025.0.1
         2025.1.0
         2025.2.0
+        2025.3.0
+        2025.4.0
+        2026.0.0
+        2026.1.0
+        2026.2.0
+        2026.3.0
+        2026.4.0
         )
 
     ov_check_conflicts_versions(conflicting_versions)
@@ -207,7 +214,7 @@ macro(ov_cpack_settings)
         set(npu_copyright "generic")
 
         # NPU plugin also builds level-zero as thirdparty
-        # let's add it to the list of dependency search directories to avoid missing dependncy on libze_loader.so.1
+        # let's add it to the list of dependency search directories to avoid missing dependency on libze_loader.so.1
         if(OV_GENERATOR_MULTI_CONFIG)
             # $<CONFIG> generator expression does not work in this place, have to add all possible configs
             foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
@@ -320,6 +327,19 @@ macro(ov_cpack_settings)
             "package-name-doesnt-match-sonames")
         list(APPEND frontends tensorflow_lite)
         set(tensorflow_lite_copyright "generic")
+    endif()
+
+    if(ENABLE_OV_GGUF_FRONTEND)
+        set(CPACK_COMPONENT_GGUF_DESCRIPTION "OpenVINO GGUF Frontend")
+        set(CPACK_COMPONENT_GGUF_DEPENDS "${OV_CPACK_COMP_CORE}")
+        set(CPACK_DEBIAN_GGUF_PACKAGE_NAME "libopenvino-gguf-frontend-${cpack_name_ver}")
+        # since GGUF FE is a linkable target, we need to call ldconfig (i.e. `def_triggers`)
+        set(CPACK_DEBIAN_GGUF_PACKAGE_CONTROL_EXTRA "${def_postinst};${def_postrm};${def_triggers}")
+        ov_debian_add_lintian_suppression(gguf
+            # we have different package name strategy; it suggests libopenvino-gguf-frontend202230
+            "package-name-doesnt-match-sonames")
+        list(APPEND frontends gguf)
+        set(gguf_copyright "generic")
     endif()
 
     #
@@ -440,7 +460,7 @@ macro(ov_cpack_settings)
     # Install latest symlink packages
     #
 
-    # NOTE: we expicitly don't add runtime latest packages
+    # NOTE: we explicitly don't add runtime latest packages
     # since a user needs to depend on specific VERSIONED runtime package
     # with fixed SONAMEs, while latest package can be updated multiple times
     # ov_debian_add_latest_component(libraries)

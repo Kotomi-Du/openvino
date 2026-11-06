@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -21,7 +21,7 @@ struct reverse_sequence_params : public base_params {
 class ReverseSequenceKernelRef : public KernelBaseOpenCL {
 public:
     ReverseSequenceKernelRef() : KernelBaseOpenCL("reverse_sequence_ref") {}
-    virtual ~ReverseSequenceKernelRef() {}
+    ~ReverseSequenceKernelRef() override = default;
     virtual JitConstants GetJitConstants(const reverse_sequence_params& params) const;
     virtual CommonDispatchData SetDefault(const reverse_sequence_params& params) const;
     KernelsData GetKernelsData(const Params& params) const override;

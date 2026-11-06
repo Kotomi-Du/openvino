@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -109,7 +109,6 @@ public:
         referenceFunction = ov::builder::subgraph::ConcatFunction::getReferenceWithDifferentPrecisionOnChildren(
             precision,
             inputShape,
-            testValues.multiChannels,
             testValues.axis,
             testValues.result.fakeQuantize1,
             testValues.result.fakeQuantize2,

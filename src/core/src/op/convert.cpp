@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -250,6 +250,7 @@ bool Convert::has_evaluate() const {
         case element::i32:
         case element::i64:
         case element::u1:
+        case element::u2:
         case element::u4:
         case element::u8:
         case element::u16:

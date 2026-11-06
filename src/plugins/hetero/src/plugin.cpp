@@ -1,9 +1,10 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
 #include "plugin.hpp"
 
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -19,22 +20,180 @@
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/runtime/device_id_parser.hpp"
+#include "openvino/runtime/hsm_format.hpp"
 #include "openvino/runtime/intel_gpu/properties.hpp"
 #include "openvino/runtime/internal_properties.hpp"
 #include "openvino/runtime/properties.hpp"
+#include "openvino/runtime/shared_buffer.hpp"
 #include "openvino/util/common_util.hpp"
+#include "openvino/util/container_util.hpp"
+#include "openvino/util/log.hpp"
+#include "perf_log.hpp"
 #include "properties.hpp"
+#include "remote_context.hpp"
 
 ov::hetero::Plugin::Plugin() {
     set_device_name("HETERO");
+}
+
+std::pair<ov::hetero::SubgraphsMappingInfo, std::vector<ov::hetero::SubmodelInfo>> ov::hetero::Plugin::split_graph(
+    const std::shared_ptr<ov::Model>& model,
+    Configuration config) const {
+    std::vector<ov::hetero::SubmodelInfo> submodels;
+    ov::SupportedOpsMap query_model_result;
+    SubgraphsMappingInfo mapping_info;
+    const std::string model_name = model->get_friendly_name();
+    bool user_set_affinities = false;
+    // Get user defined affinity
+    for (const auto& node : model->get_ordered_ops()) {
+        const auto& rt_info = node->get_rt_info();
+        const auto it = rt_info.find("affinity");
+        if (it != rt_info.end()) {
+            OPENVINO_ASSERT(it->second.is<std::string>(), "Unexpected type of \"affinity\" attribute");
+            query_model_result.emplace(node->get_friendly_name(), it->second.as<std::string>());
+            user_set_affinities = true;
+        }
+    }
+
+    if (user_set_affinities) {
+        // All affinities must be defined by user
+        ov::hetero::SubgraphsVector ordered_subgraphs;
+        std::tie(ordered_subgraphs, mapping_info) =
+            get_model_subgraphs(model, query_model_result, true, m_cfg.dump_dot_files(), "", "user_affinity_partition");
+
+        submodels.resize(ordered_subgraphs.size());
+        for (size_t i = 0; i < ordered_subgraphs.size(); ++i) {
+            const auto& subgraph = ordered_subgraphs[i];
+            submodels[i].first = subgraph._affinity;
+            submodels[i].second = std::make_shared<ov::Model>(subgraph._results,
+                                                              subgraph._sinks,
+                                                              subgraph._parameters,
+                                                              model_name + "_" + std::to_string(i));
+        }
+
+        return {mapping_info, submodels};
+    }
+
+    // Restore properties in order to pass "device priorities" together
+    // with devices properties
+    auto full_properties = config.get_hetero_properties();
+    for (const auto& [device, props] : config.get_device_properties()) {
+        full_properties[device] = props;
+    }
+
+    auto cloned_model = model->clone();
+    std::tie(query_model_result, mapping_info) = query_model_update(cloned_model, full_properties, true);
+
+    ov::hetero::op::DeviceSubgraphVector ordered_subgraphs;
+    for (const auto& op : cloned_model->get_ordered_ops()) {
+        if (const auto& subgraph = ov::as_type_ptr<ov::hetero::op::DeviceSubgraph>(op)) {
+            ordered_subgraphs.push_back(subgraph);
+        } else {
+            OPENVINO_ASSERT(ov::op::util::is_output(op) || ov::op::util::is_parameter(op) || ov::op::util::is_sink(op),
+                            "Unexpected node type found in model after query_model_update()");
+        }
+    }
+
+    submodels.resize(ordered_subgraphs.size());
+    for (size_t i = 0; i < ordered_subgraphs.size(); ++i) {
+        submodels[i].first = ordered_subgraphs[i]->get_affinity();
+        submodels[i].second = ordered_subgraphs[i]->get_function();
+    }
+
+    return {mapping_info, submodels};
 }
 
 std::shared_ptr<ov::ICompiledModel> ov::hetero::Plugin::compile_model(const std::shared_ptr<const ov::Model>& model,
                                                                       const ov::AnyMap& properties) const {
     OV_ITT_SCOPED_TASK(itt::domains::Hetero, "Plugin::compile_model");
 
+    using clock = std::chrono::steady_clock;
+    const auto to_ms = [](clock::duration d) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+    };
+
+    const bool perf_logging_enabled = perf_log_enabled(PerfLogLevel::Summary);
+    clock::time_point t0{};
+    clock::time_point t_clone_start{};
+    clock::time_point t_clone_end{};
+    clock::time_point t_split_start{};
+    clock::time_point t_split_end{};
+    clock::time_point t_context_start{};
+    clock::time_point t_context_end{};
+    clock::time_point t_compiled_model_start{};
+    clock::time_point t_compiled_model_end{};
+    if (perf_logging_enabled) {
+        t0 = clock::now();
+    }
+
     auto config = Configuration{properties, m_cfg};
-    auto compiled_model = std::make_shared<CompiledModel>(model->clone(), shared_from_this(), config);
+    // Core decides on its blob header from the plugin-level flag, so a per-compile false must not override a true.
+    if (m_cfg.export_hsm_format && !config.export_hsm_format) {
+        OPENVINO_DEBUG("[HETERO] Ignoring per-compile ",
+                       ov::hetero::export_hsm_format.name(),
+                       "=false: it is on at the plugin level");
+        config.export_hsm_format = true;
+    }
+
+    if (perf_logging_enabled) {
+        t_clone_start = clock::now();
+    }
+    auto cloned_model = model->clone();
+    if (perf_logging_enabled) {
+        t_clone_end = clock::now();
+    }
+
+    SubgraphsMappingInfo mapping_info;
+    std::vector<ov::hetero::SubmodelInfo> submodels;
+    if (perf_logging_enabled) {
+        t_split_start = clock::now();
+    }
+    std::tie(mapping_info, submodels) = split_graph(cloned_model, config);
+    if (perf_logging_enabled) {
+        t_split_end = clock::now();
+    }
+
+    ov::hetero::RemoteContext::Ptr remote_context;
+    if (perf_logging_enabled) {
+        t_context_start = clock::now();
+    }
+    try {
+        std::map<std::string, ov::SoPtr<ov::IRemoteContext>> contexts_map;
+        for (const auto& [device_name, _] : submodels) {
+            contexts_map.insert({device_name, get_core()->get_default_context(device_name)});
+        }
+        remote_context = std::make_shared<ov::hetero::RemoteContext>(std::move(contexts_map));
+    } catch (const ov::Exception&) {
+    }
+    if (perf_logging_enabled) {
+        t_context_end = clock::now();
+        t_compiled_model_start = t_context_end;
+    }
+
+    auto compiled_model = std::make_shared<CompiledModel>(cloned_model,
+                                                          submodels,
+                                                          mapping_info,
+                                                          shared_from_this(),
+                                                          remote_context,
+                                                          config);
+    if (perf_logging_enabled) {
+        t_compiled_model_end = clock::now();
+        HETERO_PERF_LOG_LEVEL(PerfLogLevel::Summary,
+                              "Plugin::compile_model timing: total=",
+                              to_ms(t_compiled_model_end - t0),
+                              " ms, submodels=",
+                              submodels.size(),
+                              ", clone_model=",
+                              to_ms(t_clone_end - t_clone_start),
+                              " ms, split_graph=",
+                              to_ms(t_split_end - t_split_start),
+                              " ms, create_remote_context=",
+                              to_ms(t_context_end - t_context_start),
+                              " ms, construct_compiled_model=",
+                              to_ms(t_compiled_model_end - t_compiled_model_start),
+                              " ms");
+    }
+
     return compiled_model;
 }
 
@@ -51,22 +210,47 @@ std::shared_ptr<ov::ICompiledModel> ov::hetero::Plugin::import_model(std::istrea
     OPENVINO_NOT_IMPLEMENTED;
 }
 
+namespace {
+// Removes ov::loaded_from_cache from the properties: it is not a device property.
+bool get_loaded_from_cache(ov::AnyMap& properties) {
+    const auto node = properties.extract(ov::loaded_from_cache.name());
+    return !node.empty() && node.mapped().as<bool>();
+}
+}  // namespace
+
 std::shared_ptr<ov::ICompiledModel> ov::hetero::Plugin::import_model(std::istream& model,
                                                                      const ov::AnyMap& properties) const {
     OV_ITT_SCOPED_TASK(itt::domains::Hetero, "Plugin::import_model");
 
-    // check ov::loaded_from_cache property and erase it due to not needed any more.
     auto _properties = properties;
-    const auto& it = _properties.find(ov::loaded_from_cache.name());
-    bool loaded_from_cache = false;
-    if (it != _properties.end()) {
-        loaded_from_cache = it->second.as<bool>();
-        _properties.erase(it);
-    }
+    const auto loaded_from_cache = get_loaded_from_cache(_properties);
 
     auto config = Configuration{_properties, m_cfg};
     auto compiled_model = std::make_shared<CompiledModel>(model, shared_from_this(), config, loaded_from_cache);
     return compiled_model;
+}
+
+std::shared_ptr<ov::ICompiledModel> ov::hetero::Plugin::import_model(const ov::Tensor& model,
+                                                                     const ov::AnyMap& properties) const {
+    if (model.get_byte_size() >= sizeof(ov::runtime::hsm::Header) &&
+        ov::runtime::hsm::Header::view(model.data()).magic == ov::runtime::hsm::BlobMagic::single) {
+        auto _properties = properties;
+        const auto loaded_from_cache = get_loaded_from_cache(_properties);
+        return std::make_shared<CompiledModel>(model,
+                                               shared_from_this(),
+                                               Configuration{_properties, m_cfg},
+                                               loaded_from_cache);
+    }
+
+    ov::SharedStreamBuffer buffer{model.data(), model.get_byte_size()};
+    std::istream stream{&buffer};
+    return import_model(stream, properties);
+}
+
+std::shared_ptr<ov::ICompiledModel> ov::hetero::Plugin::import_model(const ov::Tensor& model,
+                                                                     const ov::SoPtr<ov::IRemoteContext>& context,
+                                                                     const ov::AnyMap& properties) const {
+    OPENVINO_NOT_IMPLEMENTED;
 }
 
 ov::hetero::Plugin::DeviceProperties ov::hetero::Plugin::get_properties_per_device(const std::string& device_priorities,
@@ -104,7 +288,20 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     std::shared_ptr<ov::Model>& model,
     const ov::AnyMap& properties,
     bool allow_exception) const {
+    using clock = std::chrono::steady_clock;
+    const auto to_ms = [](clock::duration d) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+    };
+    const bool perf_logging_enabled = perf_log_enabled(PerfLogLevel::Summary);
+    const bool detailed_perf_logging_enabled = perf_log_enabled(PerfLogLevel::DeviceBreakdown);
+    const bool partition_details_logging_enabled = perf_log_enabled(PerfLogLevel::PartitionDetails);
     std::map<std::string, size_t> available_device_mem_map;
+    clock::time_point t0{};
+    clock::duration query_model_total_time{};
+    clock::duration mask_total_time{};
+    if (perf_logging_enabled) {
+        t0 = clock::now();
+    }
     Configuration full_config{properties, m_cfg};
     DeviceProperties properties_per_device =
         get_properties_per_device(full_config.device_priorities, full_config.get_device_properties());
@@ -123,6 +320,25 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     auto update_supported_ops = [](ov::SupportedOpsMap& final_results, const ov::SupportedOpsMap& device_results) {
         for (const auto& layer_query_result : device_results)
             final_results.emplace(layer_query_result);
+    };
+
+    const auto mask_model_subgraphs_with_optional_context = [&](std::shared_ptr<ov::Model>& target_model,
+                                                                ov::SupportedOpsMap& target_supported_ops,
+                                                                const bool dump_dot_files,
+                                                                const std::string& default_device,
+                                                                const char* stage_prefix,
+                                                                const std::string& device_name) {
+        if (partition_details_logging_enabled) {
+            return ov::hetero::mask_model_subgraphs_by_ops(target_model,
+                                                           target_supported_ops,
+                                                           dump_dot_files,
+                                                           default_device,
+                                                           std::string{stage_prefix} + device_name);
+        }
+        return ov::hetero::mask_model_subgraphs_by_ops(target_model,
+                                                       target_supported_ops,
+                                                       dump_dot_files,
+                                                       default_device);
     };
 
     auto has_subgraph_ops = [](std::shared_ptr<ov::Model>& model) {
@@ -198,48 +414,162 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     }
     model->add_results(new_outputs);
     for (const auto& device_name : device_names) {
+        clock::time_point device_start{};
+        clock::duration device_query_time{};
+        clock::duration device_mask_time{};
+        clock::duration device_clone_time{};
+        if (detailed_perf_logging_enabled) {
+            device_start = clock::now();
+        }
         // If there are some unsupported operations and it is a last device
         // exception should be raised when allowed
         bool fallback_device = (device_name == device_names.back());
         const auto& default_device = (!allow_exception || !fallback_device) ? get_device_name() : "";
         auto& device_config = properties_per_device.at(device_name);
-        if (!has_subgraph_ops(model)) {
+        const bool model_has_subgraph_ops = has_subgraph_ops(model);
+        if (!model_has_subgraph_ops) {
             if (hetero_query_model_by_device)
                 update_config(device_config, model, device_name, fallback_device);
+            clock::time_point t_query_start{};
+            if (perf_logging_enabled) {
+                t_query_start = clock::now();
+            }
             query_results[device_name] = get_core()->query_model(model, device_name, device_config);
+            if (perf_logging_enabled) {
+                const auto t_query_end = clock::now();
+                const auto elapsed = t_query_end - t_query_start;
+                query_model_total_time += elapsed;
+                if (detailed_perf_logging_enabled) {
+                    device_query_time += elapsed;
+                }
+            }
             update_supported_ops(supported_ops_temp, query_results[device_name]);
             update_supported_ops(supported_ops_final, query_results[device_name]);
-            mapping_info = ov::hetero::mask_model_subgraphs_by_ops(model,
-                                                                   supported_ops_temp,
-                                                                   m_cfg.dump_dot_files(),
-                                                                   default_device);
+            clock::time_point t_mask_start{};
+            if (perf_logging_enabled) {
+                t_mask_start = clock::now();
+            }
+            mapping_info = mask_model_subgraphs_with_optional_context(model,
+                                                                      supported_ops_temp,
+                                                                      m_cfg.dump_dot_files(),
+                                                                      default_device,
+                                                                      "initial_partition stage_device=",
+                                                                      device_name);
+            if (perf_logging_enabled) {
+                const auto t_mask_end = clock::now();
+                const auto elapsed = t_mask_end - t_mask_start;
+                mask_total_time += elapsed;
+                if (detailed_perf_logging_enabled) {
+                    device_mask_time += elapsed;
+                }
+            }
         } else {
             // Mask supported nodes and left nodes to Subgraph in graph, and query model use subgraph, keep the
             // model in query_model same as compile
+            clock::time_point t_clone_start{};
+            if (detailed_perf_logging_enabled) {
+                t_clone_start = clock::now();
+            }
             auto temp_model = model->clone();
+            if (detailed_perf_logging_enabled) {
+                device_clone_time += clock::now() - t_clone_start;
+            }
             update_supported_ops(supported_ops_temp_1, supported_ops_temp);
             for (auto&& node : temp_model->get_ops()) {
                 supported_ops_temp_1.emplace(node->get_friendly_name(), "HETERO-TEMP");
             }
-            auto mapping_info_temp =
-                ov::hetero::mask_model_subgraphs_by_ops(temp_model, supported_ops_temp_1, false, default_device);
+            clock::time_point t_temp_mask_start{};
+            if (perf_logging_enabled) {
+                t_temp_mask_start = clock::now();
+            }
+            auto mapping_info_temp = mask_model_subgraphs_with_optional_context(temp_model,
+                                                                                supported_ops_temp_1,
+                                                                                false,
+                                                                                default_device,
+                                                                                "temp_partition stage_device=",
+                                                                                device_name);
+            if (perf_logging_enabled) {
+                const auto t_temp_mask_end = clock::now();
+                const auto elapsed = t_temp_mask_end - t_temp_mask_start;
+                mask_total_time += elapsed;
+                if (detailed_perf_logging_enabled) {
+                    device_mask_time += elapsed;
+                }
+            }
+            (void)mapping_info_temp;
             for (const auto& op : temp_model->get_ordered_ops()) {
                 if (const auto& subgraph = ov::as_type_ptr<ov::hetero::op::DeviceSubgraph>(op)) {
                     if (subgraph->get_affinity() == "HETERO-TEMP") {
                         if (hetero_query_model_by_device)
                             update_config(device_config, subgraph->get_function(), device_name, fallback_device);
+                        clock::time_point t_query_start{};
+                        if (perf_logging_enabled) {
+                            t_query_start = clock::now();
+                        }
                         query_results[device_name] =
                             get_core()->query_model(subgraph->get_function(), device_name, device_config);
+                        if (perf_logging_enabled) {
+                            const auto t_query_end = clock::now();
+                            const auto elapsed = t_query_end - t_query_start;
+                            query_model_total_time += elapsed;
+                            if (detailed_perf_logging_enabled) {
+                                device_query_time += elapsed;
+                            }
+                        }
                         update_supported_ops(supported_ops_temp, query_results[device_name]);
                         update_supported_ops(supported_ops_final, query_results[device_name]);
                     }
                 }
             }
-            mapping_info = ov::hetero::mask_model_subgraphs_by_ops(model,
-                                                                   supported_ops_temp,
-                                                                   m_cfg.dump_dot_files(),
-                                                                   default_device);
+            clock::time_point t_final_mask_start{};
+            if (perf_logging_enabled) {
+                t_final_mask_start = clock::now();
+            }
+            mapping_info = mask_model_subgraphs_with_optional_context(model,
+                                                                      supported_ops_temp,
+                                                                      m_cfg.dump_dot_files(),
+                                                                      default_device,
+                                                                      "final_partition stage_device=",
+                                                                      device_name);
+            if (perf_logging_enabled) {
+                const auto t_final_mask_end = clock::now();
+                const auto elapsed = t_final_mask_end - t_final_mask_start;
+                mask_total_time += elapsed;
+                if (detailed_perf_logging_enabled) {
+                    device_mask_time += elapsed;
+                }
+            }
         }
+        if (detailed_perf_logging_enabled) {
+            const bool final_has_subgraph_ops = has_subgraph_ops(model);
+            const auto device_end = clock::now();
+            HETERO_PERF_LOG_LEVEL(PerfLogLevel::DeviceBreakdown,
+                                  "Plugin::query_model_update device timing: stage_device=",
+                                  device_name,
+                                  ", total=",
+                                  to_ms(device_end - device_start),
+                                  " ms, query_supported_ops=",
+                                  to_ms(device_query_time),
+                                  " ms, partition_and_rewrite_model=",
+                                  to_ms(device_mask_time),
+                                  " ms, temp_model_clone=",
+                                  to_ms(device_clone_time),
+                                  " ms, has_device_subgraphs=",
+                                  final_has_subgraph_ops ? 1 : 0);
+        }
+    }
+    if (perf_logging_enabled) {
+        const auto t_end = clock::now();
+        HETERO_PERF_LOG_LEVEL(PerfLogLevel::Summary,
+                              "Plugin::query_model_update timing: total=",
+                              to_ms(t_end - t0),
+                              " ms, devices=",
+                              device_names.size(),
+                              ", query_supported_ops_total=",
+                              to_ms(query_model_total_time),
+                              " ms, partition_and_rewrite_model_total=",
+                              to_ms(mask_total_time),
+                              " ms");
     }
     return {supported_ops_final, mapping_info};
 }
@@ -282,12 +612,20 @@ ov::Any ov::hetero::Plugin::get_property(const std::string& name, const ov::AnyM
         supported_properties.insert(supported_properties.end(), rw_properties.begin(), rw_properties.end());
         return decltype(ov::supported_properties)::value_type(std::move(supported_properties));
     } else if (ov::internal::supported_properties == name) {
-        return decltype(ov::internal::supported_properties)::value_type{
-            ov::PropertyName{ov::internal::caching_properties.name(), ov::PropertyMutability::RO}};
+        decltype(ov::internal::supported_properties)::value_type internal_properties{
+            ov::PropertyName{ov::internal::caching_properties.name(), ov::PropertyMutability::RO},
+            ov::PropertyName{ov::internal::emit_hsm_format.name(), ov::PropertyMutability::RO}};
+        if (full_config.export_hsm_format) {
+            // Core then hands over a mapped cache blob, which the sub-devices can import without a copy.
+            internal_properties.emplace_back(ov::internal::caching_with_mmap.name(), ov::PropertyMutability::RO);
+        }
+        return internal_properties;
     } else if (ov::device::full_name == name) {
         return decltype(ov::device::full_name)::value_type{get_device_name()};
     } else if (ov::internal::caching_properties == name) {
         return decltype(ov::internal::caching_properties)::value_type{ov::hetero::caching_device_properties.name()};
+    } else if (ov::internal::emit_hsm_format == name) {
+        return decltype(ov::internal::emit_hsm_format)::value_type{full_config.export_hsm_format};
     } else if (ov::hetero::caching_device_properties == name) {
         return caching_device_properties(full_config.device_priorities);
     } else if (ov::device::capabilities == name) {

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <numeric>
 
@@ -16,7 +17,10 @@
 #include "memory_desc/blocked_memory_desc.h"
 #include "memory_desc/cpu_memory_desc.h"
 #include "openvino/core/except.hpp"
+#include "openvino/core/memory_util.hpp"
+#include "openvino/core/shape_util.hpp"
 #include "openvino/core/type/element_type.hpp"
+#include "openvino/util/math_util.hpp"
 #include "utils/general_utils.h"
 
 namespace ov::intel_cpu {
@@ -43,6 +47,10 @@ CpuBlockedMemoryDesc::CpuBlockedMemoryDesc(ov::element::Type prc,
             return val == Shape::UNDEFINED_DIM;
         })) {
         OPENVINO_THROW("CpuBlockedMemoryDesc do not support undefined order.");
+    }
+
+    if (blockedDims.size() < shape.getRank()) {
+        OPENVINO_THROW("Can't create CpuBlockedMemoryDesc. Blocked dims has rank less than planar dims");
     }
 
     if (std::any_of(blockedDims.begin() + shape.getRank(), blockedDims.end(), [](size_t val) {
@@ -88,12 +96,9 @@ CpuBlockedMemoryDesc::CpuBlockedMemoryDesc(ov::element::Type prc,
         this->strides = strides;
     }
 
-    if (!everyone_is(this->order.size(),
-                     this->blockedDims.size(),
-                     this->offsetPaddingToData.size(),
-                     this->strides.size())) {
-        OPENVINO_THROW("Order, blocked dims, offset padding to data and strides must have equals size");
-    }
+    OPENVINO_ASSERT(
+        all_of(this->order.size(), this->blockedDims.size(), this->offsetPaddingToData.size(), this->strides.size()),
+        "Order, blocked dims, offset padding to data and strides must have equals size");
 }
 
 bool CpuBlockedMemoryDesc::isDefinedImp() const {
@@ -150,11 +155,16 @@ bool CpuBlockedMemoryDesc::canComputeMemSizeZeroDims() const {
 }
 
 size_t CpuBlockedMemoryDesc::getCurrentMemSizeImp() const {
-    auto e_size = getOffsetPadding();  // size in bytes (from begin of data to last element)
+    size_t e_size = getOffsetPadding();  // elements from begin of data to the last addressed element
     if (!getShape().hasZeroDims()) {
-        e_size += 1;
+        OPENVINO_ASSERT(!ov::util::add_overflow(e_size, static_cast<size_t>(1), e_size),
+                        "CpuBlockedMemoryDesc::getCurrentMemSizeImp overflow while adding tail element");
         for (size_t j = 0; j < getBlockDims().size(); j++) {
-            e_size += (getBlockDims()[j] - 1) * getStrides()[j];
+            const auto dim_stride = ov::util::shape_size_safe(ov::Shape{getBlockDims()[j] - 1, getStrides()[j]});
+            OPENVINO_ASSERT(dim_stride.has_value(),
+                            "CpuBlockedMemoryDesc::getCurrentMemSizeImp overflow while multiplying dim and stride");
+            OPENVINO_ASSERT(!ov::util::add_overflow(e_size, *dim_stride, e_size),
+                            "CpuBlockedMemoryDesc::getCurrentMemSizeImp overflow while accumulating element count");
         }
     }
 
@@ -164,20 +174,14 @@ size_t CpuBlockedMemoryDesc::getCurrentMemSizeImp() const {
         return e_size;
     }
 
-    auto byte_size = e_size * prc.bitwidth();
-
-    if (one_of(prc, ov::element::u3, ov::element::u6)) {
-        constexpr size_t storage_unit_size = 24;
-        byte_size += storage_unit_size - 1;
-        byte_size /= storage_unit_size;
-        byte_size *= 3;
-    } else {
-        constexpr size_t storage_unit_size = 8;
-        byte_size += storage_unit_size - 1;
-        byte_size /= storage_unit_size;
-    }
-
-    return byte_size;
+    const auto byte_size = ov::util::get_memory_size_safe(prc, e_size);
+    OPENVINO_ASSERT(byte_size.has_value(),
+                    "CpuBlockedMemoryDesc::getCurrentMemSizeImp overflow while converting elements to byte size");
+    OPENVINO_ASSERT(*byte_size <= static_cast<size_t>(std::numeric_limits<ptrdiff_t>::max()),
+                    "CpuBlockedMemoryDesc::getCurrentMemSizeImp requested allocation size { ",
+                    *byte_size,
+                    " } exceeds PTRDIFF_MAX");
+    return *byte_size;
 }
 
 size_t CpuBlockedMemoryDesc::getMaxMemSize() const {
@@ -200,9 +204,8 @@ size_t CpuBlockedMemoryDesc::getOffset(const VectorDims& v) const {
     VectorDims off_v = v;
 
     size_t n_blocked_dims = order.size();
-    if (blockedDims.size() != n_blocked_dims || strides.size() != n_blocked_dims) {
-        OPENVINO_THROW("Cannot calculate offset. Incorrect primitive descriptor!");
-    }
+    OPENVINO_ASSERT(all_of(n_blocked_dims, blockedDims.size(), strides.size()),
+                    "Cannot calculate offset. Incorrect primitive descriptor!");
     VectorDims blockedShift(n_blocked_dims);
     for (size_t i = 1; i <= n_blocked_dims; i++) {
         blockedShift[n_blocked_dims - i] = off_v[order[n_blocked_dims - i]] % blockedDims[n_blocked_dims - i];
@@ -269,10 +272,7 @@ bool CpuBlockedMemoryDesc::isBlockedCFormat(size_t blk_size) const {
     if (order.back() != 1) {
         return false;
     }
-    if (blockedDims.back() != blk_size) {
-        return false;
-    }
-    return true;
+    return blockedDims.back() == blk_size;
 }
 
 bool CpuBlockedMemoryDesc::isTailCFormat() const {
@@ -285,10 +285,7 @@ bool CpuBlockedMemoryDesc::isTailCFormat() const {
     if (!std::is_sorted(order.begin(), --order.end())) {
         return false;
     }
-    if (order.back() != 1) {
-        return false;
-    }
-    return true;
+    return order.back() == 1;
 }
 
 MemoryDescPtr CpuBlockedMemoryDesc::cloneWithNewDimsImp(const VectorDims& dims) const {
@@ -299,7 +296,7 @@ MemoryDescPtr CpuBlockedMemoryDesc::cloneWithNewDimsImp(const VectorDims& dims) 
     }
 
     // TODO [DS]: add stride recalculation for strided blobs
-    for (int i = strides.size() - 2; i >= 0; i--) {
+    for (auto i = static_cast<int>(strides.size() - 2); i >= 0; i--) {
         if (strides[i] == Shape::UNDEFINED_DIM) {
             break;
         }

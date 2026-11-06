@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -66,6 +66,7 @@ _OPENVINO_OP_REG(Split, op::v1)
 _OPENVINO_OP_REG(Reshape, op::v1)
 _OPENVINO_OP_REG(Select, op::v1)
 _OPENVINO_OP_REG(GatherTree, op::v1)
+_OPENVINO_OP_REG(Subtract, op::v1)
 
 _OPENVINO_OP_REG(Assign, op::v3)
 _OPENVINO_OP_REG(Bucketize, op::v3)
@@ -81,6 +82,7 @@ _OPENVINO_OP_REG(ScatterNDUpdate, op::v3)
 _OPENVINO_OP_REG(ShapeOf, op::v3)
 
 _OPENVINO_OP_REG(CTCLoss, op::v4)
+_OPENVINO_OP_REG(Interpolate, op::v4)
 _OPENVINO_OP_REG(LSTMCell, op::v4)
 _OPENVINO_OP_REG(NonMaxSuppression, op::v4)
 _OPENVINO_OP_REG(Proposal, op::v4)
@@ -176,12 +178,21 @@ _OPENVINO_OP_REG(BitwiseRightShift, ov::op::v15)
 _OPENVINO_OP_REG(SliceScatter, ov::op::v15)
 _OPENVINO_OP_REG(SearchSorted, ov::op::v15)
 
+_OPENVINO_OP_REG(AvgPool, ov::op::v16)
+_OPENVINO_OP_REG(ErfInv, ov::op::v17)
+_OPENVINO_OP_REG(GroupedMatMul, ov::op::v17)
+_OPENVINO_OP_REG(Histc, ov::op::v17)
 _OPENVINO_OP_REG(Identity, ov::op::v16)
 _OPENVINO_OP_REG(ISTFT, ov::op::v16)
 _OPENVINO_OP_REG(SegmentMax, ov::op::v16)
 _OPENVINO_OP_REG(SparseFillEmptyRows, ov::op::v16)
+_OPENVINO_OP_REG(OneHot, ov::op::v16)
+_OPENVINO_OP_REG(RGBtoNV12, ov::op::v17)
+_OPENVINO_OP_REG(BGRtoNV12, ov::op::v17)
 
 _OPENVINO_OP_REG(AUGRUCell, ov::op::internal)
 _OPENVINO_OP_REG(AUGRUSequence, ov::op::internal)
+_OPENVINO_OP_REG(GatedDeltaNet, ov::op::internal)
 _OPENVINO_OP_REG(RMS, ov::op::internal)
 _OPENVINO_OP_REG(RMSNorm, ov::op::internal)
+_OPENVINO_OP_REG(PagedAttentionExtension, ov::op)

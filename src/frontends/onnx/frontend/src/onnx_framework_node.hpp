@@ -1,18 +1,6 @@
-//*****************************************************************************
-// Copyright (C) 2017-2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//*****************************************************************************
 
 #pragma once
 
@@ -26,9 +14,7 @@ namespace ONNX_NAMESPACE {
 class ModelProto;
 }  // namespace ONNX_NAMESPACE
 
-namespace ov {
-namespace frontend {
-namespace onnx {
+namespace ov::frontend::onnx {
 class Model;
 
 class ONNXFrameworkNode : public ov::op::util::FrameworkNode {
@@ -52,6 +38,10 @@ public:
             ov_nodes.resize(get_output_size());
         }
         return ov_nodes;
+    }
+
+    int64_t opset_version() const {
+        return m_node.opset_version();
     }
 
     virtual std::shared_ptr<ov::Node> clone_with_new_inputs(const ov::OutputVector& inputs) const override;
@@ -98,6 +88,7 @@ private:
 // which are inserted into ov::Model due to different lifetime and problematic sharing between dynamic libs.
 class NotSupportedONNXNode : public ov::op::util::FrameworkNode {
     static constexpr const char* failed_conversion_key = "onnx::NotSupportedONNXNode::failed_conversion_key";
+    static constexpr const char* opset_version_key = "onnx::NotSupportedONNXNode::opset_version_key";
 
 public:
     OPENVINO_OP("NotSupportedONNXNode", "util", ov::op::util::FrameworkNode);
@@ -106,24 +97,30 @@ public:
                          const size_t output_size,
                          const std::string& domain,
                          const std::string& op_type,
+                         int64_t opset_version,
                          const std::string& additional_error_message)
         : ov::op::util::FrameworkNode(inputs, output_size) {
         ov::op::util::FrameworkNodeAttrs attrs;
         attrs.set_opset_name(domain);
         attrs.set_type_name(op_type);
         attrs[failed_conversion_key] = additional_error_message;
+        attrs[opset_version_key] = std::to_string(opset_version);
         set_attrs(attrs);
     }
 
     std::string additional_error_message() const {
-        auto attrs = get_attrs();
-        return attrs[failed_conversion_key];
+        const auto& attrs = get_attrs();
+        return attrs.at(failed_conversion_key);
+    }
+
+    int64_t opset_version() const {
+        const auto& attrs = get_attrs();
+        auto it = attrs.find(opset_version_key);
+        return (it != attrs.end()) ? std::stoll(it->second) : -1;
     }
 
     virtual std::shared_ptr<ov::Node> clone_with_new_inputs(const ov::OutputVector& inputs) const override;
     virtual bool visit_attributes(ov::AttributeVisitor& visitor) override;
 };
 
-}  // namespace onnx
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::onnx

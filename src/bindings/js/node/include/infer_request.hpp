@@ -1,23 +1,27 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
+//
 
 #pragma once
 #include <napi.h>
 
 #include <thread>
 
+#include "node/include/helper.hpp"
 #include "openvino/runtime/infer_request.hpp"
 
 struct TsfnContext {
-    TsfnContext(Napi::Env env) : deferred(Napi::Promise::Deferred::New(env)), _ir(nullptr){};
+    TsfnContext(Napi::Env env, const ov::InferRequest& infer_request)
+        : deferred(Napi::Promise::Deferred::New(env)),
+          _ir(infer_request) {};
 
     std::thread native_thread;
 
     Napi::Promise::Deferred deferred;
     Napi::ThreadSafeFunction tsfn;
 
-    ov::InferRequest* _ir;
-    std::vector<ov::Tensor> _inputs;
+    ov::InferRequest _ir;
+    ParsedInputData _inputs;
     std::map<std::string, ov::Tensor> result;
 };
 
@@ -123,5 +127,3 @@ private:
 };
 
 void FinalizerCallback(Napi::Env env, void* finalizeData, TsfnContext* context);
-
-void performInferenceThread(TsfnContext* context);

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -36,7 +36,7 @@ struct arg_max_min_params : public base_params {
 class ArgMaxMinKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~ArgMaxMinKernelBase() {}
+    ~ArgMaxMinKernelBase() override = default;
 
     struct DispatchData : public CommonDispatchData {
     };

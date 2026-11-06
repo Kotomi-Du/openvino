@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2018-2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -14,7 +14,7 @@ public:
     using Parent = ConvolutionKernelBase;
 
     ConvolutionKernel_bfyx_1x1_gemm_buf() : ConvolutionKernelBase("convolution_gpu_bfyx_1x1_hgemm_buf_16x1") {}
-    virtual ~ConvolutionKernel_bfyx_1x1_gemm_buf() {}
+    ~ConvolutionKernel_bfyx_1x1_gemm_buf() override = default;
 
     KernelsData GetKernelsData(const Params& params) const override;
     KernelsPriority GetKernelsPriority(const Params& params) const override;

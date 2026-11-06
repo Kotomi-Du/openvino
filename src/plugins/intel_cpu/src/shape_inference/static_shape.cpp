@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -46,7 +46,7 @@ StaticShape::StaticShapeAdapter() = default;
 StaticShape::StaticShapeAdapter(const TDims& dims) : m_dims{dims} {}
 StaticShape::StaticShapeAdapter(TDims&& dims) noexcept : m_dims{std::move(dims)} {}
 StaticShape::StaticShapeAdapter(const StaticShape& other) : StaticShapeAdapter(*other) {}
-StaticShape::StaticShapeAdapter(const ov::PartialShape& /*unused*/) {
+StaticShape::StaticShapeAdapter([[maybe_unused]] const ov::PartialShape& shape) {
     partial_shape_convert_throw();
 }
 
@@ -143,7 +143,7 @@ bool StaticShape::broadcast_merge_into(StaticShape& dst,
 
 //-- Shape as reference
 StaticShapeRef::StaticShapeAdapter(const StaticShape& shape) : m_dims{&(*shape)} {}
-StaticShapeRef::StaticShapeAdapter(const ov::PartialShape& /*unused*/) {
+StaticShapeRef::StaticShapeAdapter([[maybe_unused]] const ov::PartialShape& shape) {
     partial_shape_convert_throw();
 }
 
@@ -183,11 +183,13 @@ void NodeValidationFailure::create(const char* file,
                                    const char* check_string,
                                    std::pair<const Node*, const std::vector<intel_cpu::StaticShape>*>&& ctx,
                                    const std::string& explanation) {
-    throw ov::NodeValidationFailure(make_what(file,
-                                              line,
-                                              check_string,
-                                              node_validation_failure_loc_string(ctx.first),
-                                              ov::op::validate::shape_infer_explanation_str(*ctx.second, explanation)));
+    auto context = std::move(ctx);
+    throw ov::NodeValidationFailure(
+        make_what(file,
+                  line,
+                  check_string,
+                  node_validation_failure_loc_string(context.first),
+                  ov::op::validate::shape_infer_explanation_str(*context.second, explanation)));
 }
 
 template <>
@@ -196,10 +198,12 @@ void NodeValidationFailure::create(const char* file,
                                    const char* check_string,
                                    std::pair<const Node*, const std::vector<intel_cpu::StaticShapeRef>*>&& ctx,
                                    const std::string& explanation) {
-    throw ov::NodeValidationFailure(make_what(file,
-                                              line,
-                                              check_string,
-                                              node_validation_failure_loc_string(ctx.first),
-                                              ov::op::validate::shape_infer_explanation_str(*ctx.second, explanation)));
+    auto context = std::move(ctx);
+    throw ov::NodeValidationFailure(
+        make_what(file,
+                  line,
+                  check_string,
+                  node_validation_failure_loc_string(context.first),
+                  ov::op::validate::shape_infer_explanation_str(*context.second, explanation)));
 }
 }  // namespace ov

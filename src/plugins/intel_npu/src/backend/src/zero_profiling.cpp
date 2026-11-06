@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -35,13 +35,21 @@ struct ZeProfilingTypeId<uint8_t> {
 };
 
 bool ProfilingPool::create() {
-    auto ret =
-        _init_structs->getProfilingDdiTable().pfnProfilingPoolCreate(_graph->get_handle(), _profiling_count, &_handle);
+    // To avoid  dynamic infer flow + perf_count_enabled calling static_cast<ze_graph_handle_t> which is not supported
+    // in dynamic graph
+    if (_graph->get_kind() == GraphKind::Dynamic) {
+        return false;
+    }
+
+    auto ret = _init_structs->getProfilingDdiTable().pfnProfilingPoolCreate(
+        static_cast<ze_graph_handle_t>(_graph->get_handle()),
+        _profiling_count,
+        &_handle);
     return ((ZE_RESULT_SUCCESS == ret) && (_handle != nullptr));
 }
 
 ProfilingPool::~ProfilingPool() {
-    if (_handle) {
+    if (_handle && _init_structs->getContext()) {
         _init_structs->getProfilingDdiTable().pfnProfilingPoolDestroy(_handle);
     }
 }
@@ -61,7 +69,7 @@ LayerStatistics ProfilingQuery::getLayerStatistics() const {
 }
 
 ProfilingQuery::~ProfilingQuery() {
-    if (_handle) {
+    if (_handle && _init_structs->getContext()) {
         _init_structs->getProfilingDdiTable().pfnProfilingQueryDestroy(_handle);
     }
 }
@@ -111,7 +119,8 @@ void ProfilingQuery::verifyProfilingProperties() const {
         return std::to_string(ZE_MAJOR_VERSION(version)) + "." + std::to_string(ZE_MINOR_VERSION(version));
     };
 
-    ze_device_profiling_data_properties_t profProp;
+    ze_device_profiling_data_properties_t profProp = {};
+    profProp.stype = ZE_STRUCTURE_TYPE_DEVICE_PROFILING_DATA_PROPERTIES;
     getProfilingProperties(&profProp);
     const auto currentProfilingVersion = ze_profiling_data_ext_version_t::ZE_PROFILING_DATA_EXT_VERSION_CURRENT;
 
@@ -164,21 +173,24 @@ NpuInferStatistics NpuInferProfiling::getNpuInferStatistics() const {
         std::chrono::microseconds(convertCCtoUS(_npu_infer_stats_accu_cc / _npu_infer_stats_cnt)),
         "AVG",
         "AVG",
-        "AVG"};
+        "AVG",
+        std::chrono::microseconds::zero()};
     npuPerfCounts.push_back(std::move(info_avg));
     ov::ProfilingInfo info_min = {ov::ProfilingInfo::Status::EXECUTED,
                                   std::chrono::microseconds(convertCCtoUS(_npu_infer_stats_min_cc)),
                                   std::chrono::microseconds(convertCCtoUS(_npu_infer_stats_min_cc)),
                                   "MIN",
                                   "MIN",
-                                  "MIN"};
+                                  "MIN",
+                                  std::chrono::microseconds::zero()};
     npuPerfCounts.push_back(std::move(info_min));
     ov::ProfilingInfo info_max = {ov::ProfilingInfo::Status::EXECUTED,
                                   std::chrono::microseconds(convertCCtoUS(_npu_infer_stats_max_cc)),
                                   std::chrono::microseconds(convertCCtoUS(_npu_infer_stats_max_cc)),
                                   "MAX",
                                   "MAX",
-                                  "MAX"};
+                                  "MAX",
+                                  std::chrono::microseconds::zero()};
     npuPerfCounts.push_back(std::move(info_max));
     return npuPerfCounts;
 }
@@ -237,14 +249,18 @@ int64_t NpuInferProfiling::convertCCtoUS(int64_t val_cc) const {
 
 NpuInferProfiling::~NpuInferProfiling() {
     /// deallocate npu_ts_infer_start and npu_ts_infer_end, allocated externally by ze driver
+    auto context = _init_structs->getContext();
+    if (context == nullptr) {
+        return;
+    }
     if (npu_ts_infer_start != nullptr) {
-        auto ze_ret = zeMemFree(_init_structs->getContext(), npu_ts_infer_start);
+        auto ze_ret = zeMemFree(context, npu_ts_infer_start);
         if (ZE_RESULT_SUCCESS != ze_ret) {
             _logger.error("zeMemFree on npu_ts_infer_start failed %#X", uint64_t(ze_ret));
         }
     }
     if (npu_ts_infer_end != nullptr) {
-        auto ze_ret = zeMemFree(_init_structs->getContext(), npu_ts_infer_end);
+        auto ze_ret = zeMemFree(context, npu_ts_infer_end);
         if (ZE_RESULT_SUCCESS != ze_ret) {
             _logger.error("zeMemFree on npu_ts_infer_end failed %#X", uint64_t(ze_ret));
         }

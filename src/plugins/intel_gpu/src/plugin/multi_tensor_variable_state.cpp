@@ -1,4 +1,4 @@
-// Copyright (C) 2024 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -24,7 +24,7 @@ namespace ov::intel_gpu {
 MultiTensorState::MultiTensorState(const std::vector<VariableStateInfo>& infos,
                                    std::shared_ptr<RemoteContextImpl> context,
                                    ShapePredictor::Ptr shape_predictor) : ov::intel_gpu::VariableStateBase(infos[0].m_id, context) {
-    for (auto& info : infos) {
+    for (const auto& info : infos) {
         m_hidden_states.push_back(std::make_shared<VariableState>(info, context, shape_predictor));
     }
 }
@@ -39,6 +39,7 @@ VariableStateIndirectKVCache::VariableStateIndirectKVCache(const VariableStateIn
     , m_concat_axis(concat_axis) {
     cldnn::layout beam_table_layout(get_beam_table_shape(info.m_layout.get_partial_shape()), ov::element::i32, cldnn::format::bfyx);
     VariableStateInfo beam_table_state_info(info.m_id + "/beam_table", beam_table_layout);
+    beam_table_state_info.m_release_variable_inst = info.m_release_variable_inst;
     m_hidden_states.push_back(std::make_shared<VariableState>(beam_table_state_info, context, shape_predictor));
     OPENVINO_ASSERT(m_hidden_states.size() == 2, "[GPU] VariableStateIndirectKVCache expects 2 internal states to be initialized");
 }
@@ -86,21 +87,28 @@ static void rearrange_cache(cldnn::memory::ptr kv_in_mem, cldnn::memory::ptr bt_
         for (size_t f = 0; f < kv_shape[1]; f++) {
             for (size_t y = 0; y < kv_shape[2]; y++) {
                 for (size_t x = 0; x < kv_shape[3]; x++) {
-                    auto out_idx = std::vector<int>{static_cast<int>(b), static_cast<int>(f), static_cast<int>(y), static_cast<int>(x)};
+                    auto out_idx = std::vector<ov::Dimension::value_type>{static_cast<ov::Dimension::value_type>(b),
+                                                                          static_cast<ov::Dimension::value_type>(f),
+                                                                          static_cast<ov::Dimension::value_type>(y),
+                                                                          static_cast<ov::Dimension::value_type>(x)};
 
                     size_t b_kv = bt_in_ptr[b * kv_shape[concat_axis] + out_idx[concat_axis]]; // bt_idx = b * total_seq_len + seq_len_idx
-                    auto in_idx = std::vector<int>{static_cast<int>(b_kv), static_cast<int>(f), static_cast<int>(y), static_cast<int>(x)};
+                    auto in_idx = std::vector<ov::Dimension::value_type>{static_cast<ov::Dimension::value_type>(b_kv),
+                                                                         static_cast<ov::Dimension::value_type>(f),
+                                                                         static_cast<ov::Dimension::value_type>(y),
+                                                                         static_cast<ov::Dimension::value_type>(x)};
 
-                    cldnn::tensor in(cldnn::format::bfyx, in_idx, 0);
-                    cldnn::tensor out(cldnn::format::bfyx, out_idx, 0);
+                    cldnn::tensor in(cldnn::format::bfyx, in_idx, static_cast<ov::Dimension::value_type>(0));
+                    cldnn::tensor out(cldnn::format::bfyx, out_idx, static_cast<ov::Dimension::value_type>(0));
 
                     size_t out_offset = kv_out_mem->get_layout().get_linear_offset(out);
                     size_t in_offset = kv_layout.get_linear_offset(in);
 
-                    if (ov::element::Type(kv_layout.data_type).size() == 2)
+                    if (ov::element::Type(kv_layout.data_type).size() == 2) {
                         copy_element<uint16_t>(kv_in_ptr.data(), kv_out_ptr.data(), in_offset, out_offset);
-                    else if (ov::element::Type(kv_layout.data_type).size() == 2)
+                    } else if (ov::element::Type(kv_layout.data_type).size() == 4) {
                         copy_element<uint32_t>(kv_in_ptr.data(), kv_out_ptr.data(), in_offset, out_offset);
+                    }
                 }
             }
         }
@@ -122,9 +130,8 @@ ov::SoPtr<ov::ITensor> VariableStateIndirectKVCache::get_state() const {
         convert_and_copy(tmp_mem, tensor._ptr.get(), m_context->get_engine().get_service_stream());
 
         return tensor;
-    } else {
-        return m_hidden_states[0]->get_state();
     }
+    return m_hidden_states[0]->get_state();
 }
 
 void VariableStateIndirectKVCache::set_memory(const cldnn::memory::ptr& new_mem, const cldnn::layout& actual_layout) {
@@ -158,7 +165,7 @@ VariableStateIndirectKVCacheCompressed::VariableStateIndirectKVCacheCompressed(
     const std::vector<cldnn::layout>& output_layouts,
     size_t beam_idx,
     size_t concat_idx,
-    bool has_zp_state = false)
+    bool has_zp_state)
     : VariableStateIndirectKVCache(info, context, shape_predictor, beam_idx, concat_idx),
       m_has_zp_state(has_zp_state) {
     OPENVINO_ASSERT((has_zp_state && output_layouts.size() == 3) ||

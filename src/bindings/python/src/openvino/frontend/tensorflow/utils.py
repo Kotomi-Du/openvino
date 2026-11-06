@@ -1,16 +1,17 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 # flake8: noqa
 # mypy: ignore-errors
 
 
+import importlib
 import logging as log
 import numpy as np
 import sys
 from openvino import PartialShape, Dimension, Type
 from packaging.version import parse, Version
-from typing import List, Dict, Union
+from typing import Union
 
 
 # TODO: reuse this method in ovc and remove duplication
@@ -88,9 +89,7 @@ def get_environment_setup(framework):
     env_setup['python_version'] = python_version
     try:
         if framework == 'tf':
-            exec("import tensorflow")
-            env_setup['tensorflow'] = get_imported_module_version(sys.modules["tensorflow"])
-            exec("del tensorflow")
+            env_setup['tensorflow'] = get_imported_module_version(importlib.import_module("tensorflow"))
     except (AttributeError, ImportError):
         pass
     env_setup['sys_platform'] = sys.platform
@@ -292,7 +291,7 @@ def trace_tf_model(model, input_shapes, input_types, example_input):
 
         input_needs_packing = True
 
-    def are_shapes_defined(shape: Union[List, Dict]):
+    def are_shapes_defined(shape: Union[list, dict]):
         if shape is None:
             return False
         assert hasattr(shape, '__len__')

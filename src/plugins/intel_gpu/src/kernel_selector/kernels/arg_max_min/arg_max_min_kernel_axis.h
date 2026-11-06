@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -10,7 +10,7 @@ namespace kernel_selector {
 class ArgMaxMinKernelAxis : public ArgMaxMinKernelBase {
 public:
     ArgMaxMinKernelAxis() : ArgMaxMinKernelBase("arg_max_min_axis") {}
-    virtual ~ArgMaxMinKernelAxis() {}
+    ~ArgMaxMinKernelAxis() override = default;
 
     JitConstants GetJitConstants(const arg_max_min_params& params) const override;
     DispatchData SetDefault(const arg_max_min_params& params) const override;

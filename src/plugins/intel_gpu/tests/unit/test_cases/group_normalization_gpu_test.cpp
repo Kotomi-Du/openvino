@@ -1,4 +1,4 @@
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,12 +8,16 @@
 #include "program_wrapper.h"
 #include "pass_manager.h"
 
-#include <intel_gpu/primitives/input_layout.hpp>
-#include <intel_gpu/primitives/group_normalization.hpp>
-#include <intel_gpu/primitives/reorder.hpp>
-#include <intel_gpu/primitives/permute.hpp>
+#include "intel_gpu/primitives/input_layout.hpp"
+#include "intel_gpu/primitives/group_normalization.hpp"
+#include "intel_gpu/primitives/reorder.hpp"
+#include "intel_gpu/primitives/permute.hpp"
+#include "intel_gpu/primitives/eltwise.hpp"
+#include "intel_gpu/primitives/activation.hpp"
 #include "openvino/reference/group_normalization.hpp"
 #include "intel_gpu/runtime/compilation_context.hpp"
+
+#include <algorithm>
 
 
 using namespace cldnn;
@@ -22,11 +26,13 @@ using namespace ::tests;
 namespace {
 
 typedef std::tuple<
-    std::vector<std::int32_t>,  // Input shape
-    std::size_t,                // Number of groups
-    double,                     // Epsilon
-    format,                     // First input layout
-    padding                     // Output padding
+    std::vector<ov::Dimension::value_type>, // Input shape
+    std::size_t,                            // Number of groups
+    double,                                 // Epsilon
+    format,                                 // First input layout
+    padding,                                // First input padding
+    format,                                 // Output layout
+    padding                                 // Output padding
 >
 GroupNormalizationParams;
 
@@ -35,15 +41,21 @@ public:
     GroupNormalizationGPUTest() = default;
 
     void SetUp() override {
-        std::vector<std::int32_t> input_shape;
         const auto& params = GetParam();
-        std::tie(input_shape, num_groups_, epsilon_, format_, output_pad_) = params;
+        const auto& [input_shape, _num_groups_, _epsilon_, _in_format_, _in_pad_, _out_format_, _output_pad_] = params;
+        num_groups_ = _num_groups_;
+        epsilon_ = _epsilon_;
+        in_format_ = _in_format_;
+        in_pad_ = _in_pad_;
+        out_format_ = _out_format_;
+        output_pad_ = _output_pad_;
         std::copy(std::begin(input_shape), std::end(input_shape), std::back_inserter(data_shape_));
         tests::random_generator rg{"GroupNormalizationGPUTest"};
         data_ = rg.generate_random_1d<float>(ov::shape_size(input_shape), -1, 1);
         scale_ = rg.generate_random_1d<float>(input_shape[1], -1, 1);
         bias_ = rg.generate_random_1d<float>(input_shape[1], -1, 1);
-        const auto planar_format = format::dimension(format_) == 4 ? format::bfyx : format::bfzyx;
+        const auto planar_format = format::dimension(in_format_) == 4 ? format::bfyx : format::bfzyx;
+        bool is_dynamic_test = (in_format_ != out_format_);
 
         topology tp;
         auto &engine = get_test_engine();
@@ -52,10 +64,19 @@ public:
             static_cast<std::int32_t>(scale_.size()), 1, 1}};
 
         primitive_id reordered_data_primitive = data_primitive_ + "_reordered";
-        tp.add(input_layout{data_primitive_, data_layout_});
+        if (is_dynamic_test) {
+            ov::PartialShape pshape = {};
+            for (size_t i = 0; i < in_format_.dimension(); i++) {
+                pshape.push_back(ov::Dimension::dynamic());
+            }
+            layout in_layout{pshape, data_types::f32, planar_format};
+            tp.add(input_layout{data_primitive_, in_layout});
+        } else {
+            tp.add(input_layout{data_primitive_, data_layout_});
+        }
         tp.add(input_layout{scale_primitive_, scale_bias_layout_});
         tp.add(input_layout{bias_primitive_, scale_bias_layout_});
-        tp.add(reorder{reordered_data_primitive, data_primitive_, format_, data_types::f32});
+        tp.add(reorder{reordered_data_primitive, data_primitive_, layout{input_shape, data_types::f32, in_format_, in_pad_}});
 
         auto g = group_normalization{
             "group_normalization_output",
@@ -67,9 +88,20 @@ public:
         };
         g.output_paddings = {output_pad_};
         tp.add(g);
-        tp.add(reorder{"output", input_info("group_normalization_output"), planar_format, data_types::f32});
+        tp.add(reorder{"group_normalization_output_reordered", input_info("group_normalization_output"), out_format_, data_types::f32});
+        tp.add(eltwise{"dummy_max",
+                       input_info("group_normalization_output_reordered"),
+                       input_info("group_normalization_output_reordered"),
+                       cldnn::eltwise_mode::max});
+        tp.add(reorder{"output", input_info("dummy_max"), planar_format, data_types::f32});
 
-        network_ = std::make_shared<cldnn::network>(engine, tp, get_test_default_config(engine));
+        auto config = get_test_default_config(engine);
+        if (is_dynamic_test) {
+            config.set_property(ov::intel_gpu::optimize_data(true));
+            config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+        }
+
+        network_ = std::make_shared<cldnn::network>(engine, tp, config);
     }
 
     void Test() {
@@ -103,7 +135,9 @@ private:
     std::vector<float> bias_{};
     std::size_t num_groups_{};
     double epsilon_{};
-    format format_{format::any};
+    format in_format_{format::any};
+    padding in_pad_{padding()};
+    format out_format_{format::any};
     padding output_pad_{padding()};
     network::ptr network_{};
     layout data_layout_{};
@@ -130,6 +164,11 @@ const std::vector<cldnn::format> f_blocked_4d_formats {
     format::b_fs_yx_fsv16,
 };
 
+const std::vector<cldnn::format> f_4d_formats {
+    format::bfyx,
+    format::b_fs_yx_fsv16,
+};
+
 const std::vector<cldnn::format> f_planar_5d_formats {
     format::bfzyx,
 };
@@ -137,27 +176,48 @@ const std::vector<cldnn::format> f_planar_5d_formats {
 INSTANTIATE_TEST_SUITE_P(
     GroupNormalizationGPUTest_planar_layouts_support_4d, GroupNormalizationGPUTest,
     ::testing::Combine(
-        ::testing::ValuesIn({std::vector<int32_t>{3, 64, 32, 64}, std::vector<int32_t>{3, 124, 97, 61}, std::vector<int32_t>{1, 1536, 151, 1}, std::vector<int32_t>{1, 12, 2175, 1}}),
+        ::testing::ValuesIn({std::vector<ov::Dimension::value_type>{3, 64, 32, 64}, std::vector<ov::Dimension::value_type>{3, 124, 97, 61},
+                             std::vector<ov::Dimension::value_type>{1, 1536, 151, 1}, std::vector<ov::Dimension::value_type>{1, 12, 2175, 1}}),
         ::testing::ValuesIn(std::vector<size_t>{1, 4}),
         ::testing::Values(0.0025),
         ::testing::ValuesIn(f_planar_4d_formats),
+        ::testing::ValuesIn({padding()}),
+        ::testing::ValuesIn(f_4d_formats),
         ::testing::ValuesIn({padding(), padding({0, 0, 1, 1})})));
 
 INSTANTIATE_TEST_SUITE_P(
     GroupNormalizationGPUTest_blocked_layouts_support_4d, GroupNormalizationGPUTest,
     ::testing::Combine(
-        ::testing::ValuesIn({std::vector<int32_t>{3, 64, 32, 64}, std::vector<int32_t>{3, 124, 97, 61}, std::vector<int32_t>{1, 1536, 151, 1}, std::vector<int32_t>{1, 12, 2175, 1}}),
+        ::testing::ValuesIn({std::vector<ov::Dimension::value_type>{3, 64, 32, 64}, std::vector<ov::Dimension::value_type>{3, 124, 97, 61},
+                             std::vector<ov::Dimension::value_type>{1, 1536, 151, 1}, std::vector<ov::Dimension::value_type>{1, 12, 2175, 1}}),
         ::testing::ValuesIn(std::vector<size_t>{1, 2, 4}),
         ::testing::Values(0.0025),
         ::testing::ValuesIn(f_blocked_4d_formats),
+        ::testing::ValuesIn({padding(), padding({0, 0, 1, 1})}),
+        ::testing::ValuesIn(f_4d_formats),
         ::testing::ValuesIn({padding(), padding({0, 16, 0, 0})})));
+
+INSTANTIATE_TEST_SUITE_P(
+    GroupNormalizationGPUTest_blocked_layouts_support_4d_fused, GroupNormalizationGPUTest,
+    ::testing::Combine(
+        ::testing::ValuesIn({std::vector<ov::Dimension::value_type>{3, 64, 32, 64}, std::vector<ov::Dimension::value_type>{3, 128, 97, 61},
+                             std::vector<ov::Dimension::value_type>{1, 48, 151, 1}, std::vector<ov::Dimension::value_type>{1, 16, 2175, 1}}),
+        ::testing::ValuesIn(std::vector<size_t>{4, 8}),
+        ::testing::Values(0.0025),
+        ::testing::ValuesIn(f_blocked_4d_formats),
+        ::testing::Values(padding()),
+        ::testing::ValuesIn(f_blocked_4d_formats),
+        ::testing::Values(padding())));
 
 INSTANTIATE_TEST_SUITE_P(
     GroupNormalizationGPUTest_planar_layouts_support_5d, GroupNormalizationGPUTest,
     ::testing::Combine(
-        ::testing::ValuesIn({std::vector<int32_t>{3, 64, 28, 32, 12}, std::vector<int32_t>{3, 124, 10, 97, 61}, std::vector<int32_t>{1, 1536, 9, 151, 1}, std::vector<int32_t>{1, 12, 8, 2175, 1}}),
+        ::testing::ValuesIn({std::vector<ov::Dimension::value_type>{3, 64, 28, 32, 12}, std::vector<ov::Dimension::value_type>{3, 124, 10, 97, 61},
+                             std::vector<ov::Dimension::value_type>{1, 1536, 9, 151, 1}, std::vector<ov::Dimension::value_type>{1, 12, 8, 2175, 1}}),
         ::testing::ValuesIn(std::vector<size_t>{1, 4}),
         ::testing::Values(0.0025),
+        ::testing::ValuesIn(f_planar_5d_formats),
+        ::testing::ValuesIn({padding()}),
         ::testing::ValuesIn(f_planar_5d_formats),
         ::testing::ValuesIn({padding(), padding({0, 0, 1, 1})})));
 
@@ -311,5 +371,254 @@ TEST(group_normalization, basic_b_fs_yx_fsv16) {
 
     for (std::size_t i = 0; i < reference_output.size(); i++) {
         ASSERT_NEAR(reference_output[i], output_mem_lock[i], 0.01);
+    }
+}
+
+TEST(group_normalization, basic_b_fs_yx_fsv16_fused) {
+    auto& engine = get_test_engine();
+
+    const ov::Shape input_shape = {1, 128, 256, 256};
+    const ov::Shape param_shape = {128, 1, 1, 1};
+    auto in_layout = layout{input_shape, data_types::f32, format::bfyx};
+    auto scale_layout = layout{param_shape, data_types::f32, format::bfyx};
+    auto bias_layout = layout{param_shape, data_types::f32, format::bfyx};
+    const float epsilon = 1e-5f;
+    const int64_t num_groups = 32;
+
+    auto input_mem = engine.allocate_memory(in_layout);
+    auto scale_mem = engine.allocate_memory(scale_layout);
+    auto bias_mem = engine.allocate_memory(bias_layout);
+
+    tests::random_generator rg{"GroupNormalizationGPUTest"};
+
+    std::vector<float> in_vals = rg.generate_random_1d<float>(ov::shape_size(input_shape), -1, 1);
+    std::vector<float> scale_vals = rg.generate_random_1d<float>(input_shape[1], -1, 1);
+    std::vector<float> bias_vals = rg.generate_random_1d<float>(input_shape[1], -1, 1);
+
+    set_values(input_mem, in_vals);
+    set_values(scale_mem, scale_vals);
+    set_values(bias_mem, bias_vals);
+
+    topology topology(input_layout("input_bfyx_f32", in_layout),
+                      input_layout("scale_bfyx_f32", scale_layout),
+                      input_layout("bias_bfyx_f32", bias_layout),
+                      reorder("input_fsv16_f32", input_info("input_bfyx_f32"), format::b_fs_yx_fsv16, data_types::f32),
+                      reorder("scale_fsv16_f32", input_info("scale_bfyx_f32"), format::b_fs_yx_fsv16, data_types::f32),
+                      reorder("bias_fsv16_f32", input_info("bias_bfyx_f32"), format::b_fs_yx_fsv16, data_types::f32),
+                      group_normalization("group_normalization_fsv16_fused_f32",
+                                          input_info("input_fsv16_f32"),
+                                          input_info("scale_fsv16_f32"),
+                                          input_info("bias_fsv16_f32"),
+                                          num_groups,
+                                          epsilon),
+                      reorder("output_bfyx_f32", input_info("group_normalization_fsv16_fused_f32"), format::bfyx, data_types::f32));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc gn_impl = {format::b_fs_yx_fsv16, "group_normalization_fsv16", impl_types::ocl};
+    config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{{"group_normalization_fsv16_fused_f32", gn_impl}}));
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config.set_property(ov::intel_gpu::optimize_data(true));
+
+    network network(engine, topology, config);
+    network.set_input_data("input_bfyx_f32", input_mem);
+    network.set_input_data("scale_bfyx_f32", scale_mem);
+    network.set_input_data("bias_bfyx_f32", bias_mem);
+
+    auto outputs = network.execute();
+    auto output = outputs.at("output_bfyx_f32").get_memory();
+    cldnn::mem_lock<float, mem_lock_type::read> output_mem_lock(output, get_test_stream());
+
+    cldnn::mem_lock<float, mem_lock_type::read> input_mem_lock(input_mem, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> scale_mem_lock(scale_mem, get_test_stream());
+    cldnn::mem_lock<float, mem_lock_type::read> bias_mem_lock(bias_mem, get_test_stream());
+
+    std::vector<float> reference_output(output_mem_lock.size());
+    ov::reference::group_normalization(input_mem_lock.data(),
+                                       scale_mem_lock.data(),
+                                       bias_mem_lock.data(),
+                                       reference_output.data(),
+                                       input_shape,
+                                       num_groups,
+                                       epsilon);
+
+    for (std::size_t i = 0; i < reference_output.size(); i++) {
+        ASSERT_NEAR(reference_output[i], output_mem_lock[i], 0.01);
+    }
+}
+
+// Tests fused eltwise_sum with a separate 4D input into the group_normalization fused kernel.
+// This covers the case where FUSED_OP0_LOAD indexes a separate tensor using (b),(f),(y),(x).
+TEST(group_normalization, basic_b_fs_yx_fsv16_fused_eltwise_sum) {
+    auto& engine = get_test_engine();
+
+    const ov::Shape input_shape = {1, 32, 64, 64};
+    const ov::Shape param_shape = {32, 1, 1, 1};
+    auto in_layout = layout{input_shape, data_types::f16, format::bfyx};
+    auto eltwise_layout = layout{input_shape, data_types::f16, format::bfyx};
+    auto scale_layout = layout{param_shape, data_types::f16, format::bfyx};
+    auto bias_layout = layout{param_shape, data_types::f16, format::bfyx};
+    const float epsilon = 1e-5f;
+    const int64_t num_groups = 8;
+
+    auto input_mem = engine.allocate_memory(in_layout);
+    auto eltwise_mem = engine.allocate_memory(eltwise_layout);
+    auto scale_mem = engine.allocate_memory(scale_layout);
+    auto bias_mem = engine.allocate_memory(bias_layout);
+
+    tests::random_generator rg{"GroupNormalizationGPUTest_fused_eltwise"};
+
+    auto in_vals = rg.generate_random_1d<ov::float16>(ov::shape_size(input_shape), -1, 1);
+    auto eltwise_vals = rg.generate_random_1d<ov::float16>(ov::shape_size(input_shape), -1, 1);
+    auto scale_vals = rg.generate_random_1d<ov::float16>(input_shape[1], -1, 1);
+    auto bias_vals = rg.generate_random_1d<ov::float16>(input_shape[1], -1, 1);
+
+    set_values(input_mem, in_vals);
+    set_values(eltwise_mem, eltwise_vals);
+    set_values(scale_mem, scale_vals);
+    set_values(bias_mem, bias_vals);
+
+    // Topology: group_norm -> eltwise_sum(with separate input) -> output
+    // The eltwise_sum should be fused into the group_normalization kernel.
+    topology topology(
+        input_layout("input", in_layout),
+        input_layout("eltwise_input", eltwise_layout),
+        input_layout("scale", scale_layout),
+        input_layout("bias", bias_layout),
+        reorder("input_fsv16", input_info("input"), format::b_fs_yx_fsv16, data_types::f16),
+        reorder("eltwise_input_fsv16", input_info("eltwise_input"), format::b_fs_yx_fsv16, data_types::f16),
+        reorder("scale_fsv16", input_info("scale"), format::b_fs_yx_fsv16, data_types::f16),
+        reorder("bias_fsv16", input_info("bias"), format::b_fs_yx_fsv16, data_types::f16),
+        group_normalization("group_norm",
+                            input_info("input_fsv16"),
+                            input_info("scale_fsv16"),
+                            input_info("bias_fsv16"),
+                            num_groups,
+                            epsilon),
+        eltwise("eltwise_sum",
+                {input_info("group_norm"), input_info("eltwise_input_fsv16")},
+                eltwise_mode::sum),
+        reorder("output", input_info("eltwise_sum"), format::bfyx, data_types::f16));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc gn_impl = {format::b_fs_yx_fsv16, "group_normalization_fsv16", impl_types::ocl};
+    config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{{"group_norm", gn_impl}}));
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config.set_property(ov::intel_gpu::optimize_data(true));
+
+    network network(engine, topology, config);
+    network.set_input_data("input", input_mem);
+    network.set_input_data("eltwise_input", eltwise_mem);
+    network.set_input_data("scale", scale_mem);
+    network.set_input_data("bias", bias_mem);
+
+    auto outputs = network.execute();
+
+    // Verify eltwise_sum was fused into group_norm (not executed as separate primitive)
+    auto executed_primitives = network.get_executed_primitives();
+    ASSERT_TRUE(executed_primitives.count("eltwise_sum") == 0);
+
+    auto output = outputs.at("output").get_memory();
+    cldnn::mem_lock<ov::float16, mem_lock_type::read> output_mem_lock(output, get_test_stream());
+
+    // Compute reference: group_norm + eltwise_sum
+    std::vector<float> in_f32(in_vals.begin(), in_vals.end());
+    std::vector<float> scale_f32(scale_vals.begin(), scale_vals.end());
+    std::vector<float> bias_f32(bias_vals.begin(), bias_vals.end());
+    std::vector<float> ref_gn(ov::shape_size(input_shape));
+    ov::reference::group_normalization(in_f32.data(), scale_f32.data(), bias_f32.data(),
+                                       ref_gn.data(), input_shape, num_groups, epsilon);
+
+    for (std::size_t i = 0; i < ref_gn.size(); i++) {
+        float expected = ref_gn[i] + static_cast<float>(eltwise_vals[i]);
+        ASSERT_NEAR(static_cast<float>(output_mem_lock[i]), expected, 0.05) << "at index " << i;
+    }
+}
+
+// Tests fused eltwise_sum + ReLU activation into the group_normalization fused kernel.
+// This matches the SegNext model pattern: GroupNorm -> Add -> ReLU.
+TEST(group_normalization, basic_b_fs_yx_fsv16_fused_eltwise_sum_relu) {
+    auto& engine = get_test_engine();
+
+    const ov::Shape input_shape = {1, 32, 33, 17};  // Non-power-of-2 spatial dims to stress y/x derivation and CHUNK_SIZE tail handling
+    const ov::Shape param_shape = {32, 1, 1, 1};
+    auto in_layout = layout{input_shape, data_types::f16, format::bfyx};
+    auto eltwise_layout = layout{input_shape, data_types::f16, format::bfyx};
+    auto scale_layout = layout{param_shape, data_types::f16, format::bfyx};
+    auto bias_layout = layout{param_shape, data_types::f16, format::bfyx};
+    const float epsilon = 1e-5f;
+    const int64_t num_groups = 8;
+
+    auto input_mem = engine.allocate_memory(in_layout);
+    auto eltwise_mem = engine.allocate_memory(eltwise_layout);
+    auto scale_mem = engine.allocate_memory(scale_layout);
+    auto bias_mem = engine.allocate_memory(bias_layout);
+
+    tests::random_generator rg{"GroupNormalizationGPUTest_fused_eltwise_relu"};
+
+    auto in_vals = rg.generate_random_1d<ov::float16>(ov::shape_size(input_shape), -1, 1);
+    auto eltwise_vals = rg.generate_random_1d<ov::float16>(ov::shape_size(input_shape), -1, 1);
+    auto scale_vals = rg.generate_random_1d<ov::float16>(input_shape[1], -1, 1);
+    auto bias_vals = rg.generate_random_1d<ov::float16>(input_shape[1], -1, 1);
+
+    set_values(input_mem, in_vals);
+    set_values(eltwise_mem, eltwise_vals);
+    set_values(scale_mem, scale_vals);
+    set_values(bias_mem, bias_vals);
+
+    topology topology(
+        input_layout("input", in_layout),
+        input_layout("eltwise_input", eltwise_layout),
+        input_layout("scale", scale_layout),
+        input_layout("bias", bias_layout),
+        reorder("input_fsv16", input_info("input"), format::b_fs_yx_fsv16, data_types::f16),
+        reorder("eltwise_input_fsv16", input_info("eltwise_input"), format::b_fs_yx_fsv16, data_types::f16),
+        reorder("scale_fsv16", input_info("scale"), format::b_fs_yx_fsv16, data_types::f16),
+        reorder("bias_fsv16", input_info("bias"), format::b_fs_yx_fsv16, data_types::f16),
+        group_normalization("group_norm",
+                            input_info("input_fsv16"),
+                            input_info("scale_fsv16"),
+                            input_info("bias_fsv16"),
+                            num_groups,
+                            epsilon),
+        eltwise("eltwise_sum",
+                {input_info("group_norm"), input_info("eltwise_input_fsv16")},
+                eltwise_mode::sum),
+        activation("relu", input_info("eltwise_sum"), activation_func::relu),
+        reorder("output", input_info("relu"), format::bfyx, data_types::f16));
+
+    ExecutionConfig config = get_test_default_config(engine);
+    ov::intel_gpu::ImplementationDesc gn_impl = {format::b_fs_yx_fsv16, "group_normalization_fsv16", impl_types::ocl};
+    config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{{"group_norm", gn_impl}}));
+    config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+    config.set_property(ov::intel_gpu::optimize_data(true));
+
+    network network(engine, topology, config);
+    network.set_input_data("input", input_mem);
+    network.set_input_data("eltwise_input", eltwise_mem);
+    network.set_input_data("scale", scale_mem);
+    network.set_input_data("bias", bias_mem);
+
+    auto outputs = network.execute();
+
+    // Verify eltwise_sum and relu were fused into group_norm (not executed as separate primitives)
+    auto executed_primitives = network.get_executed_primitives();
+    ASSERT_TRUE(executed_primitives.count("eltwise_sum") == 0);
+    ASSERT_TRUE(executed_primitives.count("relu") == 0);
+
+    auto output = outputs.at("output").get_memory();
+    cldnn::mem_lock<ov::float16, mem_lock_type::read> output_mem_lock(output, get_test_stream());
+
+    // Compute reference: group_norm + eltwise_sum + relu
+    std::vector<float> in_f32(in_vals.begin(), in_vals.end());
+    std::vector<float> scale_f32(scale_vals.begin(), scale_vals.end());
+    std::vector<float> bias_f32(bias_vals.begin(), bias_vals.end());
+    std::vector<float> ref_gn(ov::shape_size(input_shape));
+    ov::reference::group_normalization(in_f32.data(), scale_f32.data(), bias_f32.data(),
+                                       ref_gn.data(), input_shape, num_groups, epsilon);
+
+    for (std::size_t i = 0; i < ref_gn.size(); i++) {
+        float sum_val = ref_gn[i] + static_cast<float>(eltwise_vals[i]);
+        float expected = std::max(0.0f, sum_val);
+        ASSERT_NEAR(static_cast<float>(output_mem_lock[i]), expected, 0.05) << "at index " << i;
     }
 }

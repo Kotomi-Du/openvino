@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,10 +16,7 @@
 #include "openvino/op/subtract.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace op {
+namespace ov::frontend::pytorch::op {
 
 using namespace ov::op;
 
@@ -27,12 +24,14 @@ OutputVector translate_index_add(const NodeContext& context) {
     // aten::index_add(Tensor self, int dim, Tensor index, Tensor source, *, Scalar alpha=1) -> Tensor
     // aten::index_add.out(Tensor self, int dim, Tensor index, Tensor source, *, Scalar alpha=1, Tensor(a!) out) ->
     // Tensor(a!)
-    num_inputs_check(context, 5, 6);
+    num_inputs_check(context, 4, 6);
     auto input = context.get_input(0);
     auto dim = context.get_input(1);
     auto index = context.mark_node(std::make_shared<v0::Convert>(context.get_input(2), element::i32));
     auto src = context.get_input(3);
-    auto alpha = context.get_input(4);
+    auto alpha = !context.input_is_none(4)        ? context.get_input(4)
+                 : context.has_attribute("alpha") ? context.get_input("alpha")
+                                                  : v0::Constant::create(element::i32, Shape{}, {1});
     auto converted_alpha = context.mark_node(std::make_shared<v1::ConvertLike>(alpha, src));
     auto alpha_src = context.mark_node(std::make_shared<v1::Multiply>(converted_alpha, src));
     auto input_shape_rank = get_shape_rank(context, input);
@@ -67,13 +66,13 @@ OutputVector translate_index_add(const NodeContext& context) {
     auto src_ =
         context.mark_node(std::make_shared<v3::Broadcast>(src_broadcasted, new_shape, BroadcastType::BIDIRECTIONAL));
     auto src_input_dtype = context.mark_node(std::make_shared<v1::ConvertLike>(src_, input));
-    // brodcast index to input rank size
+    // broadcast index to input rank size
     src_rank = context.mark_node(std::make_shared<v3::ShapeOf>(new_shape, element::i32));
     auto new_index_shape = context.mark_node(std::make_shared<v3::Broadcast>(const_one, src_rank));
     auto const_minus_one = context.mark_node(v0::Constant::create(element::i32, Shape{1}, {-1}));
     new_index_shape = context.mark_node(
         std::make_shared<v12::ScatterElementsUpdate>(new_index_shape, dim_1d, const_minus_one, const_zero));
-    // precerve indicies location for spicifc dim
+    // preserve indices location for specific dim
     auto reshaped_index = context.mark_node(std::make_shared<v1::Reshape>(index, new_index_shape, false));
     auto broadcasted_index =
         context.mark_node(std::make_shared<v3::Broadcast>(reshaped_index, new_shape, BroadcastType::BIDIRECTIONAL));
@@ -89,7 +88,4 @@ OutputVector translate_index_add(const NodeContext& context) {
     return {scatter_result};
 }
 
-}  // namespace op
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::op

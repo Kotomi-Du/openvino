@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 #include "prim_unpack_parameter_replacer.hpp"
@@ -11,10 +11,7 @@
 #include "openvino/op/util/framework_node.hpp"
 #include "utils.hpp"
 
-namespace ov {
-namespace frontend {
-namespace pytorch {
-namespace pass {
+namespace ov::frontend::pytorch::pass {
 
 bool DecomposeUnpackParameters::run_on_model(const std::shared_ptr<Model>& model) {
     bool at_least_one_decomposed = false;
@@ -119,7 +116,4 @@ bool DecomposeUnpackParameters::run_on_model(const std::shared_ptr<Model>& model
 
     return at_least_one_decomposed;
 };
-}  // namespace pass
-}  // namespace pytorch
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::pytorch::pass

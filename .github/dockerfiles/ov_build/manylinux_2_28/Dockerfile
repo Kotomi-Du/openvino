@@ -1,3 +1,6 @@
+# Copyright (C) 2018-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 ARG REGISTRY="quay.io"
 FROM openvinogithubactions.azurecr.io/quayio/pypa/manylinux_2_28
 
@@ -7,7 +10,7 @@ RUN yum groupinstall -y "Development Tools" && \
     yum install -y wget bzip2 gcc-c++ libmpc-devel mpfr-devel gmp-devel cmake ccache ninja-build make tbb-devel ocl-icd-devel opencl-headers lld
 
 # Install sscache
-ARG SCCACHE_VERSION="v0.7.5"
+ARG SCCACHE_VERSION="v0.18.0"
 ENV SCCACHE_HOME="/opt/sccache" \
     SCCACHE_PATH="/opt/sccache/sccache"
 
@@ -18,3 +21,6 @@ RUN mkdir ${SCCACHE_HOME} && cd ${SCCACHE_HOME} && \
 
 # To make python3 and pip binaries accessible
 ENV PATH="/opt/python/cp311-cp311/bin:$SCCACHE_HOME:$PATH"
+
+# Install newer ninja (yum ships older version lacking --quiet)
+RUN python3 -m pip install --no-cache-dir cmake==3.26.4 ninja==1.13.0

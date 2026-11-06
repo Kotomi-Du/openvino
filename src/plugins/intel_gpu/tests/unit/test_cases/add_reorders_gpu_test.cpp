@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -111,8 +111,8 @@ template <typename T>
 void test_add_reorders_gpu_basic_reshape_and_tile(bool is_caching_test) {
     auto& engine = get_test_engine();
 
-    auto input = engine.allocate_memory({ data_types::f32, format::byxf,{ 1, 2, 2, 1 } });
-    auto output_ref = engine.allocate_memory({ data_types::f32, format::byxf,{ 2, 1, 4, 2 } });
+    auto input = engine.allocate_memory({ data_types::f32, format::fbyx,{ 1, 2, 2, 1 } });
+    auto output_ref = engine.allocate_memory({ data_types::f32, format::bfyx,{ 2, 1, 4, 2 } });
 
     topology topology;
     topology.add(input_layout("input", input->get_layout()));
@@ -127,12 +127,12 @@ void test_add_reorders_gpu_basic_reshape_and_tile(bool is_caching_test) {
 
     network->set_input_data("input", input);
 
-    //reorder is required as tile accepts only bfyx format
+    // reorder is required as tile doesn't support fbyx format
     ASSERT_EQ(network->get_all_primitive_org_ids().size(), size_t(4));
     auto outputs = network->execute();
 
     auto output = outputs.at("tile").get_memory();
-    cldnn::mem_lock<T> output_ptr(output, get_test_stream());
+    cldnn::mem_lock<T, mem_lock_type::read> output_ptr(output, get_test_stream());
     cldnn::mem_lock<T> output_ref_ptr(output_ref, get_test_stream());
 
     for (unsigned int i = 0; i < output_ref->count(); ++i) {

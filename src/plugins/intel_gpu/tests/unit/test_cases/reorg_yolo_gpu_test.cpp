@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -274,10 +274,8 @@ struct PrintToStringParamName {
     template<class T>
     std::string operator()(const testing::TestParamInfo<ReorgYoloParamsWithLayout<T> > &param) {
         std::stringstream buf;
-        ReorgYoloParams<T> p;
-        format::type target_format;
-        bool should_fail;
-        std::tie(p, target_format, should_fail) = param.param;
+
+        const auto& [p, target_format, should_fail] = param.param;
         buf << "InputTensor=" << to_string(p.inputTensor)
             << ".stride=" << p.stride
             << ".TargetLayout=" << fmt_to_str(target_format);
@@ -291,10 +289,7 @@ struct reorg_yolo_test
         : public ::testing::TestWithParam<ReorgYoloParamsWithLayout<T> > {
 public:
     void test(bool is_caching_test) {
-        ReorgYoloParams<T> params;
-        format::type target_format;
-        bool should_fail;
-        std::tie(params, target_format, should_fail) = this->GetParam();
+        const auto& [params, target_format, should_fail] = this->GetParam();
 
         if (should_fail) {
             ASSERT_ANY_THROW(run_test(params, target_format, is_caching_test));
@@ -325,7 +320,7 @@ private:
         const auto result = network->execute();
 
         auto out_mem = result.at("reorg_yolo_reordered").get_memory();
-        cldnn::mem_lock<T> out_ptr(out_mem, get_test_stream());
+        cldnn::mem_lock<T, mem_lock_type::read> out_ptr(out_mem, get_test_stream());
 
         ASSERT_EQ(params.expected.size(), out_ptr.size());
         for (size_t i = 0; i < params.expected.size(); ++i) {

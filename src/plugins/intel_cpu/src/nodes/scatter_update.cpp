@@ -1,8 +1,8 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "scatter_update.h"
+#include "openvino/op/scatter_update.hpp"
 
 #include <array>
 #include <cassert>
@@ -35,7 +35,7 @@
 #include "openvino/core/type/float16.hpp"
 #include "openvino/op/scatter_elements_update.hpp"
 #include "openvino/op/scatter_nd_update.hpp"
-#include "openvino/op/scatter_update.hpp"
+#include "scatter_update.h"
 #include "selective_build.h"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/debug_capabilities.h"
@@ -48,7 +48,7 @@ namespace ov::intel_cpu::node {
 bool ScatterUpdate::isSupportedOperation(const std::shared_ptr<const ov::Node>& op,
                                          std::string& errorMessage) noexcept {
     try {
-        if (!one_of(op->get_type_info(),
+        if (none_of(op->get_type_info(),
                     ov::op::v3::ScatterElementsUpdate::get_type_info_static(),
                     ov::op::v12::ScatterElementsUpdate::get_type_info_static(),
                     ov::op::v3::ScatterUpdate::get_type_info_static(),
@@ -60,7 +60,7 @@ bool ScatterUpdate::isSupportedOperation(const std::shared_ptr<const ov::Node>& 
         }
         if (const auto node_element = ov::as_type_ptr<const ov::op::v12::ScatterElementsUpdate>(op)) {
             using Reduction = ov::op::v12::ScatterElementsUpdate::Reduction;
-            if (!one_of(node_element->get_reduction(),
+            if (none_of(node_element->get_reduction(),
                         Reduction::MAX,
                         Reduction::MEAN,
                         Reduction::MIN,
@@ -73,7 +73,7 @@ bool ScatterUpdate::isSupportedOperation(const std::shared_ptr<const ov::Node>& 
             }
         } else if (const auto node_element = ov::as_type_ptr<const ov::op::v15::ScatterNDUpdate>(op)) {
             using Reduction = ov::op::v15::ScatterNDUpdate::Reduction;
-            if (!one_of(node_element->get_reduction(),
+            if (none_of(node_element->get_reduction(),
                         Reduction::MAX,
                         Reduction::MIN,
                         Reduction::NONE,
@@ -101,9 +101,7 @@ bool ScatterUpdate::isExecutable() const {
 
 ScatterUpdate::ScatterUpdate(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
     : Node(op, context, NgraphShapeInferFactory(op)),
-      dataSize(0LU),
-      indicesSize(0LU),
-      axisSize(0LU),
+
       dataPrec(ov::element::dynamic),
       indicesPrec(ov::element::dynamic),
       axisPrec(ov::element::dynamic) {
@@ -129,11 +127,9 @@ ScatterUpdate::ScatterUpdate(const std::shared_ptr<ov::Node>& op, const GraphCon
         axisRelaxed = false;
         isUpdateScalar = ov::is_scalar(op->get_input_partial_shape(2));
     } else {
-        THROW_CPU_NODE_ERR("is not supported");
+        CPU_NODE_THROW("is not supported");
     }
-    if (is_not_supported_input) {
-        THROW_CPU_NODE_ERR("do not support scalar input");
-    }
+    CPU_NODE_ASSERT(!is_not_supported_input, "do not support scalar input");
 
     reduction_type = ScatterUpdate::Reduction::NONE;
     if (const auto node_element = ov::as_type_ptr<const ov::op::v12::ScatterElementsUpdate>(op)) {
@@ -158,8 +154,8 @@ ScatterUpdate::ScatterUpdate(const std::shared_ptr<ov::Node>& op, const GraphCon
             reduction_type = ScatterUpdate::Reduction::NONE;
             break;
         default:
-            THROW_CPU_NODE_ERR("ScatterElementsUpdate CPU does not support reduction mode: ",
-                               ov::as_string(node_element->get_reduction()));
+            CPU_NODE_THROW("ScatterElementsUpdate CPU does not support reduction mode: ",
+                           ov::as_string(node_element->get_reduction()));
         }
         use_init_val = node_element->get_use_init_val();
     } else if (const auto node_element = ov::as_type_ptr<const ov::op::v15::ScatterNDUpdate>(op)) {
@@ -184,19 +180,15 @@ ScatterUpdate::ScatterUpdate(const std::shared_ptr<ov::Node>& op, const GraphCon
             reduction_type = ScatterUpdate::Reduction::NONE;
             break;
         default:
-            THROW_CPU_NODE_ERR("ScatterNDUpdate CPU does not support reduction mode: ",
-                               ov::as_string(node_element->get_reduction()));
+            CPU_NODE_THROW("ScatterNDUpdate CPU does not support reduction mode: ",
+                           ov::as_string(node_element->get_reduction()));
         }
     }
 }
 
 void ScatterUpdate::getSupportedDescriptors() {
-    if ((getParentEdges().size() != 3) && (getParentEdges().size() != 4)) {
-        THROW_CPU_NODE_ERR("has incorrect number of input edges");
-    }
-    if (getChildEdges().empty()) {
-        THROW_CPU_NODE_ERR("has incorrect number of output edges");
-    }
+    CPU_NODE_ASSERT(any_of(getParentEdges().size(), 3U, 4U), "has incorrect number of input edges");
+    CPU_NODE_ASSERT(!getChildEdges().empty(), "has incorrect number of output edges");
 }
 
 void ScatterUpdate::initSupportedPrimitiveDescriptors() {
@@ -215,36 +207,30 @@ void ScatterUpdate::initSupportedPrimitiveDescriptors() {
     size_t dstRank = dstDataDim.size();
 
     // common check
-    if (srcRank != dstRank) {
-        THROW_CPU_NODE_ERR("should have same rank for input and output tensor");
-    } else {
-        for (size_t r = 0; r < srcRank; r++) {
-            if (!dimsEqualWeak(srcDataDim[r], dstDataDim[r])) {
-                THROW_CPU_NODE_ERR("should have same shape for input and output tensor. The input shape is ",
-                                   srcDataDim[r],
-                                   ", while output shape is ",
-                                   dstDataDim[r],
-                                   " for ",
-                                   r,
-                                   "th dimension");
-            }
-        }
+    CPU_NODE_ASSERT(srcRank == dstRank, "should have same rank for input and output tensor");
+    for (size_t r = 0; r < srcRank; r++) {
+        CPU_NODE_ASSERT(dimsEqualWeak(srcDataDim[r], dstDataDim[r]),
+                        "should have same shape for input and output tensor. The input shape is ",
+                        srcDataDim[r],
+                        ", while output shape is ",
+                        dstDataDim[r],
+                        " for ",
+                        r,
+                        "th dimension");
     }
     // specific check
     switch (scatterUpdateMode) {
     case ScatterUpdateMode::ScatterUpdate: {
-        if (updateRank != (srcRank + indicesRank - 1)) {
-            THROW_CPU_NODE_ERR("do not have matched tensor rank relationship for input, indices and update");
-        }
+        CPU_NODE_ASSERT(updateRank == (srcRank + indicesRank - 1),
+                        "do not have matched tensor rank relationship for input, indices and update");
         break;
     }
     case ScatterUpdateMode::ScatterNDUpdate: {
         if (indicesDim[indicesRank - 1] != Shape::UNDEFINED_DIM) {
             size_t k = indicesDim[indicesRank - 1];
-            if (k > srcRank) {
-                THROW_CPU_NODE_ERR("do not have an correct indices' last dimension value, ",
-                                   "which should be smaller than or equal to input tensor rank");
-            }
+            CPU_NODE_ASSERT(k <= srcRank,
+                            "do not have an correct indices' last dimension value, ",
+                            "which should be smaller than or equal to input tensor rank");
 
             size_t tupleRank = indicesRank - 1;
             VectorDims expectUpdateShape(tupleRank + srcRank - k, 0);
@@ -261,30 +247,26 @@ void ScatterUpdate::initSupportedPrimitiveDescriptors() {
                 expectUpdateShape[updateAxisIter] = srcDataDim[rd];
                 updateAxisIter++;
             }
-            if (expectUpdateShape.size() != updateRank) {
-                THROW_CPU_NODE_ERR("do not have matched tensor rank relationship for input, indices and update");
-            }
+            CPU_NODE_ASSERT(expectUpdateShape.size() == updateRank,
+                            "do not have matched tensor rank relationship for input, indices and update");
             for (size_t ru = 0; ru < updateRank; ru++) {
-                if (!dimsEqualWeak(updateDim[ru], expectUpdateShape[ru])) {
-                    THROW_CPU_NODE_ERR("do not have matched tensor shape relationship for input, indices and update");
-                }
+                CPU_NODE_ASSERT(dimsEqualWeak(updateDim[ru], expectUpdateShape[ru]),
+                                "do not have matched tensor shape relationship for input, indices and update");
             }
         }
         break;
     }
     case ScatterUpdateMode::ScatterElementsUpdate: {
-        if (srcRank != indicesRank || srcRank != updateRank) {
-            THROW_CPU_NODE_ERR("do not have the same tensor rank for input, indices and update");
-        }
+        CPU_NODE_ASSERT(all_of(srcRank, indicesRank, updateRank),
+                        "do not have the same tensor rank for input, indices and update");
         for (size_t ri = 0; ri < indicesRank; ri++) {
-            if (!dimsEqualWeak(indicesDim[ri], updateDim[ri])) {
-                THROW_CPU_NODE_ERR("do not have the same tensor shape for indices and update");
-            }
+            CPU_NODE_ASSERT(dimsEqualWeak(indicesDim[ri], updateDim[ri]),
+                            "do not have the same tensor shape for indices and update");
         }
         break;
     }
     default: {
-        THROW_CPU_NODE_ERR("is not supported");
+        CPU_NODE_THROW("is not supported");
     }
     }
 
@@ -313,8 +295,8 @@ void ScatterUpdate::initSupportedPrimitiveDescriptors() {
     }
 
     dataPrec = getOriginalInputPrecisionAtPort(DATA_ID);
-    if (one_of(scatterUpdateMode, ScatterUpdateMode::ScatterElementsUpdate, ScatterUpdateMode::ScatterNDUpdate) &&
-        !one_of(dataPrec,
+    if (any_of(scatterUpdateMode, ScatterUpdateMode::ScatterElementsUpdate, ScatterUpdateMode::ScatterNDUpdate) &&
+        none_of(dataPrec,
                 ov::element::f32,
                 ov::element::i32,
                 ov::element::bf16,
@@ -364,9 +346,9 @@ int64_t ScatterUpdate::getIndicesValue(uint8_t* indices, size_t offset) const {
 // blockND: ncdhw cdhw  dhw   hw   w    1
 // index  : 0      1    2     3    4    5
 static std::vector<size_t> getBlockND(const VectorDims& shape) {
-    size_t shapeRank = shape.size();
+    auto shapeRank = static_cast<int>(shape.size());
     std::vector<size_t> blockND(shapeRank + 1, 1);
-    for (int i = shapeRank - 1; i >= 0; i--) {
+    for (auto i = shapeRank - 1; i >= 0; i--) {
         blockND[i] = shape[i] * blockND[i + 1];
     }
     return blockND;
@@ -393,8 +375,8 @@ static T reduction_neutral_value(const ScatterUpdate::Reduction reduction_type) 
 }
 
 static inline void getCoordinate(VectorDims& coordinate, size_t offset, const VectorDims& shape) {
-    size_t shapeRank = shape.size();
-    for (int i = shapeRank - 1; i >= 0; i--) {
+    auto shapeRank = static_cast<int>(shape.size());
+    for (auto i = shapeRank - 1; i >= 0; i--) {
         coordinate[i] = offset % shape[i];
         offset /= shape[i];
     }
@@ -583,12 +565,12 @@ void ScatterUpdate::scatterElementsUpdate(const MemoryPtr& mem_data,
 
     const auto& data_shape = mem_data->getStaticDims();
     const auto& indices_shape = mem_indices->getStaticDims();
-    const size_t updates_rank = indices_shape.size();
+    const auto updates_rank = static_cast<int>(indices_shape.size());
 
     if (axis < 0) {
         axis += updates_rank;
     }
-    CPU_NODE_ASSERT(axis >= 0 && axis < static_cast<int>(updates_rank), "Invalid axis.");
+    CPU_NODE_ASSERT(axis >= 0 && axis < updates_rank, "Invalid axis.");
 
     const auto data_dim_size = static_cast<int64_t>(data_shape[axis]);
     const auto index_dim_size = indices_shape[axis];
@@ -715,7 +697,7 @@ void ScatterUpdate::scatterElementsUpdate(const MemoryPtr& mem_data,
     size_t updates_rank = indices_shape.size();
 
     if (axis < 0) {
-        axis += updates_rank;
+        axis += static_cast<int>(updates_rank);
     }
     CPU_NODE_ASSERT(axis >= 0 && axis < static_cast<int>(updates_rank), "Invalid axis.");
 
@@ -786,7 +768,7 @@ void ScatterUpdate::scatterElementsUpdate(const MemoryPtr& mem_data,
                 for (const auto& counter : mean_reduction_counters) {
                     auto dst = &dataPtr[offsets[0] + counter.first * dataBlock_axisplus1];
                     const auto N = counter.second + static_cast<int32_t>(use_init_val);
-                    *dst = static_cast<DataType>(static_cast<double>(*dst) / N);
+                    *dst = static_cast<DataType>(static_cast<double>(*dst) / static_cast<double>(N));
                 }
 
                 // increment
@@ -880,7 +862,7 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
 
     const auto& srcDataDim = getParentEdgeAt(DATA_ID)->getMemory().getStaticDims();
     const auto& indicesDim = getParentEdgeAt(INDICES_ID)->getMemory().getStaticDims();
-    size_t srcRank = srcDataDim.size();
+    auto srcRank = static_cast<int>(srcDataDim.size());
 
     // 1d short vector scatter update optimized for shape inference subgraph
     if (scatterUpdateMode == ScatterUpdateMode::ScatterUpdate && srcDataDim.size() == 1 && indicesDim.size() <= 1 &&
@@ -898,6 +880,8 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
             auto* pindices = reinterpret_cast<int32_t*>(indicesPtr);
             auto* pupdate = reinterpret_cast<int32_t*>(updatePtr);
             for (size_t i = 0; i < updateCnt; i++) {
+                CPU_NODE_ASSERT(pindices[i] >= 0 && static_cast<size_t>(pindices[i]) < srcLength,
+                                "has indices value that points to non-existing output tensor element");
                 pdst[pindices[i]] = pupdate[i];
             }
             return;
@@ -913,28 +897,38 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
             axis = *axisPtr32;
         } else {
             auto* axisPtr64 = reinterpret_cast<int64_t*>(axisPtr);
-            axis = *axisPtr64;
+            axis = static_cast<int>(*axisPtr64);
         }
 
-        if (axis >= static_cast<int>(srcRank) || axis < (static_cast<int>(srcRank) * -1)) {
-            THROW_CPU_NODE_ERR("should have axis value in range [-r, r - 1], where r is the rank of input data");
-        }
+        CPU_NODE_ASSERT(axis < srcRank && axis >= (srcRank * -1),
+                        "should have axis value in range [-r, r - 1], where r is the rank of input data");
         axis = axis < 0 ? (axis + srcRank) : axis;
 
         size_t srcDimAxis = srcDataDim[axis];
         std::vector<size_t> indicesBlockND = getBlockND(indicesDim);
-        parallel_nt(0, [&](const int ithr, const int nthr) {
+        // fully validate (possibly negative) indices here so the per-element write loops stay branch-free.
+        // Violations are flagged, not thrown, inside the loop: an exception escaping a parallel_nt worker
+        // is not reliably propagated on the OpenMP threading backend.
+        const bool allow_negative_indices = scatterUpdateMode == ScatterUpdateMode::ScatterElementsUpdate;
+        const auto nthr = parallel_get_max_threads();
+        std::vector<uint8_t> out_of_range_flags(nthr, 0);
+        parallel_nt(nthr, [&](const int ithr, const int nthr) {
             size_t start = 0;
             size_t end = 0;
             splitter(indicesBlockND[0], nthr, ithr, start, end);
+            bool local_out_of_range = false;
             for (size_t i = start; i < end; i++) {
                 int64_t idxValue = getIndicesValue(indicesPtr, i);
-                if (idxValue >= static_cast<int64_t>(srcDimAxis) ||
-                    (idxValue < 0 && scatterUpdateMode != ScatterUpdateMode::ScatterElementsUpdate)) {
-                    THROW_CPU_NODE_ERR("have indices value that points to non-existing output tensor element");
+                if (allow_negative_indices && idxValue < 0) {
+                    idxValue += static_cast<int64_t>(srcDimAxis);
                 }
+                local_out_of_range =
+                    local_out_of_range || static_cast<uint64_t>(idxValue) >= static_cast<uint64_t>(srcDimAxis);
             }
+            out_of_range_flags[ithr] = static_cast<uint8_t>(local_out_of_range);
         });
+        CPU_NODE_ASSERT(all_of_values(out_of_range_flags, uint8_t{0}),
+                        "have indices value that points to non-existing output tensor element");
 
         if (scatterUpdateMode == ScatterUpdateMode::ScatterUpdate) {
             VectorDims indicesDim = getParentEdgeAt(INDICES_ID)->getMemory().getStaticDims();
@@ -943,8 +937,8 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
             size_t updateRank = updateDim.size();
             VectorDims expectUpdateShape(srcRank + indicesRank - 1, 0);
             int axisIter = 0;
-            for (size_t rs = 0; rs < srcRank; rs++) {
-                if (rs != static_cast<size_t>(axis)) {
+            for (int rs = 0; rs < srcRank; rs++) {
+                if (rs != axis) {
                     expectUpdateShape[axisIter] = srcDataDim[rs];
                     axisIter++;
                 } else {
@@ -954,16 +948,14 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
                     }
                 }
             }
-            if (updateRank > expectUpdateShape.size()) {
-                THROW_CPU_NODE_ERR("cannot update shape. New rank: ",
-                                   updateRank,
-                                   ", expected: ",
-                                   expectUpdateShape.size());
-            }
+            CPU_NODE_ASSERT(updateRank <= expectUpdateShape.size(),
+                            "cannot update shape. New rank: ",
+                            updateRank,
+                            ", expected: ",
+                            expectUpdateShape.size());
             for (size_t ru = 0; ru < updateRank; ru++) {
-                if (updateDim[ru] != expectUpdateShape[ru]) {
-                    THROW_CPU_NODE_ERR("do not have matched tensor shape relationship for input, indices and update");
-                }
+                CPU_NODE_ASSERT(updateDim[ru] == expectUpdateShape[ru],
+                                "do not have matched tensor shape relationship for input, indices and update");
             }
         }
     }
@@ -998,7 +990,7 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
         break;
     }
     default: {
-        THROW_CPU_NODE_ERR("is not supported");
+        CPU_NODE_THROW("is not supported");
     }
     }
 }
@@ -1007,6 +999,7 @@ void ScatterUpdate::execute([[maybe_unused]] const dnnl::stream& strm) {
 // and indices tensor of shape [i_0, i_1, ..., i_k].
 // Updates tensor shape should be [d_0, d_1, ... d_(axis - 1), i_0, i_1, ..., i_k, d_(axis + 1), ..., d_n].
 void ScatterUpdate::scatterUpdate(uint8_t* indices, uint8_t* update, int axis, uint8_t* dstData) {
+    const auto& cpu_parallel = context->getCpuParallel();
     const auto& srcDataDim = getParentEdgeAt(DATA_ID)->getMemory().getStaticDims();
     const auto& indicesDim = getParentEdgeAt(INDICES_ID)->getMemory().getStaticDims();
     const auto& updateDim = getParentEdgeAt(UPDATE_ID)->getMemory().getStaticDims();
@@ -1028,7 +1021,7 @@ void ScatterUpdate::scatterUpdate(uint8_t* indices, uint8_t* update, int axis, u
     size_t blockToUpdate = srcBlockND[axis + 1];
     size_t blockToUpdateSize = blockToUpdate * dataSize;
 
-    parallel_for2d(batchToUpdate, idxLength, [&](size_t b, size_t idx) {
+    cpu_parallel->parallel_for2d(batchToUpdate, idxLength, [&](size_t b, size_t idx) {
         int64_t idxValue = getIndicesValue(indices, idx);
         uint8_t* dstEntry = dstData + (b * srcBlockND[axis] + idxValue * blockToUpdate) * dataSize;
         uint8_t* updateEntry = update + (b * updateBlockND[axis] + idx * blockToUpdate) * dataSize;
@@ -1060,6 +1053,7 @@ void ScatterUpdate::scatterNDUpdate(const MemoryPtr& mem_data,
                                     const MemoryPtr& mem_indices,
                                     const MemoryPtr& mem_updates,
                                     [[maybe_unused]] const scatter_reductions::ReduceNone& kernel) {
+    const auto& cpu_parallel = context->getCpuParallel();
     auto* indices = mem_indices->getDataAs<uint8_t>();
     auto* update = mem_updates->getDataAs<uint8_t>();
     auto* dstData = mem_data->getDataAs<uint8_t>();
@@ -1077,7 +1071,7 @@ void ScatterUpdate::scatterNDUpdate(const MemoryPtr& mem_data,
     }
 
     size_t sizeToUpdate = srcBlockND[k] * dataSize;
-    parallel_for(idxTupleNum, [&](size_t tupleIdx) {
+    cpu_parallel->parallel_for(idxTupleNum, [&](size_t tupleIdx) {
         size_t indicesOffset = tupleIdx * k;
         size_t dstOffset = 0;
         for (size_t i = 0; i < k; i++) {
@@ -1086,6 +1080,12 @@ void ScatterUpdate::scatterNDUpdate(const MemoryPtr& mem_data,
                 // Negative value for indices means counting backwards from the end.
                 idxValue += srcDataDim[i];
             }
+            // Exception must be thrown according to the specification: every per-tuple component must
+            // address an existing element of the corresponding data dimension. Without this per-component
+            // check a residually-negative or out-of-range index makes the signed->unsigned multiplication
+            // below wrap around, which can bypass the post-loop guard and lead to out-of-bounds writes.
+            CPU_NODE_ASSERT(idxValue >= 0 && static_cast<size_t>(idxValue) < srcDataDim[i],
+                            " indices contain values that points to non-existing data tensor element");
             dstOffset += idxValue * srcBlockND[i + 1];
         }
 
@@ -1130,6 +1130,12 @@ void ScatterUpdate::scatterNDUpdate(const MemoryPtr& mem_data,
                 // Negative value for indices means counting backwards from the end.
                 idxValue += srcDataDim[i];
             }
+            // Exception must be thrown according to the specification: every per-tuple component must
+            // address an existing element of the corresponding data dimension. Without this per-component
+            // check a residually-negative or out-of-range index makes the signed->unsigned multiplication
+            // below wrap around, which can bypass the post-loop guard and lead to out-of-bounds writes.
+            CPU_NODE_ASSERT(idxValue >= 0 && static_cast<size_t>(idxValue) < srcDataDim[i],
+                            " indices contain values that points to non-existing data tensor element");
             dstOffset += idxValue * srcBlockND[i + 1];
         }
 
@@ -1147,8 +1153,7 @@ void ScatterUpdate::scatterNDUpdate(const MemoryPtr& mem_data,
 }
 
 bool ScatterUpdate::created() const {
-    return getType() == Type::ScatterUpdate || getType() == Type::ScatterElementsUpdate ||
-           getType() == Type::ScatterNDUpdate;
+    return any_of(getType(), Type::ScatterUpdate, Type::ScatterElementsUpdate, Type::ScatterNDUpdate);
 }
 
 }  // namespace ov::intel_cpu::node

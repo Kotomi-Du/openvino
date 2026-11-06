@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -70,8 +70,7 @@ struct CumSumParams {
 class ReferenceCumSumLayerTest : public testing::TestWithParam<CumSumParams>, public CommonReferenceTest {
 public:
     void SetUp() override {
-        legacy_compare = true;
-        auto params = GetParam();
+        const auto& params = GetParam();
         if (params.testDefaults) {
             function = CreateFunction(params.inShape, params.inType);
             inputData = {params.inputData};
@@ -88,7 +87,7 @@ public:
         }
     }
     static std::string getTestCaseName(const testing::TestParamInfo<CumSumParams>& obj) {
-        auto param = obj.param;
+        const auto& param = obj.param;
         std::ostringstream result;
         result << "testDefaults=" << param.testDefaults << "_";
         result << "axisValue=" << param.axisValue << "_";

@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -32,10 +32,11 @@ JitConstants ExtractImagePatchesKernelBase::GetJitConstants(const extract_image_
         MakeJitConstant("RATES_ROWS", params.rates[0]),
         MakeJitConstant("RATES_COLS", params.rates[1]),
     });
-    if (params.auto_pad == "same_upper")
+    if (params.auto_pad == "same_upper") {
         jit.AddConstant(MakeJitConstant("AUTO_PAD", 1));
-    else if (params.auto_pad == "same_lower")
+    } else if (params.auto_pad == "same_lower") {
         jit.AddConstant(MakeJitConstant("AUTO_PAD", 2));
+    }
 
     return jit;
 }
@@ -80,7 +81,7 @@ bool ExtractImagePatchesKernelBase::Validate(const Params& p) const {
     const extract_image_patches_params& params = static_cast<const extract_image_patches_params&>(p);
 
     if (params.GetType() != KernelType::EXTRACT_IMAGE_PATCHES) {
-        return false;
+        DO_NOT_USE_THIS_KERNEL(p.layerID);
     }
 
     return true;

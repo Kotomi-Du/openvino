@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -12,10 +12,7 @@
 
 using namespace ov::op;
 
-namespace ov {
-namespace frontend {
-namespace jax {
-namespace op {
+namespace ov::frontend::jax::op {
 
 OutputVector translate_select_n(const NodeContext& context) {
     num_inputs_check(context, 2);
@@ -40,7 +37,4 @@ OutputVector translate_select_n(const NodeContext& context) {
     return {result};
 };
 
-}  // namespace op
-}  // namespace jax
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::jax::op

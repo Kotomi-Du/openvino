@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -41,7 +41,7 @@ struct space_to_batch_fuse_params : fuse_params {
 class SpaceToBatchKernelBase : public KernelBaseOpenCL {
 public:
     using KernelBaseOpenCL::KernelBaseOpenCL;
-    virtual ~SpaceToBatchKernelBase() {}
+    ~SpaceToBatchKernelBase() override = default;
 
     struct DispatchData : public CommonDispatchData {};
 

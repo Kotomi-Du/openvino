@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -73,15 +73,15 @@
 #define GEMV_INPUT_BLOCK_READ(ptr, offset)  BLOCK_READN(INPUT0_TYPE, INPUT_TILE_SIZE, ptr, offset)
 #define GEMV_FILTER_BLOCK_READ(ptr, offset) BLOCK_READN(FILTER_TYPE, 16, ptr, offset)
 
-inline int get_4bit_weight_index(int k, int n, int K, int N, int OSV) {
+inline int FUNC(get_4bit_weight_index)(int k, int n, int K, int N, int OSV) {
     return (n / OSV) * (OSV * K / 2) + (n % OSV) + (k / 2) * OSV;
 }
 
-inline int get_4bit_weight_index_no_isv(int k, int n, int K, int N, int OSV) {
+inline int FUNC(get_4bit_weight_index_no_isv)(int k, int n, int K, int N, int OSV) {
     return (n / OSV) * (OSV * K / 2) + (k / 2) * OSV;
 }
 
-inline void thread_task_splitter(const int group_num, const int thr_num, const int thr_id, int* n_start, int* n_end) {
+inline void FUNC(thread_task_splitter)(const int group_num, const int thr_num, const int thr_id, int* n_start, int* n_end) {
     if (thr_num <= 1 || group_num == 0) {
         *n_start = 0;
         *n_end = group_num;
@@ -123,7 +123,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     int wi_id = get_sub_group_local_id();  // 0~15
 
     int gk0, gk1;
-    thread_task_splitter(SCALE_GROUP_NUM, thr_num, thr_id, &gk0, &gk1);
+    FUNC_CALL(thread_task_splitter)(SCALE_GROUP_NUM, thr_num, thr_id, &gk0, &gk1);
 
 #    if DECOMPRESSION_ZP_SCALAR
     char zp_scalar_value = (char)(DECOMPRESSION_ZP_VALUE);
@@ -142,7 +142,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     for (int gk = gk0; gk < gk1; gk++) {
         __global INPUT0_TYPE* A = input + gk * DECOMPRESSION_GROUP_SIZE;
         const __global FILTER_TYPE* B =
-            weights + get_4bit_weight_index_no_isv(gk * DECOMPRESSION_GROUP_SIZE, n, WEIGHTS_K, WEIGHTS_N, 16);
+            weights + FUNC_CALL(get_4bit_weight_index_no_isv)(gk * DECOMPRESSION_GROUP_SIZE, n, WEIGHTS_K, WEIGHTS_N, 16);
 
         GEMV_ACCUMULATOR_VEC_TYPE sum = 0;
 #    ifdef SINGLE_GROUP_NUM
@@ -223,7 +223,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     barrier(CLK_LOCAL_MEM_FENCE);
 
     float2 sum_value;
-    sum_value[0] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_even[thr_id]));
+    sum_value[0] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_even[thr_id]));
     sum_value[0] = sub_group_reduce_add(sum_value[0]);
     if (wi_id == 0) {
         int cur_n = n + thr_id;
@@ -252,7 +252,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     int wi_id = get_sub_group_local_id();  // 0~15
 
     int gk0, gk1;
-    thread_task_splitter(SCALE_GROUP_NUM, thr_num, thr_id, &gk0, &gk1);
+    FUNC_CALL(thread_task_splitter)(SCALE_GROUP_NUM, thr_num, thr_id, &gk0, &gk1);
 
 #    if DECOMPRESSION_ZP_SCALAR
     char zp_scalar_value = (char)(DECOMPRESSION_ZP_VALUE);
@@ -271,7 +271,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     for (int gk = gk0; gk < gk1; gk++) {
         __global INPUT0_TYPE* A = input + gk * DECOMPRESSION_GROUP_SIZE;
         const __global FILTER_TYPE* B =
-            weights + get_4bit_weight_index(gk * DECOMPRESSION_GROUP_SIZE, n, WEIGHTS_K, WEIGHTS_N, 32);
+            weights + FUNC_CALL(get_4bit_weight_index)(gk * DECOMPRESSION_GROUP_SIZE, n, WEIGHTS_K, WEIGHTS_N, 32);
 
         GEMV_ACCUMULATOR_VEC_TYPE sum = 0;
 #    ifdef SINGLE_GROUP_NUM
@@ -367,8 +367,8 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     barrier(CLK_LOCAL_MEM_FENCE);
 
     float2 sum_value;
-    sum_value[0] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_even[thr_id]));
-    sum_value[1] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_odd[thr_id]));
+    sum_value[0] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_even[thr_id]));
+    sum_value[1] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_odd[thr_id]));
     sum_value[0] = sub_group_reduce_add(sum_value[0]);
     sum_value[1] = sub_group_reduce_add(sum_value[1]);
 
@@ -403,7 +403,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     int wi_id = get_sub_group_local_id();  // 0~15
 
     int gk0, gk1;
-    thread_task_splitter(SCALE_GROUP_NUM, thr_num, thr_id, &gk0, &gk1);
+    FUNC_CALL(thread_task_splitter)(SCALE_GROUP_NUM, thr_num, thr_id, &gk0, &gk1);
 
     __local float all_sum_0[16][16];  // [wi_id, thr_id]
     __local float all_sum_1[16][16];  // [wi_id, thr_id]
@@ -419,7 +419,7 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     for (int gk = gk0; gk < gk1; gk++) {
         __global INPUT0_TYPE* A = input + gk * DECOMPRESSION_GROUP_SIZE;
         const __global FILTER_TYPE* B =
-            weights + get_4bit_weight_index(gk * DECOMPRESSION_GROUP_SIZE, n, WEIGHTS_K, WEIGHTS_N, 64);
+            weights + FUNC_CALL(get_4bit_weight_index)(gk * DECOMPRESSION_GROUP_SIZE, n, WEIGHTS_K, WEIGHTS_N, 64);
 
         GEMV_ACCUMULATOR_VEC_TYPE sum = 0;
 #    ifdef SINGLE_GROUP_NUM
@@ -563,10 +563,10 @@ __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) KERNEL(fully_connected
     barrier(CLK_LOCAL_MEM_FENCE);
 
     float4 sum_value;
-    sum_value[0] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_0[thr_id]));
-    sum_value[1] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_1[thr_id]));
-    sum_value[2] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_2[thr_id]));
-    sum_value[3] = as_float(intel_sub_group_block_read((const __local uint*)all_sum_3[thr_id]));
+    sum_value[0] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_0[thr_id]));
+    sum_value[1] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_1[thr_id]));
+    sum_value[2] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_2[thr_id]));
+    sum_value[3] = as_float(_sub_group_block_read_slm((const __local uint*)all_sum_3[thr_id]));
 
     for (int i = 0; i < 4; i++) {
         sum_value[i] = sub_group_reduce_add(sum_value[i]);

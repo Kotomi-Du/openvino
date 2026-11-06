@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -9,8 +9,6 @@
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <string>
-#include <utility>
-#include <vector>
 
 #include "cpu_memory.h"
 #include "edge.h"
@@ -19,9 +17,7 @@
 #include "node.h"
 #include "openvino/core/node.hpp"
 
-namespace ov {
-namespace intel_cpu {
-namespace node {
+namespace ov::intel_cpu::node {
 
 class Split : public Node {
 public:
@@ -32,15 +28,15 @@ public:
     void initSupportedPrimitiveDescriptors() override;
     void selectOptimalPrimitiveDescriptor() override;
     void execute(const dnnl::stream& strm) override;
-    bool created() const override;
+    [[nodiscard]] bool created() const override;
 
     void initOptimalPrimitiveDescriptor() override;
 
-    bool neverExecute() const override;
-    bool isExecutable() const override;
+    [[nodiscard]] bool neverExecute() const override;
+    [[nodiscard]] bool isExecutable() const override;
 
-    bool needPrepareParams() const override;
-    bool needShapeInfer() const override;
+    [[nodiscard]] bool needPrepareParams() const override;
+    [[nodiscard]] bool needShapeInfer() const override;
     void prepareParams() override;
     void createPrimitive() override;
     void executeDynamicImpl(const dnnl::stream& strm) override {
@@ -50,7 +46,9 @@ public:
 
 private:
     struct SplitExecutor {
-        virtual void exec(const uint8_t* srcData, const std::vector<uint8_t*>& dstRawMemPtrs) = 0;
+        virtual void exec(const uint8_t* srcData,
+                          const std::vector<uint8_t*>& dstRawMemPtrs,
+                          const CpuParallelPtr& cpuParallel) = 0;
         virtual ~SplitExecutor() = default;
     };
     std::shared_ptr<SplitExecutor> execPtr = nullptr;
@@ -59,8 +57,10 @@ private:
     public:
         SplitOptimizedExecutor(const BlockedMemoryDescCPtr& inDesc,
                                const std::vector<BlockedMemoryDescCPtr>& outDescs,
-                               const size_t axis);
-        void exec(const uint8_t* srcData, const std::vector<uint8_t*>& dstRawMemPtrs) override;
+                               size_t axis);
+        void exec(const uint8_t* srcData,
+                  const std::vector<uint8_t*>& dstRawMemPtrs,
+                  const CpuParallelPtr& cpuParallel) override;
 
     private:
         std::vector<size_t> dataSize;
@@ -70,7 +70,7 @@ private:
     };
 
     void optimizedNspc2Ncsp(size_t MB);
-    std::vector<uint8_t*> getRawDstMemPtrs() const;
+    [[nodiscard]] std::vector<uint8_t*> getRawDstMemPtrs() const;
 
     bool canUseOptimizedNspc2Ncsp = false;
 
@@ -82,6 +82,4 @@ private:
     std::vector<int> splitLengths;
 };
 
-}  // namespace node
-}  // namespace intel_cpu
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

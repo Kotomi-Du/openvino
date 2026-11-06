@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2025 Intel Corporation
+﻿// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -16,7 +16,7 @@ public:
     // kernel name is the id used to find kernel in database while suffix is an optional identifier of specific stage
     // for multi-stage implementations which makes kernel names more clear in any kind of profiles
     explicit KernelGenerator(std::string_view name, std::string_view suffix = "") : m_kernel_name(name), m_stage_suffix(suffix) {}
-    virtual ~KernelGenerator() = default;
+    ~KernelGenerator() override = default;
 
     // Code generator is not supposed to be copied/moved as it's mainly used once to produce KernelData
     // or to query DispatchDataFunc during importing compiled blob. After that generators can be removed

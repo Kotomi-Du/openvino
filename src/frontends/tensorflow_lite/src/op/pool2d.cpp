@@ -1,4 +1,4 @@
-// Copyright (C) 2018-2025 Intel Corporation
+// Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
 
@@ -8,10 +8,7 @@
 
 using namespace std;
 
-namespace ov {
-namespace frontend {
-namespace tensorflow_lite {
-namespace op {
+namespace ov::frontend::tensorflow_lite::op {
 
 OutputVector pooling(const ov::frontend::tensorflow_lite::NodeContext& node,
                      ov::OutputVector (*converter)(const ov::frontend::NodeContext&)) {
@@ -36,7 +33,4 @@ OutputVector avg_pool_2d(const ov::frontend::tensorflow_lite::NodeContext& node)
     return pooling(node, &ov::frontend::tensorflow::op::translate_avg_pool_op);
 }
 
-}  // namespace op
-}  // namespace tensorflow_lite
-}  // namespace frontend
-}  // namespace ov
+}  // namespace ov::frontend::tensorflow_lite::op
