@@ -5,6 +5,7 @@
 #include "fully_connected_inst.h"
 #include "impls/onednn/utils.hpp"
 #include "intel_gpu/primitives/fully_connected.hpp"
+#include "intel_gpu/primitives/input_layout.hpp"
 #include "intel_gpu/runtime/utils.hpp"
 #include "registry/implementation_manager.hpp"
 #include "intel_gpu/runtime/debug_configuration.hpp"
@@ -141,6 +142,8 @@ struct FullyConnectedImplementationManager : public ImplementationManager {
 
     in_out_fmts_t query_formats(const program_node& node) const override {
         assert(node.is_type<fully_connected>());
+        const auto& fc_node = node.as<fully_connected>();
+        const auto& fc_prim = fc_node.get_primitive();
         std::vector<format::type> in_fmts(node.get_dependencies().size(), format::any);
         std::vector<format::type> out_fmts(node.get_outputs_count(), format::any);
 
@@ -148,6 +151,17 @@ struct FullyConnectedImplementationManager : public ImplementationManager {
         for (size_t idx = 0 ; idx < node.get_dependencies().size() ; idx++) {
             if (node.get_dependency(idx).is_constant()) {
                 continue;
+            }
+            const size_t scale_idx = fc_prim->bias.is_valid() ? 3 : 2;
+            const size_t zp_idx = scale_idx + 1;
+            const bool is_decompression_parameter =
+                 ((fc_prim->decompression_scale.is_valid() && idx == scale_idx) ||
+                  (fc_prim->decompression_zero_point.is_valid() && idx == zp_idx));
+            if (is_decompression_parameter) {
+                 in_fmts[idx] = node.get_input_layout(idx).format;
+                 GPU_DEBUG_LOG << node.id() << " : Keep scale/zp parameter format "
+                               << "at index " << idx << std::endl;
+                 continue;
             }
 
             auto target_format = format::get_default_format(out_rank);
